@@ -61,7 +61,10 @@ fn main() {
         app.add_plugins(MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(Duration::ZERO)))
             .add_plugins(bevy::log::LogPlugin::default())
             .add_systems(Startup, sim::spawn_world_headless)
-            .add_systems(Update, (sim::live_step, sim::plant_step, sim::generation_step).chain());
+            .add_systems(
+                Update,
+                (sim::live_step, sim::plant_step, sim::rot_step, sim::generation_step).chain(),
+            );
     } else {
         // Real-time visuals: step in FixedUpdate at the sim rate so sim-time = wall-time.
         app.add_plugins(DefaultPlugins)
@@ -69,7 +72,10 @@ fn main() {
             .add_plugins(camera::FlyCameraPlugin)
             .add_plugins(viz::VizPlugin)
             .add_systems(Startup, (setup_scene, sim::spawn_world_render))
-            .add_systems(FixedUpdate, (sim::live_step, sim::plant_step, sim::generation_step).chain());
+            .add_systems(
+                FixedUpdate,
+                (sim::live_step, sim::plant_step, sim::rot_step, sim::generation_step).chain(),
+            );
     }
 
     app.run();

@@ -12,6 +12,14 @@ pub struct Food;
 #[derive(Component)]
 pub struct FoodKind(pub u8);
 
+// Carrion marker + rot clock. A dead creature drops carrion: fresh = rich meat (no defense), but as
+// `age` climbs its nutrition fades and toxin rises -> rotten meat poisons the eater (BACKLOG P3).
+// Despawns once fully decomposed. Distinguishes carrion from living plants (which carry no Rot).
+#[derive(Component)]
+pub struct Rot {
+    pub age: u32,
+}
+
 // Current energy store. Burns each tick; refilled by eating; death at <=0.
 #[derive(Component)]
 pub struct Energy(pub f32);

@@ -5,7 +5,7 @@
 // All cosmetic; never touches sim state.
 use bevy::prelude::*;
 
-use crate::components::{Creature, Food, Heading};
+use crate::components::{Alive, Creature, Food, Heading};
 use crate::genome::{Genome, NFOOD};
 use crate::plant::{plant_color, PlantGenome, PlantState};
 
@@ -17,7 +17,7 @@ impl Plugin for VizPlugin {
             .add_systems(Startup, log_viz_help)
             .add_systems(
                 Update,
-                (restyle_creatures, toggle_sensors, draw_sensors, add_plant_visuals, size_plants),
+                (restyle_creatures, toggle_sensors, draw_sensors, add_plant_visuals, size_plants, hide_dead),
             );
     }
 }
@@ -39,6 +39,17 @@ fn add_plant_visuals(
         commands
             .entity(e)
             .insert((Mesh3d(mesh.0.clone()), MeshMaterial3d(materials.add(plant_color(g)))));
+    }
+}
+
+// Hide a creature's mesh when it dies (P1.4); restore on rebirth at the generation boundary
+// (Alive flips back true). Its carrion (a separate Food entity) appears in its place.
+fn hide_dead(mut q: Query<(&Alive, &mut Visibility), With<Creature>>) {
+    for (alive, mut vis) in &mut q {
+        let want = if alive.0 { Visibility::Inherited } else { Visibility::Hidden };
+        if *vis != want {
+            *vis = want;
+        }
     }
 }
 

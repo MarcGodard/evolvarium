@@ -3,7 +3,7 @@
 use bevy::prelude::*;
 use std::collections::HashSet;
 
-use crate::components::{Alive, Brain, Creature, DietState, Energy, Fitness, Food, FoodKind, Heading, Locomotion};
+use crate::components::{Alive, Brain, Creature, DietState, Energy, Fitness, Food, FoodKind, Heading, Locomotion, Rot};
 use crate::genome::{forward, learn, Genome, CONE_HALF, GLOBAL_INPUTS, NFOOD, SIG_PER_SENSOR};
 use crate::plant::{PlantGenome, PlantState, P_REPRO, PLANT_CAP, PLANT_MIN};
 use crate::rng::Rng;
@@ -35,6 +35,15 @@ const BITE_COST: f32 = 1.5; // energy/sec maintenance cost of bite strength
 const EAT_GAIN: f32 = 7.0; // energy per (mass * nutrient) consumed
 const SEED_VIA_GUT: f32 = 0.5; // max chance (x quality) an eaten plant disperses an offspring (13)
 const PLANT_START_MASS: f32 = 0.6;
+
+// Rot chain (P3): a dead creature drops carrion. Fresh = rich meat; over ROT_GONE ticks its
+// nutrition fades to 0 and toxin rises to TOXIN_MAX, then it fully decomposes (despawns).
+const CARRION_KIND: u8 = 0; // meat = food type 0 (couples to diet expr only via sensing, not digestion)
+const CARRION_MASS: f32 = 3.0; // a meaty chunk: worth scavenging while fresh
+const CARRION_NUTRIENT: f32 = 0.9; // fresh meat is energy-dense
+const ROT_GONE: u32 = 900; // ticks from death to full decomposition (~15s sim)
+const TOXIN_MAX: f32 = 9.0; // energy hit from eating fully-rotten carrion (poison)
+const TOXIN_G: f32 = 0.15; // growth-load per unit toxin ingested
 const PLANT_REPRO_FRAC: f32 = 0.5; // fraction of mass kept after budding off a child
 
 // Poison mode (--poison): signed eat reward so learners associate type -> approach/avoid.
@@ -221,7 +230,7 @@ pub fn plant_step(
     mut commands: Commands,
     mut rng: ResMut<Rng>,
     gen: Res<GenState>,
-    mut q: Query<(&mut PlantState, &PlantGenome, &Transform)>,
+    mut q: Query<(&mut PlantState, &PlantGenome, &Transform), Without<Rot>>, // living plants only (not carrion)
 ) {
     let mut count = q.iter().len();
     let mut births: Vec<(PlantGenome, Vec3)> = Vec::new();
@@ -251,6 +260,17 @@ pub fn plant_step(
     }
 }
 
+// --- carrion decomposition (P3): age each corpse, shrink its mass, despawn when fully rotted ---
+pub fn rot_step(mut commands: Commands, mut q: Query<(Entity, &mut Rot, &mut PlantState)>) {
+    for (e, mut rot, mut st) in &mut q {
+        rot.age += 1;
+        st.mass = (st.mass - CARRION_MASS / ROT_GONE as f32).max(0.0); // decompose: less to scavenge
+        if rot.age >= ROT_GONE {
+            commands.entity(e).despawn(); // fully decomposed
+        }
+    }
+}
+
 // --- per-tick life: sense -> think -> move -> eat -> metabolism -> learn ---
 pub fn live_step(
     gen: Res<GenState>,
@@ -260,14 +280,15 @@ pub fn live_step(
         (With<Creature>, Without<Food>),
     >,
     mut commands: Commands,
-    fq: Query<(Entity, &Transform, &FoodKind, &PlantState, &PlantGenome), (With<Food>, Without<Creature>)>,
+    fq: Query<(Entity, &Transform, &FoodKind, &PlantState, &PlantGenome, Option<&Rot>), (With<Food>, Without<Creature>)>,
 ) {
     let dt = DT;
     let ntypes = gen.ntypes();
-    // snapshot: (entity, pos, genome, mass). Genome carried so an eaten plant can disperse offspring (13).
-    let foods: Vec<(Entity, Vec3, PlantGenome, f32)> = fq
+    // snapshot: (entity, pos, genome, mass, rot_age). rot_age=Some -> carrion (meat that rots to poison);
+    // None -> living plant. Genome carried so an eaten plant can disperse offspring (13).
+    let foods: Vec<(Entity, Vec3, PlantGenome, f32, Option<u32>)> = fq
         .iter()
-        .map(|(e, t, _k, st, pg)| (e, t.translation, pg.clone(), st.mass))
+        .map(|(e, t, _k, st, pg, rot)| (e, t.translation, pg.clone(), st.mass, rot.map(|r| r.age)))
         .collect();
     let mut eaten: HashSet<Entity> = HashSet::new();
 
@@ -356,32 +377,47 @@ pub fn live_step(
         if let Some((i, _)) = best {
             let (e, fp, mass) = (foods[i].0, foods[i].1, foods[i].3);
             let pg = foods[i].2.clone();
+            let rot_age = foods[i].4;
             if np.distance(fp) < EAT_RADIUS {
                 let success = rng.f32() < sigmoid(BITE_K * (genome.bite - pg.defense));
                 if success {
-                    // quality scales extractable energy: factor 0.5..1.5, ~1.0 at quality 0.5 (balance-neutral)
-                    let base = mass * pg.nutrient * (0.5 + pg.quality);
-                    if gen.diet {
-                        let t = pg.kind as usize;
-                        let eff = diet.expr[t];
-                        energy.0 += EAT_GAIN * base * eff;
-                        fit.0 += base * eff;
-                        let rate = 1.0 - genome.rigidity;
-                        diet.expr[t] += EXPR_RAMP * rate * (1.0 - diet.expr[t]);
-                        for j in 0..NFOOD {
-                            if j != t {
-                                diet.expr[j] -= EXPR_DECAY * rate * diet.expr[j];
-                            }
-                        }
-                        if eff < 0.5 {
-                            diet.g += G_GAIN * (0.5 - eff);
-                            energy.0 -= MISMATCH_STRESS;
-                        }
-                        eat_reward = (eff - 0.5) * 4.0;
+                    if let Some(age) = rot_age {
+                        // CARRION (P3): fresh meat is rich + defense-free; as it rots, nutrition fades and
+                        // toxin rises -> eating rotten meat poisons you. Not gated by diet expr (meat is
+                        // universally digestible) and never disperses seeds.
+                        let f = (age as f32 / ROT_GONE as f32).clamp(0.0, 1.0); // 0 fresh .. 1 rotten
+                        let meat = mass * pg.nutrient * (1.0 - f);
+                        let toxin = TOXIN_MAX * f;
+                        energy.0 += EAT_GAIN * meat;
+                        fit.0 += meat;
+                        energy.0 -= toxin;
+                        diet.g += toxin * TOXIN_G;
+                        eat_reward = 1.0 - 2.0 * f; // fresh -> +1 (good), rotten -> -1 (avoid)
                     } else {
-                        energy.0 += EAT_GAIN * base;
-                        fit.0 += base;
-                        eat_reward = R_EAT;
+                        // quality scales extractable energy: factor 0.5..1.5, ~1.0 at quality 0.5 (balance-neutral)
+                        let base = mass * pg.nutrient * (0.5 + pg.quality);
+                        if gen.diet {
+                            let t = pg.kind as usize;
+                            let eff = diet.expr[t];
+                            energy.0 += EAT_GAIN * base * eff;
+                            fit.0 += base * eff;
+                            let rate = 1.0 - genome.rigidity;
+                            diet.expr[t] += EXPR_RAMP * rate * (1.0 - diet.expr[t]);
+                            for j in 0..NFOOD {
+                                if j != t {
+                                    diet.expr[j] -= EXPR_DECAY * rate * diet.expr[j];
+                                }
+                            }
+                            if eff < 0.5 {
+                                diet.g += G_GAIN * (0.5 - eff);
+                                energy.0 -= MISMATCH_STRESS;
+                            }
+                            eat_reward = (eff - 0.5) * 4.0;
+                        } else {
+                            energy.0 += EAT_GAIN * base;
+                            fit.0 += base;
+                            eat_reward = R_EAT;
+                        }
                     }
                     // overeating trade-off (12): energy is capped; eating while already full converts
                     // the excess into growth-load (harm) -> gorging shortens life. Eat best, in moderation.
@@ -392,9 +428,9 @@ pub fn live_step(
                     }
                     commands.entity(e).despawn();
                     eaten.insert(e);
-                    // endozoochory (13): an eaten plant may disperse a mutated offspring near the eater.
-                    // Chance scales with quality -> tasty plants pay slower growth but win dispersal.
-                    if foods.len() < PLANT_CAP && rng.f32() < pg.quality * SEED_VIA_GUT {
+                    // endozoochory (13): an eaten LIVING plant may disperse a mutated offspring near the
+                    // eater. Chance scales with quality -> tasty plants pay slower growth but win dispersal.
+                    if rot_age.is_none() && foods.len() < PLANT_CAP && rng.f32() < pg.quality * SEED_VIA_GUT {
                         let mut child = pg.clone();
                         child.mutate(&mut rng);
                         let off =
@@ -440,6 +476,28 @@ pub fn live_step(
         if energy.0 <= 0.0 {
             alive.0 = false;
         }
+
+        // died this tick (loop skips already-dead creatures at the top) -> drop carrion here, which
+        // rots into poison (rot_step). Closes part of the nutrient loop: death feeds the food web (P3).
+        if !alive.0 {
+            let cp = ct.translation;
+            let p = Vec3::new(cp.x, FOOD_Y + crate::terrain::height(cp.x, cp.z), cp.z);
+            commands.spawn((
+                Food,
+                FoodKind(CARRION_KIND),
+                PlantState { mass: CARRION_MASS, age: 0 },
+                PlantGenome {
+                    kind: CARRION_KIND,
+                    nutrient: CARRION_NUTRIENT,
+                    defense: 0.0,  // meat has no bite-defense: easy to scavenge while fresh
+                    quality: 0.0,  // unused for carrion (separate eat branch); never disperses
+                    spread: 0.0,
+                    maturity: 999.0, // never reproduces via plant_step (also excluded by Without<Rot>)
+                },
+                Rot { age: 0 },
+                Transform::from_translation(p),
+            ));
+        }
     }
     // eaten plants are despawned above; population is replenished by plant_step (reproduction).
 }
@@ -456,7 +514,7 @@ pub fn generation_step(
         (&mut Transform, &mut Energy, &mut Fitness, &mut Heading, &mut Alive, &mut Genome, &mut Brain, &mut DietState, &mut Locomotion),
         With<Creature>,
     >,
-    pq: Query<(&PlantGenome, &PlantState)>,
+    pq: Query<(&PlantGenome, &PlantState), Without<Rot>>, // living plants only (carrion excluded from stats/save)
     mut exit: MessageWriter<AppExit>,
 ) {
     gen.ticks_left = gen.ticks_left.saturating_sub(1);

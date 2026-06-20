@@ -15,7 +15,8 @@ verify headless, commit on `build` with a clear message, then tick the item here
       that rewards stillness. Aim: aimless circling becomes costly, purposeful move+rest emerges.
 - [x] **Overeating penalty.** Cap energy; eating at/near max converts the excess into growth-load G
       (harm), so gorging shortens life. Pressure to eat the BEST food in moderation, not constantly.
-- [ ] **Remove dead creatures visually.** On death, despawn (or hide) the creature mesh in render.
+- [x] **Remove dead creatures visually.** viz::hide_dead sets Visibility::Hidden when Alive(false),
+      restores on rebirth at the gen boundary. Carrion (a Food entity) appears in the corpse's place.
 
 ## P2 — persistence + food GA
 - [x] **Save / load survivors.** `--save=<path>` writes the fitness-ranked survivor genomes + current
@@ -35,8 +36,12 @@ verify headless, commit on `build` with a clear message, then tick the item here
       DESCEND_REFUND*dh (< cost -> net dissipative, no free lunch). Render shows a heightmesh.
       Verified headless: viable across seeds; roam ratio ROSE ~0.2 -> ~0.45 (relief reduces circling).
       `elev` added to gen log. (Future: tie altitude to a benefit so high ground is worth the climb.)
-- [ ] **Rot chain.** Dead creatures become carrion (edible), then rot to POISON over time; dead plants
-      → poison too. ("Make things rot.") Feeds the nutrient cycle (conservation, spec 05).
+- [~] **Rot chain.** DONE for creatures: death drops carrion (Rot component) = fresh defense-free meat;
+      over ROT_GONE ticks nutrition fades to 0 and toxin rises to TOXIN_MAX (eating rotten meat poisons
+      you + adds growth-load), then it despawns. Carrion is a Food entity (sensed/eaten via the normal
+      path, separate eat branch, excluded from plant cap/stats/dispersal). Emergent: a SCAVENGING niche
+      (survive on carrion instead of the bite-vs-defense arms race). PENDING: dead PLANTS → poison —
+      needs plant mortality first (plants currently only die by being eaten); folds into the rain item.
 - [ ] **Environmental pressure on plants.** Rain/moisture field: too much or too little kills plants
       (and they rot to poison). Needs weather/field machinery (spec 06).
 
