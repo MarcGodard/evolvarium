@@ -28,10 +28,12 @@ fn main() {
     let headless = args.iter().any(|a| a == "--headless");
     let learn = !args.iter().any(|a| a == "--nolearn"); // lifetime learning on by default
     let poison = args.iter().any(|a| a == "--poison"); // legacy: two food types (sets ntypes=2)
-    let diet = args.iter().any(|a| a == "--diet"); // epigenetic diet model (NFOOD types)
-    // --continuous = experimental continuous reproduction (warm-up then birth/death); default is the
-    // robust discrete-generation GA. Continuous is stable on some seeds but not yet all (balance WIP).
-    let continuous = args.iter().any(|a| a == "--continuous");
+    // Epigenetic diet model (NFOOD food types + instincts) is ON by default; --no-diet for the simple
+    // single-food world. (--poison still forces the legacy 2-type mode when --no-diet is set.)
+    let diet = !args.iter().any(|a| a == "--no-diet") && !poison;
+    // Continuous reproduction (self-sustaining birth/death after a short warm-up) is the DEFAULT now
+    // that it is stable + robust cross-seed. --generational opts into the discrete-generation GA instead.
+    let continuous = !args.iter().any(|a| a == "--generational");
     let seed = args
         .iter()
         .find_map(|a| a.strip_prefix("--seed=").and_then(|s| s.parse::<u64>().ok()))

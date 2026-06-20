@@ -236,24 +236,34 @@ fn spawn_plant(commands: &mut Commands, g: PlantGenome, mass: f32, pos: Vec3) {
 // --- spawn ---
 
 // Headless: components only, no render assets (absent under MinimalPlugins).
-pub fn spawn_world_headless(mut commands: Commands, mut rng: ResMut<Rng>, gen: Res<GenState>) {
+pub fn spawn_world_headless(mut commands: Commands, mut rng: ResMut<Rng>, mut gen: ResMut<GenState>) {
     // --load resumes a saved population; otherwise a random founding pop. Positions re-randomized.
     let snap = gen.load.as_deref().and_then(crate::persist::load_snapshot);
     let genomes: Vec<Genome> = match &snap {
         Some(s) if !s.creatures.is_empty() => s.creatures.clone(),
         _ => (0..POP).map(|_| Genome::random(&mut rng)).collect(),
     };
+    // loading a saved population into continuous mode skips the warm-up (the genomes are already
+    // competent) -> drop straight into a living world. Desync energy + age so they don't act in lockstep.
+    let skip_warmup = gen.continuous && snap.as_ref().map_or(false, |s| !s.creatures.is_empty());
+    if skip_warmup {
+        gen.generation = WARMUP_GENS;
+    }
     for g in genomes {
         let p = rand_pos(&mut rng, CREATURE_Y);
         let h = rng.range(-std::f32::consts::PI, std::f32::consts::PI);
         let brain = Brain { net: g.net.clone(), prev_dist: f32::INFINITY };
-        let diet = diet_state(&g);
+        let mut diet = diet_state(&g);
+        if skip_warmup {
+            diet.age = (rng.f32() * 600.0) as u32;
+        }
+        let e = if skip_warmup { rng.range(0.7, 1.2) * START_ENERGY } else { START_ENERGY };
         commands.spawn((
             Creature,
             g,
             brain,
             diet,
-            Energy(START_ENERGY),
+            Energy(e),
             Fitness(0.0),
             Heading(h),
             Alive(true),
@@ -300,7 +310,7 @@ fn spawn_trees(commands: &mut Commands, rng: &mut Rng) {
 pub fn spawn_world_render(
     mut commands: Commands,
     mut rng: ResMut<Rng>,
-    gen: Res<GenState>,
+    mut gen: ResMut<GenState>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
@@ -319,11 +329,21 @@ pub fn spawn_world_render(
         Some(s) if !s.creatures.is_empty() => s.creatures.clone(),
         _ => (0..POP).map(|_| Genome::random(&mut rng)).collect(),
     };
+    // loading a saved population into continuous mode skips warm-up (genomes already competent) ->
+    // drop straight into a living world. Desync energy + age so they don't act in lockstep.
+    let skip_warmup = gen.continuous && snap.as_ref().map_or(false, |s| !s.creatures.is_empty());
+    if skip_warmup {
+        gen.generation = WARMUP_GENS;
+    }
     for g in genomes {
         let p = rand_pos(&mut rng, CREATURE_Y);
         let h = rng.range(-std::f32::consts::PI, std::f32::consts::PI);
         let brain = Brain { net: g.net.clone(), prev_dist: f32::INFINITY };
-        let diet = diet_state(&g);
+        let mut diet = diet_state(&g);
+        if skip_warmup {
+            diet.age = (rng.f32() * 600.0) as u32;
+        }
+        let e = if skip_warmup { rng.range(0.7, 1.2) * START_ENERGY } else { START_ENERGY };
         // own material per creature so viz can recolor it by evolved traits (see viz.rs)
         let mat = materials.add(Color::srgb(0.9, 0.6, 0.3));
         commands.spawn((
@@ -331,7 +351,7 @@ pub fn spawn_world_render(
             g,
             brain,
             diet,
-            Energy(START_ENERGY),
+            Energy(e),
             Fitness(0.0),
             Heading(h),
             Alive(true),
