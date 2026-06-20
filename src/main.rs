@@ -89,10 +89,14 @@ fn setup_scene(
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     let span = sim::WORLD_HALF * 2.0 + 4.0;
-    // heightfield terrain (P3) instead of a flat plane, so the elevation is visible
+    // heightfield terrain (P3): elevation-shaded landscape (vertex colors), white base lets them show
     commands.spawn((
-        Mesh3d(meshes.add(terrain::build_mesh(span, 96))),
-        MeshMaterial3d(materials.add(Color::srgb(0.25, 0.4, 0.28))),
+        Mesh3d(meshes.add(terrain::build_mesh(span, 140))),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::WHITE,
+            perceptual_roughness: 0.95,
+            ..default()
+        })),
         Transform::from_xyz(0.0, 0.0, 0.0),
     ));
     commands.spawn((

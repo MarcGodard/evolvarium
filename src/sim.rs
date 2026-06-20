@@ -9,9 +9,9 @@ use crate::plant::{PlantGenome, PlantState, P_REPRO, PLANT_CAP, PLANT_MIN};
 use crate::rng::Rng;
 
 // --- tuning (god-tunable later, see 07) ---
-pub const POP: usize = 60;
-pub const FOOD: usize = 80;
-pub const WORLD_HALF: f32 = 25.0; // square arena [-H, H] in x,z
+pub const POP: usize = 90;
+pub const FOOD: usize = 200;
+pub const WORLD_HALF: f32 = 40.0; // square arena [-H, H] in x,z (bigger playground)
 pub const GEN_TICKS: u32 = 1500; // fixed-steps per generation
 pub const MAX_GEN_HEADLESS: u32 = 40; // headless stops after this many gens
 
