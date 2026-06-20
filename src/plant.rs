@@ -17,6 +17,7 @@ pub struct PlantGenome {
     pub kind: u8,      // food/diet type (couples to creature expression, see 12)
     pub nutrient: f32, // 0..1 energy density delivered when eaten
     pub defense: f32,  // 0..1 resistance to being eaten (vs creature bite)
+    pub quality: f32,  // 0..1 digestibility: scales energy the eater extracts AND seed-dispersal-on-eat (13)
     pub spread: f32,   // offspring dispersal distance
     pub maturity: f32, // mass needed before it can reproduce
 }
@@ -34,6 +35,7 @@ impl PlantGenome {
             kind: ((rng.f32() * ntypes as f32) as u8).min(ntypes.saturating_sub(1)),
             nutrient: rng.f32(),
             defense: rng.f32() * 0.5,
+            quality: rng.f32(),
             spread: rng.range(2.0, 8.0),
             maturity: rng.range(2.0, 6.0),
         }
@@ -46,15 +48,19 @@ impl PlantGenome {
         }
         self.nutrient = (self.nutrient + rng.normal() * 0.1).clamp(0.0, 1.0);
         self.defense = (self.defense + rng.normal() * 0.1).clamp(0.0, 1.0);
+        self.quality = (self.quality + rng.normal() * 0.1).clamp(0.0, 1.0);
         self.spread = (self.spread + rng.normal() * 1.0).clamp(1.0, 12.0);
         self.maturity = (self.maturity + rng.normal() * 0.8).clamp(1.5, 10.0);
     }
 
-    // Investing in nutrient richness and defense slows growth (no free lunch, see 10).
+    // Investing in nutrient richness, defense, and digestible quality slows growth (no free lunch, 10).
     // Defense penalty is QUADRATIC: cheap when light, crippling when maxed -> bounds the arms race so
-    // plants can't armor up to ~1.0 for free (balance lever, iter 1).
+    // plants can't armor up to ~1.0 for free (balance lever, iter 1). Quality (palatable soft tissue)
+    // costs growth too; its payoff is dispersal-on-eat (13), so quality reaches an interior optimum.
     pub fn growth_rate(&self) -> f32 {
-        GROWTH_BASE * (1.0_f32 - 0.3 * self.nutrient - 0.85 * self.defense * self.defense).clamp(0.12, 1.0)
+        GROWTH_BASE
+            * (1.0_f32 - 0.3 * self.nutrient - 0.85 * self.defense * self.defense - 0.2 * self.quality)
+                .clamp(0.12, 1.0)
     }
 }
 
@@ -69,5 +75,6 @@ pub fn plant_color(g: &PlantGenome) -> Color {
     };
     let hue = base_hue - 40.0 * g.defense; // tougher plants shift toward warmer/red
     let light = 0.35 + 0.35 * g.nutrient; // richer plants brighter
-    Color::hsl(hue, 0.7, light)
+    let sat = 0.35 + 0.55 * g.quality; // tastier (digestible) plants more vivid; tough/fibrous = washed out
+    Color::hsl(hue, sat, light)
 }

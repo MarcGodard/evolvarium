@@ -29,6 +29,7 @@ const OVEREAT_G: f32 = 0.2; // growth-load gained per unit of energy eaten while
 const BITE_K: f32 = 8.0;
 const BITE_COST: f32 = 1.5; // energy/sec maintenance cost of bite strength
 const EAT_GAIN: f32 = 7.0; // energy per (mass * nutrient) consumed
+const SEED_VIA_GUT: f32 = 0.5; // max chance (x quality) an eaten plant disperses an offspring (13)
 const PLANT_START_MASS: f32 = 0.6;
 const PLANT_REPRO_FRAC: f32 = 0.5; // fraction of mass kept after budding off a child
 
@@ -257,10 +258,10 @@ pub fn live_step(
 ) {
     let dt = DT;
     let ntypes = gen.ntypes();
-    // snapshot: (entity, pos, kind, mass, nutrient, defense)
-    let foods: Vec<(Entity, Vec3, u8, f32, f32, f32)> = fq
+    // snapshot: (entity, pos, genome, mass). Genome carried so an eaten plant can disperse offspring (13).
+    let foods: Vec<(Entity, Vec3, PlantGenome, f32)> = fq
         .iter()
-        .map(|(e, t, k, st, pg)| (e, t.translation, k.0, st.mass, pg.nutrient, pg.defense))
+        .map(|(e, t, _k, st, pg)| (e, t.translation, pg.clone(), st.mass))
         .collect();
     let mut eaten: HashSet<Entity> = HashSet::new();
 
@@ -301,7 +302,7 @@ pub fn live_step(
                 let bearing = wrap_angle(to.x.atan2(to.z) - head.0);
                 if wrap_angle(bearing - s.angle).abs() <= CONE_HALF && dist < sd {
                     sd = dist;
-                    skind = f.2;
+                    skind = f.2.kind;
                 }
             }
             if sd.is_finite() {
@@ -342,13 +343,15 @@ pub fn live_step(
         // eat nearest plant on contact, IF bite beats its defense (arms race, see 13)
         let mut eat_reward = 0.0;
         if let Some((i, _)) = best {
-            let (e, fp, k, mass, nutrient, defense) = foods[i];
+            let (e, fp, mass) = (foods[i].0, foods[i].1, foods[i].3);
+            let pg = foods[i].2.clone();
             if np.distance(fp) < EAT_RADIUS {
-                let success = rng.f32() < sigmoid(BITE_K * (genome.bite - defense));
+                let success = rng.f32() < sigmoid(BITE_K * (genome.bite - pg.defense));
                 if success {
-                    let base = mass * nutrient; // raw nutrition held in this plant
+                    // quality scales extractable energy: factor 0.5..1.5, ~1.0 at quality 0.5 (balance-neutral)
+                    let base = mass * pg.nutrient * (0.5 + pg.quality);
                     if gen.diet {
-                        let t = k as usize;
+                        let t = pg.kind as usize;
                         let eff = diet.expr[t];
                         energy.0 += EAT_GAIN * base * eff;
                         fit.0 += base * eff;
@@ -378,6 +381,19 @@ pub fn live_step(
                     }
                     commands.entity(e).despawn();
                     eaten.insert(e);
+                    // endozoochory (13): an eaten plant may disperse a mutated offspring near the eater.
+                    // Chance scales with quality -> tasty plants pay slower growth but win dispersal.
+                    if foods.len() < PLANT_CAP && rng.f32() < pg.quality * SEED_VIA_GUT {
+                        let mut child = pg.clone();
+                        child.mutate(&mut rng);
+                        let off =
+                            Vec3::new(rng.range(-pg.spread, pg.spread), 0.0, rng.range(-pg.spread, pg.spread));
+                        let mut sp = np + off;
+                        sp.x = sp.x.clamp(-WORLD_HALF, WORLD_HALF);
+                        sp.z = sp.z.clamp(-WORLD_HALF, WORLD_HALF);
+                        sp.y = FOOD_Y;
+                        spawn_plant(&mut commands, child, PLANT_START_MASS, sp);
+                    }
                 }
                 // failed bite: the plant's defense held; it survives this contact
             }
@@ -470,11 +486,12 @@ pub fn generation_step(
     let plant_n = pq.iter().len().max(1);
     let avg_def: f32 = pq.iter().map(|(g, _)| g.defense).sum::<f32>() / plant_n as f32;
     let avg_nut: f32 = pq.iter().map(|(g, _)| g.nutrient).sum::<f32>() / plant_n as f32;
+    let avg_qual: f32 = pq.iter().map(|(g, _)| g.quality).sum::<f32>() / plant_n as f32;
     if gen.diet {
         let avg_rig: f32 = scored.iter().map(|(_, g)| g.rigidity).sum::<f32>() / n as f32;
-        info!("gen {:>3} | nutri {:>6.2} | sens {:.1} | rig {:.2} | bite {:.2} vs def {:.2} | plant-nut {:.2} | roam {:.2} | plants {}", gen.generation, avg, avg_sensors, avg_rig, avg_bite, avg_def, avg_nut, avg_roam, plant_n);
+        info!("gen {:>3} | nutri {:>6.2} | sens {:.1} | rig {:.2} | bite {:.2} vs def {:.2} | plant-nut {:.2} qual {:.2} | roam {:.2} | plants {}", gen.generation, avg, avg_sensors, avg_rig, avg_bite, avg_def, avg_nut, avg_qual, avg_roam, plant_n);
     } else {
-        info!("gen {:>3} | food {:>6.2} | sens {:.1} | bite {:.2} vs def {:.2} | plant-nut {:.2} | roam {:.2} | plants {}", gen.generation, avg, avg_sensors, avg_bite, avg_def, avg_nut, avg_roam, plant_n);
+        info!("gen {:>3} | food {:>6.2} | sens {:.1} | bite {:.2} vs def {:.2} | plant-nut {:.2} qual {:.2} | roam {:.2} | plants {}", gen.generation, avg, avg_sensors, avg_bite, avg_def, avg_nut, avg_qual, avg_roam, plant_n);
     }
 
     // elite pool (clone+mutate, asexual)

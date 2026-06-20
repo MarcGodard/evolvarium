@@ -22,9 +22,12 @@ verify headless, commit on `build` with a clear message, then tick the item here
       food web (plant genomes + mass) to JSON at headless run end; `--load=<path>` resumes from it
       (random spawn if missing/corrupt). Verified: resume opens at evolved fitness, not cold-start.
       Positions re-randomized (only genes persist). persist.rs + serde/serde_json.
-- [ ] **Per-food digestibility GA.** Make some foods intrinsically more GA-beneficial: e.g. a plant
-      `quality` gene that boosts a creature's digestion efficiency, and/or a heritable creature
-      per-food digestion gene beyond the lifetime `expr`. Clarify vs existing diet model first.
+- [x] **Per-food digestibility GA.** Plant `quality` gene (0..1) scales energy the eater extracts
+      (factor 0.5..1.5, balance-neutral at 0.5). Trade-off (no free lunch): quality costs growth
+      (-0.2 in growth_rate) AND, when eaten, the eater disperses a mutated offspring (endozoochory,
+      chance = quality x SEED_VIA_GUT) -> tasty plants lose individuals but win dispersal. Result:
+      quality evolves to an INTERIOR optimum (~0.3-0.5 across seeds), not pegged 0/1. Plant-side only;
+      did NOT touch creature genome/learning. (0.2 growth-cost + 0.5 SEED_VIA_GUT are tunable.)
 
 ## P3 — environment (the "environment stuff") — bigger; needs the fields system (spec 06)
 - [ ] **Elevation + climbing/falling.** Add terrain height; moving uphill costs more energy, downhill
