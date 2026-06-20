@@ -6,6 +6,7 @@ use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
 pub const HEIGHT_MAX: f32 = 8.0; // peak terrain elevation (world units)
+pub const WATER_LEVEL: f32 = 1.5; // y below which low basins flood (render water plane sits here)
 
 // Terrain color by height (wet valley green -> grass -> rocky tan), shifting to sand in arid zones
 // (low moisture = desert). Makes both relief AND biomes readable at a glance.

@@ -93,6 +93,17 @@ fn setup_scene(
         })),
         Transform::from_xyz(0.0, 0.0, 0.0),
     ));
+    // translucent water surface: floods low basins below WATER_LEVEL (valleys/desert sinks)
+    commands.spawn((
+        Mesh3d(meshes.add(Plane3d::default().mesh().size(span, span))),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::srgba(0.18, 0.42, 0.62, 0.6),
+            alpha_mode: AlphaMode::Blend,
+            perceptual_roughness: 0.1, // calm, reflective
+            ..default()
+        })),
+        Transform::from_xyz(0.0, terrain::WATER_LEVEL, 0.0),
+    ));
     commands.spawn((
         DirectionalLight { shadows_enabled: true, ..default() },
         Transform::from_xyz(20.0, 40.0, 20.0).looking_at(Vec3::ZERO, Vec3::Y),
