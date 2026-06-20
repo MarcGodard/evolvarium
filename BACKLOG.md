@@ -30,8 +30,11 @@ verify headless, commit on `build` with a clear message, then tick the item here
       did NOT touch creature genome/learning. (0.2 growth-cost + 0.5 SEED_VIA_GUT are tunable.)
 
 ## P3 — environment (the "environment stuff") — bigger; needs the fields system (spec 06)
-- [ ] **Elevation + climbing/falling.** Add terrain height; moving uphill costs more energy, downhill
-      less (gradient energy loss). Gives a real 3D range of motion.
+- [x] **Elevation + climbing/falling.** terrain.rs heightfield (sinusoidal hills, HEIGHT_MAX 6);
+      creatures/plants ride the surface. Moving uphill burns CLIMB_COST*dh, downhill refunds
+      DESCEND_REFUND*dh (< cost -> net dissipative, no free lunch). Render shows a heightmesh.
+      Verified headless: viable across seeds; roam ratio ROSE ~0.2 -> ~0.45 (relief reduces circling).
+      `elev` added to gen log. (Future: tie altitude to a benefit so high ground is worth the climb.)
 - [ ] **Rot chain.** Dead creatures become carrion (edible), then rot to POISON over time; dead plants
       → poison too. ("Make things rot.") Feeds the nutrient cycle (conservation, spec 05).
 - [ ] **Environmental pressure on plants.** Rain/moisture field: too much or too little kills plants

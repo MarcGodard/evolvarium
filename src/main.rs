@@ -15,6 +15,7 @@ mod persist;
 mod plant;
 mod rng;
 mod sim;
+mod terrain;
 mod viz;
 
 use bevy::app::ScheduleRunnerPlugin;
@@ -81,8 +82,9 @@ fn setup_scene(
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     let span = sim::WORLD_HALF * 2.0 + 4.0;
+    // heightfield terrain (P3) instead of a flat plane, so the elevation is visible
     commands.spawn((
-        Mesh3d(meshes.add(Plane3d::default().mesh().size(span, span))),
+        Mesh3d(meshes.add(terrain::build_mesh(span, 96))),
         MeshMaterial3d(materials.add(Color::srgb(0.25, 0.4, 0.28))),
         Transform::from_xyz(0.0, 0.0, 0.0),
     ));

@@ -20,6 +20,10 @@ const BASAL_COST: f32 = 1.4; // energy/sec just to live (low -> resting is genui
 const MOVE_COST: f32 = 6.0; // movement cost scales with thrust^2 (sprinting dear, gentle motion cheap)
 const MOVE_SPEED: f32 = 9.0; // units/sec at full thrust
 const TURN_SPEED: f32 = 3.0; // rad/sec at full turn
+// Elevation (P3): climbing burns energy per unit height gained; descending refunds less than the
+// climb cost so a round trip is a net loss (dissipative, no free lunch -> high ground is "expensive").
+const CLIMB_COST: f32 = 1.2;
+const DESCEND_REFUND: f32 = 0.4;
 const EAT_RADIUS: f32 = 1.1;
 const FOOD_VALUE: f32 = 14.0;
 const ENERGY_MAX: f32 = 60.0; // energy ceiling; eating past it harms (overeating trade-off, see 12)
@@ -88,7 +92,9 @@ impl GenState {
 }
 
 fn rand_pos(rng: &mut Rng, y: f32) -> Vec3 {
-    Vec3::new(rng.range(-WORLD_HALF, WORLD_HALF), y, rng.range(-WORLD_HALF, WORLD_HALF))
+    let x = rng.range(-WORLD_HALF, WORLD_HALF);
+    let z = rng.range(-WORLD_HALF, WORLD_HALF);
+    Vec3::new(x, y + crate::terrain::height(x, z), z) // sit on the terrain surface (P3)
 }
 
 fn diet_state(g: &Genome) -> DietState {
@@ -229,7 +235,7 @@ pub fn plant_step(
             let mut pos = tf.translation + off;
             pos.x = pos.x.clamp(-WORLD_HALF, WORLD_HALF);
             pos.z = pos.z.clamp(-WORLD_HALF, WORLD_HALF);
-            pos.y = FOOD_Y;
+            pos.y = FOOD_Y + crate::terrain::height(pos.x, pos.z);
             births.push((child, pos));
             st.mass *= PLANT_REPRO_FRAC;
         }
@@ -332,8 +338,13 @@ pub fn live_step(
         let mut np = pos + dir * (thrust * MOVE_SPEED * dt);
         np.x = np.x.clamp(-WORLD_HALF, WORLD_HALF);
         np.z = np.z.clamp(-WORLD_HALF, WORLD_HALF);
-        np.y = CREATURE_Y;
-        loco.path += np.distance(pos); // accumulate distance walked (diagnostic)
+        // ride the terrain; pay for elevation change (P3): uphill costs, downhill partially refunds
+        let h0 = crate::terrain::height(pos.x, pos.z);
+        let h1 = crate::terrain::height(np.x, np.z);
+        np.y = CREATURE_Y + h1;
+        let dh = h1 - h0;
+        energy.0 -= if dh > 0.0 { CLIMB_COST * dh } else { DESCEND_REFUND * dh };
+        loco.path += np.distance(pos); // accumulate 3D distance walked (diagnostic)
         ct.translation = np;
         ct.rotation = Quat::from_rotation_y(head.0);
 
@@ -391,7 +402,7 @@ pub fn live_step(
                         let mut sp = np + off;
                         sp.x = sp.x.clamp(-WORLD_HALF, WORLD_HALF);
                         sp.z = sp.z.clamp(-WORLD_HALF, WORLD_HALF);
-                        sp.y = FOOD_Y;
+                        sp.y = FOOD_Y + crate::terrain::height(sp.x, sp.z);
                         spawn_plant(&mut commands, child, PLANT_START_MASS, sp);
                     }
                 }
@@ -477,6 +488,15 @@ pub fn generation_step(
     }
     let avg_roam = if roam_n > 0 { roam_sum / roam_n as f32 } else { 0.0 };
 
+    // avg terrain elevation creatures occupy at gen end (P3 diagnostic): are they spreading over relief?
+    let mut elev_sum = 0.0f32;
+    let mut elev_n = 0u32;
+    for it in cq.iter() {
+        elev_sum += it.0.translation.y - CREATURE_Y;
+        elev_n += 1;
+    }
+    let avg_elev = if elev_n > 0 { elev_sum / elev_n as f32 } else { 0.0 };
+
     let n = scored.len().max(1);
     let avg: f32 = scored.iter().map(|(f, _)| f).sum::<f32>() / n as f32;
     let best = scored.first().map(|(f, _)| *f).unwrap_or(0.0);
@@ -489,9 +509,9 @@ pub fn generation_step(
     let avg_qual: f32 = pq.iter().map(|(g, _)| g.quality).sum::<f32>() / plant_n as f32;
     if gen.diet {
         let avg_rig: f32 = scored.iter().map(|(_, g)| g.rigidity).sum::<f32>() / n as f32;
-        info!("gen {:>3} | nutri {:>6.2} | sens {:.1} | rig {:.2} | bite {:.2} vs def {:.2} | plant-nut {:.2} qual {:.2} | roam {:.2} | plants {}", gen.generation, avg, avg_sensors, avg_rig, avg_bite, avg_def, avg_nut, avg_qual, avg_roam, plant_n);
+        info!("gen {:>3} | nutri {:>6.2} | sens {:.1} | rig {:.2} | bite {:.2} vs def {:.2} | plant-nut {:.2} qual {:.2} | roam {:.2} elev {:.1} | plants {}", gen.generation, avg, avg_sensors, avg_rig, avg_bite, avg_def, avg_nut, avg_qual, avg_roam, avg_elev, plant_n);
     } else {
-        info!("gen {:>3} | food {:>6.2} | sens {:.1} | bite {:.2} vs def {:.2} | plant-nut {:.2} qual {:.2} | roam {:.2} | plants {}", gen.generation, avg, avg_sensors, avg_bite, avg_def, avg_nut, avg_qual, avg_roam, plant_n);
+        info!("gen {:>3} | food {:>6.2} | sens {:.1} | bite {:.2} vs def {:.2} | plant-nut {:.2} qual {:.2} | roam {:.2} elev {:.1} | plants {}", gen.generation, avg, avg_sensors, avg_bite, avg_def, avg_nut, avg_qual, avg_roam, avg_elev, plant_n);
     }
 
     // elite pool (clone+mutate, asexual)
