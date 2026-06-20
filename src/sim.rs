@@ -8,148 +8,13 @@ use crate::genome::{forward, learn, Genome, CONE_HALF, GLOBAL_INPUTS, NFOOD, SIG
 use crate::plant::{PlantGenome, PlantState, P_REPRO, PLANT_CAP, PLANT_MIN};
 use crate::rng::Rng;
 
-// --- tuning (god-tunable later, see 07) ---
-pub const POP: usize = 140;
-pub const FOOD: usize = 480;
-pub const WORLD_HALF: f32 = 80.0; // square arena [-H, H] in x,z (doubled playground)
-pub const GEN_TICKS: u32 = 4800; // steps/generation (generational mode) + log interval = 2 full days (see DAY_TICKS): longer lives, creatures live through several day/night cycles so rest-timing can pay off
-pub const MAX_GEN_HEADLESS: u32 = 40; // default headless run length in generations (override: --gens=N)
+// Tuning constants live in config.rs; re-exported so existing `sim::FOO` refs still resolve.
+pub use crate::config::*;
 
-pub const DAY_TICKS: u32 = 2400; // ticks per full day-night cycle (40s at 60Hz render: slow, watchable sunrise->sunset)
-const LIGHT_COST: f32 = 2.2; // energy/sec per unit mismatch between local light and a creature's light_pref
-// Fatigue/stress (rest instinct): exertion accrues fatigue, rest sheds it. Trade-off teeth: fatigue
-// burns stress energy AND saps movement output while effort still costs full MOVE_COST -> grinding while
-// exhausted is pure loss, so resting (low thrust) pays. Fed into the NN -> brains evolve to rest during
-// their unfavorable-light hours (diurnal vs nocturnal niches emerge), see daylight() + light_pref.
-const FATIGUE_GAIN: f32 = 0.5;  // fatigue/sec at full thrust (exertion debt)
-const FATIGUE_REST: f32 = 0.35; // fatigue/sec shed at zero thrust (recovery)
-const STRESS_COST: f32 = 1.6;   // energy/sec at full fatigue (chronic-exertion drain)
-const FATIGUE_DRAG: f32 = 0.6;  // fraction of thrust output lost at full fatigue (tired = sluggish)
 // Global daylight: 0 at midnight .. 1 at noon, cycling on the tick clock.
 pub fn daylight(tick: u32) -> f32 {
     0.5 - 0.5 * (tick as f32 / DAY_TICKS as f32 * std::f32::consts::TAU).cos()
 }
-
-// Continuous reproduction (default mode). A well-fed creature spends energy to bud a mutated child;
-// death is real (despawn + carrion). Selection is emergent (breed before you die), like the plants.
-// Breed only when genuinely well-fed: this is density dependence -> high population means low per-capita
-// food means few reach the threshold means breeding self-throttles (prevents boom-bust to extinction).
-const REPRO_THRESHOLD: f32 = 22.0; // energy to be eligible (near the sustained-forager equilibrium ~18)
-const REPRO_COST: f32 = 10.0; // energy the parent spends per child (>BIRTH_ENERGY: birth dissipates some)
-const BIRTH_ENERGY: f32 = 8.0; // offspring's starting energy
-const P_REPRO_CREATURE: f32 = 0.02; // per-tick reproduction chance while eligible (gentle: damps overshoot)
-pub const CREATURE_CAP: usize = 130; // population ceiling (kept below grazing pressure that crashes plants)
-// Continuous mode cold-starts badly (random foragers starve before breeding). Bootstrap with a short
-// GENERATIONAL warm-up to evolve competent foragers, THEN switch to continuous birth/death.
-const WARMUP_GENS: u32 = 12;
-
-const START_ENERGY: f32 = 30.0;
-const BASAL_COST: f32 = 1.4; // energy/sec just to live (low -> resting is genuinely valuable)
-const MOVE_COST: f32 = 6.0; // movement cost scales with thrust^2 (sprinting dear, gentle motion cheap)
-const MOVE_SPEED: f32 = 9.0; // units/sec at full thrust
-const TURN_SPEED: f32 = 3.0; // rad/sec at full turn
-// Elevation (P3): climbing burns energy per unit height gained; descending refunds less than the
-// climb cost so a round trip is a net loss (dissipative, no free lunch -> high ground is "expensive").
-const CLIMB_COST: f32 = 1.2;
-const DESCEND_REFUND: f32 = 0.4;
-const ROCK_MOVE_COST: f32 = 9.0; // extra energy/sec moving over rocky highland (hard to cross)
-const SENSE_COST: f32 = 0.012; // energy/sec per unit of total sensor range (long-range vision isn't free)
-const EAT_RADIUS: f32 = 1.1;
-const ENERGY_MAX: f32 = 60.0; // energy ceiling; eating past it harms (overeating trade-off, see 12)
-const OVEREAT_G: f32 = 0.2; // growth-load gained per unit of energy eaten while already full
-
-// Living food (see 13). Eat success = sigmoid(BITE_K*(bite - defense)); energy ∝ mass*nutrient.
-const BITE_K: f32 = 8.0;
-const BITE_COST: f32 = 1.5; // energy/sec maintenance cost of bite strength
-const EAT_GAIN: f32 = 7.0; // energy per (mass * nutrient) consumed
-const MEAT_BONUS: f32 = 1.6; // meat (carrion) is richer + longer-lasting than plant food
-// Predation (M5): a creature attacks an adjacent creature; `bite` is the combat stat (attack AND
-// defense). A kill = top energy + fitness. Predators need high bite, whose upkeep (BITE_COST) is the cost.
-const ATTACK_RADIUS: f32 = 1.6; // must be adjacent to attack
-const PREDATION_GAIN: f32 = 22.0; // energy a predator gains from a kill
-// Trees (BACKLOG): long-lived, near-uneatable plants. Only TALL creatures (sensors >= TREE_REACH)
-// can reach + eat them; moisture-immune; grow large; reproduce slowly toward TREE_CAP.
-const N_TREES: usize = 40; // initial trees
-const TREE_CAP: usize = 70; // max trees
-const TREE_REACH_H: f32 = 0.6; // creature height needed to reach + eat fruit-tree food
-const TREE_NUTRIENT: f32 = 0.9; // trees are rich food (worth the reach)
-const TREE_MATURITY: f32 = 14.0; // trees grow large before reproducing
-const P_TREE_REPRO: f32 = 0.004; // slow reproduction (long-lived, sparse)
-const TREE_DENSITY_R: f32 = 18.0; // trees self-limit clustering within this radius
-const TREE_MAX_LOCAL: usize = 4; // max trees within TREE_DENSITY_R before a tree stops seeding nearby
-const TREE_BITE_MASS: f32 = 2.5; // mass a creature strips per feeding (tree survives + regrows)
-const TREE_MIN_MASS: f32 = 1.0; // below this a fruit tree is over-eaten and dies
-const PLANT_MIN_MASS: f32 = 0.15; // below this a grazed plant is fully consumed (carrot eaten whole)
-const HEIGHT_COST: f32 = 1.4; // energy/sec upkeep per unit height (tall reaches trees but costs more)
-const SEED_VIA_GUT: f32 = 0.5; // max chance (x quality) an eaten plant disperses an offspring (13)
-const PLANT_START_MASS: f32 = 0.6;
-
-// Rot chain (P3): a dead creature drops carrion. Fresh = rich meat; over ROT_GONE ticks its
-// nutrition fades to 0 and toxin rises to TOXIN_MAX, then it fully decomposes (despawns).
-const CARRION_KIND: u8 = 0; // meat = food type 0 (couples to diet expr only via sensing, not digestion)
-const CARRION_MASS: f32 = 3.0; // a meaty chunk: worth scavenging while fresh
-const CARRION_NUTRIENT: f32 = 0.9; // fresh meat is energy-dense
-pub const ROT_GONE: u32 = 900; // ticks from death to full decomposition (~15s sim); viz reads it for color
-const TOXIN_MAX: f32 = 9.0; // energy hit from eating fully-rotten carrion (poison)
-const TOXIN_G: f32 = 0.15; // growth-load per unit toxin ingested
-
-// Moisture pressure (P3): a plant whose `wet` preference is far from local soil moisture is stressed
-// and may die; dead plants become poison detritus (rotting vegetation). Drives spatial niches.
-const DETRITUS_NUTRIENT: f32 = 0.3; // dead vegetation: poor food fresh, rots to poison
-const MOISTURE_TOLERANCE: f32 = 0.3; // mismatch under this is harmless
-const MOISTURE_KILL: f32 = 0.012; // per-tick death scale for mismatch beyond tolerance
-const HABITAT_KILL: f32 = 0.03; // per-tick death scale in poor sites (deep water / arid desert)
-const SEASON_FREQ: f32 = 0.4; // seasonal wet/dry oscillation speed (radians per generation)
-// Dynamic ground water (rain cycle): a wetness layer on TOP of the static terrain moisture. The sun
-// evaporates it (faster at noon), storms refill it. Rocky cells shed runoff (no gain); grassy cells
-// soak it up -> after a heavy rain, low-lying grassland turns wet and favors wet-liking plants, which
-// then dry out and get stressed during the next drought. Drives temporal selection on plant `wet`.
-const P_STORM: f32 = 0.0008; // per-tick chance a downpour begins (~1 storm / 1250 ticks)
-const RAIN_RATE: f32 = 0.8;  // ground-water added/sec at full rain on a fully-absorbing (grassy) cell
-const RAIN_DECAY: f32 = 0.2; // rain intensity shed/sec (a storm fades over ~5s)
-const EVAP: f32 = 0.06;      // ground-water evaporated/sec at noon (scaled by sunlight, x current water)
-const WET_GAIN: f32 = 0.45;  // how much saturated ground water adds to a plant's effective local moisture
-const WET_GROWTH: f32 = 0.3; // growth-rate boost from watered ground (rain visibly greens the land)
-// Defense also taxes REPRODUCTION, not just growth (tuning): at carrying capacity, growth cost is
-// toothless (plants stay capped anyway), so armored plants pegged defense ~free. Penalizing their
-// repro lets cheaper plants win the cap-slot competition -> defense settles at an interior value.
-const DEF_REPRO_COST: f32 = 0.7; // armored plant (def=1) reproduces at (1-0.7)=30% the base rate
-
-// Nutrient closed loop (M5): un-eaten carrion/detritus that fully decomposes releases fertility into a
-// soil grid at that spot; fertile patches boost nearby plant growth. Death -> soil -> richer food.
-pub const SOIL_RES: usize = 32; // fertility grid cells per axis
-const SOIL_DECAY: f32 = 0.999; // fertility leaches/is taken up each tick
-const DECOMP_FERT: f32 = 3.0; // fertility released on full decomposition (x corpse nutrient)
-const FERT_GROWTH: f32 = 0.6; // max growth-rate bonus from saturated soil
-const FERT_CAP: f32 = 1.5; // fertility level at which the growth bonus saturates
-const PLANT_REPRO_FRAC: f32 = 0.5; // fraction of mass kept after budding off a child
-
-// Diet/epigenetic model (--diet, see 12). Expression ramps on eaten type, decays on others.
-const EXPR_RAMP: f32 = 0.08; // how fast expression of the eaten type rises (x (1-rigidity))
-const EXPR_DECAY: f32 = 0.04; // how fast unused types' expression falls (x (1-rigidity))
-const EXPR_OVERHEAD: f32 = 1.2; // maintenance energy/sec per unit total expression (generalist cost)
-const G_GAIN: f32 = 0.6; // growth-load gained per low-efficiency (mismatch) eat
-const G_DECAY: f32 = 0.01; // growth-load shed per tick when on-diet
-const DISEASE_K: f32 = 0.012; // per-tick disease mortality per unit growth-load
-const MISMATCH_STRESS: f32 = 3.0; // energy hit for eating a poorly-expressed (wrong) food
-const AGE_HAZARD: f32 = 0.02; // late-life mortality ceiling (decelerates -> ~plateau)
-const AGE_SCALE: f32 = 2400.0; // ticks; age at which aging hazard reaches half its ceiling (longer lifespans)
-
-const ELITE_FRAC: f32 = 0.3;
-const MUT_RATE: f32 = 0.12;
-const MUT_STD: f32 = 0.3;
-
-// M2 lifetime learning (see 04 + 09). Reward = approach-shaping + eat bonus; Hebbian/Oja tunes brain.
-const LEARN_RATE: f32 = 0.04;
-const R_APPROACH: f32 = 0.6; // reward per unit closer to nearest food this tick
-const R_EAT: f32 = 1.0; // bonus reward on the tick food is eaten
-
-const CREATURE_Y: f32 = 0.5;
-const FOOD_Y: f32 = 0.4;
-
-// Fixed sim step. Constant (not wall-clock) so headless can fast-forward and runs are
-// deterministic. Render mode runs this at 60 Hz for real-time visuals; headless spins it flat-out.
-pub const DT: f32 = 1.0 / 60.0;
 
 #[derive(Resource)]
 pub struct GenState {
@@ -518,7 +383,7 @@ pub fn plant_step(
             }
             // trees: moisture-immune (long-lived), grow slowly + large. Reproduction FOLLOWS GROUND
             // FERTILITY (fertile soil seeds more trees) and SELF-LIMITS by local density (no over-cluster).
-            st.mass += g.growth_rate() * boost * lf * DT;
+            st.mass += g.growth_rate() * boost * lf * TREE_GROWTH_SCALE * DT; // trees grow slowly (long-lived)
             st.age += 1;
             let r2 = TREE_DENSITY_R * TREE_DENSITY_R;
             let local = tree_positions.iter().filter(|p| p.distance_squared(tf.translation) < r2).count();

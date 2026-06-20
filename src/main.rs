@@ -1,15 +1,16 @@
-// Evolvarium M1 — proof-of-life foraging sim (see 08-roadmap.md).
-// Tiny NN brains (genome = weights) forage for food; generational GA selects by food eaten.
+// Evolvarium — neuroevolution + ecology sim (see 08-roadmap.md). Tiny per-creature NN brains
+// (genome = weights + sensors + traits) forage, eat, fight, breed; a GA + lifetime learning evolve
+// them against a living, co-evolving food web on a heightfield world with day/night + a rain cycle.
 // Two modes, one binary:
-//   cargo run                       -> render: watch creatures forage, fly camera
-//   cargo run -- --headless         -> no window, fast, logs avg/best food per generation, exits
-//   cargo run -- --headless --seed=7 -> reproducible run with a chosen seed
-//   cargo run -- --headless --save=run.json -> write fitness-ranked survivors at run end
-//   cargo run -- --headless --load=run.json -> resume from a saved population (BACKLOG P2)
-//
-// fields.rs (gravity/zone fields) returns at M4; not wired this milestone.
+//   cargo run                                -> render: watch the world, fly + follow camera, inspect
+//   cargo run -- --headless                  -> no window, fast-forward, logs per-generation stats, exits
+//   cargo run -- --headless --diet --gens=N  -> N generations of the epigenetic-diet model
+//   cargo run -- --headless --seed=7         -> reproducible run with a chosen seed
+//   cargo run -- --headless --save=run.json  -> write fitness-ranked survivors + food web at run end
+//   cargo run -- --load=run.json             -> resume from a saved population
 mod camera;
 mod components;
+mod config;
 mod genome;
 mod persist;
 mod plant;
