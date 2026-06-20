@@ -51,6 +51,10 @@ const DETRITUS_NUTRIENT: f32 = 0.3; // dead vegetation: poor food fresh, rots to
 const MOISTURE_TOLERANCE: f32 = 0.3; // mismatch under this is harmless
 const MOISTURE_KILL: f32 = 0.012; // per-tick death scale for mismatch beyond tolerance
 const SEASON_FREQ: f32 = 0.4; // seasonal wet/dry oscillation speed (radians per generation)
+// Defense also taxes REPRODUCTION, not just growth (tuning): at carrying capacity, growth cost is
+// toothless (plants stay capped anyway), so armored plants pegged defense ~free. Penalizing their
+// repro lets cheaper plants win the cap-slot competition -> defense settles at an interior value.
+const DEF_REPRO_COST: f32 = 0.7; // armored plant (def=1) reproduces at (1-0.7)=30% the base rate
 const PLANT_REPRO_FRAC: f32 = 0.5; // fraction of mass kept after budding off a child
 
 // Poison mode (--poison): signed eat reward so learners associate type -> approach/avoid.
@@ -255,7 +259,10 @@ pub fn plant_step(
         }
         st.mass += g.growth_rate() * DT;
         st.age += 1;
-        if st.mass >= g.maturity && count + births.len() < PLANT_CAP && rng.f32() < P_REPRO {
+        if st.mass >= g.maturity
+            && count + births.len() < PLANT_CAP
+            && rng.f32() < P_REPRO * (1.0 - DEF_REPRO_COST * g.defense)
+        {
             let mut child = g.clone();
             child.mutate(&mut rng);
             let off = Vec3::new(rng.range(-g.spread, g.spread), 0.0, rng.range(-g.spread, g.spread));
