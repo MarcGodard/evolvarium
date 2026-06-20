@@ -80,6 +80,15 @@ pub const MEAT_BONUS: f32 = 1.6; // meat (carrion) is richer + longer-lasting th
 pub const ATTACK_RADIUS: f32 = 1.6; // must be adjacent to attack
 pub const PREDATION_GAIN: f32 = 22.0; // energy a predator gains from a kill
 pub const PREDATION_HUNGER: f32 = 20.0; // only creatures below this energy hunt (fed crowds don't cannibalize)
+// Kin-based social need (herd instinct). Being near genetically-SIMILAR creatures (kin) satisfies a
+// social creature + protects it from predators (herd vigilance); ISOLATION drains energy (loneliness).
+// Trade-off: social creatures must stay with their kind (constrains roaming) but gain safety; asocial
+// loners roam free but a hunting loner finds no herd safety + (if social) starves of loneliness.
+pub const SOCIAL_RADIUS: f32 = 9.0; // distance within which kin count as company
+pub const SOCIAL_SIM: f32 = 0.7; // max signature distance to count as KIN (smaller = stricter species)
+pub const SOCIAL_TARGET: f32 = 4.0; // kin nearby for full social satisfaction
+pub const SOCIAL_COST: f32 = 1.6; // energy/sec loneliness drain at full social gene + full isolation
+pub const SOCIAL_SAFETY: f32 = 0.7; // max predation-success reduction for prey surrounded by kin (herd safety)
 pub const SEED_VIA_GUT: f32 = 0.5; // max chance (x quality) an eaten plant disperses an offspring (13)
 pub const PLANT_START_MASS: f32 = 0.6;
 pub const PLANT_MIN_MASS: f32 = 0.15; // below this a grazed plant is fully consumed (carrot eaten whole)

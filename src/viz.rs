@@ -331,7 +331,7 @@ fn update_stats(
         let mode = if g.light_pref > 0.6 { "diurnal" } else if g.light_pref < 0.4 { "nocturnal" } else { "cathemeral" };
         let habitat = if g.swim > 0.6 { "aquatic" } else if g.swim < 0.3 { "land" } else { "amphibious" };
         text.0 = format!(
-            "CREATURE  {}\nenergy   {:.1}\nfitness  {:.1}\nsensors  {}\nbite     {:.2}\nheight   {:.2}\nsize     {:.2}\nswim     {:.2} ({})\nrigidity {:.2}\nlight    {:.2} ({})\nfatigue  {:.2}\ndiet>type {} (eff {:.2})\nload(G)  {:.2}\nage      {}",
+            "CREATURE  {}\nenergy   {:.1}\nfitness  {:.1}\nsensors  {}\nbite     {:.2}\nheight   {:.2}\nsize     {:.2}\nswim     {:.2} ({})\nsocial   {:.2}\nrigidity {:.2}\nlight    {:.2} ({})\nfatigue  {:.2}\ndiet>type {} (eff {:.2})\nload(G)  {:.2}\nage      {}",
             if alive.0 { "alive" } else { "DEAD" },
             energy.0,
             fit.0,
@@ -341,6 +341,7 @@ fn update_stats(
             g.size,
             g.swim,
             habitat,
+            g.social,
             g.rigidity,
             g.light_pref,
             mode,

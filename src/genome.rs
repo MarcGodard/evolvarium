@@ -48,6 +48,8 @@ pub struct Genome {
     pub size: f32,           // 0..1 body mass: more energy store + combat power, but higher basal + move upkeep
     #[serde(default)]
     pub swim: f32,           // 0..1 aquatic adaptation: fast + cheap in water/wet lowland, clumsy + costly on dry land
+    #[serde(default)]
+    pub social: f32,         // 0..1 herd instinct: near genetic KIN = predation safety (vigilance); ISOLATED = loneliness energy drain. Drives flocking + speciation; punishes the lone cannibal.
 }
 
 // serde defaults for traits absent in old saves
@@ -94,6 +96,7 @@ impl Genome {
             light_pref: rng.f32(),
             size: rng.range(0.2, 0.6),
             swim: rng.f32() * 0.3,
+            social: rng.f32(),
         }
     }
 
@@ -149,6 +152,9 @@ impl Genome {
         }
         if rng.f32() < rate {
             self.swim = (self.swim + rng.normal() * 0.12).clamp(0.0, 1.0);
+        }
+        if rng.f32() < rate {
+            self.social = (self.social + rng.normal() * 0.12).clamp(0.0, 1.0);
         }
         // structural: add / remove a sensor (and the matching input-weight columns)
         if rng.f32() < 0.06 && self.sensors.len() < MAX_SENSORS {

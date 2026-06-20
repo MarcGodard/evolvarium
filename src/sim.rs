@@ -521,11 +521,11 @@ pub fn predation_step(
     mut commands: Commands,
     mut cq: Query<(Entity, &Transform, &mut Energy, &mut Fitness, &mut Alive, &Genome), With<Creature>>,
 ) {
-    // snapshot living creatures: (entity, pos, combat, energy). Combat = bite + size bonus (mass wins).
-    let snap: Vec<(Entity, Vec3, f32, f32)> = cq
+    // snapshot living creatures: (entity, pos, combat, energy, kin-signature). Combat = bite + size.
+    let snap: Vec<(Entity, Vec3, f32, f32, [f32; 8])> = cq
         .iter()
         .filter(|(_, _, _, _, a, _)| a.0)
-        .map(|(e, t, en, _, _, g)| (e, t.translation, g.bite + SIZE_COMBAT * g.size, en.0))
+        .map(|(e, t, en, _, _, g)| (e, t.translation, g.bite + SIZE_COMBAT * g.size, en.0, signature(g)))
         .collect();
     if snap.len() < 2 {
         return;
@@ -533,7 +533,8 @@ pub fn predation_step(
     let mut killed: HashSet<Entity> = HashSet::new();
     let mut gains: HashMap<Entity, f32> = HashMap::new();
     let r2 = ATTACK_RADIUS * ATTACK_RADIUS;
-    for (ai, &(ae, apos, abite, aenergy)) in snap.iter().enumerate() {
+    let rs2 = SOCIAL_RADIUS * SOCIAL_RADIUS;
+    for (ai, &(ae, apos, abite, aenergy, _asig)) in snap.iter().enumerate() {
         if killed.contains(&ae) {
             continue; // a creature killed this tick doesn't also attack
         }
@@ -543,7 +544,7 @@ pub fn predation_step(
             continue;
         }
         let mut best: Option<(f32, usize)> = None;
-        for (bi, &(be, bpos, _, _)) in snap.iter().enumerate() {
+        for (bi, &(be, bpos, _, _, _)) in snap.iter().enumerate() {
             if bi == ai || killed.contains(&be) {
                 continue;
             }
@@ -553,9 +554,17 @@ pub fn predation_step(
             }
         }
         if let Some((_, bi)) = best {
-            let (be, _, bbite, _) = snap[bi];
-            // success = attacker bite vs prey bite (bite doubles as defense)
-            if rng.f32() < sigmoid(BITE_K * (abite - bbite)) {
+            let (be, bpos, bbite, _, bsig) = snap[bi];
+            // herd safety: prey surrounded by KIN is harder to pick off (vigilance) -> being social pays
+            let mut kin = 0.0f32;
+            for (e2, p2, _, _, s2) in &snap {
+                if *e2 != be && bpos.distance_squared(*p2) < rs2 && sig_dist(&bsig, s2) < SOCIAL_SIM {
+                    kin += 1.0;
+                }
+            }
+            let prey_kin = (kin / SOCIAL_TARGET).min(1.0);
+            // success = attacker combat vs prey combat (bite doubles as defense), reduced by herd safety
+            if rng.f32() < sigmoid(BITE_K * (abite - bbite)) * (1.0 - SOCIAL_SAFETY * prey_kin) {
                 killed.insert(be);
                 *gains.entry(ae).or_insert(0.0) += PREDATION_GAIN;
             }
@@ -625,6 +634,12 @@ pub fn live_step(
         .collect();
     let mut eaten: HashSet<Entity> = HashSet::new();
     let mut sample_genome: Option<Genome> = None; // a living genome, for the near-extinction reseed floor
+    // creature snapshot for the social/kin need: (entity, pos, phenotype signature)
+    let cre_snap: Vec<(Entity, Vec3, [f32; 8])> = cq
+        .iter()
+        .filter(|(_, _, _, _, _, a, _, _, _, _)| a.0)
+        .map(|(e, t, _, _, _, _, g, _, _, _)| (e, t.translation, signature(g)))
+        .collect();
 
     for (entity, mut ct, mut energy, mut fit, mut head, mut alive, genome, mut brain, mut diet, mut loco) in &mut cq {
         if !alive.0 {
@@ -732,6 +747,12 @@ pub fn live_step(
             * dt;
         // fatigue dynamics: exertion (thrust) accrues debt; idling (low thrust) sheds it. Clamped 0..1.
         diet.fatigue = (diet.fatigue + (FATIGUE_GAIN * thrust - FATIGUE_REST * (1.0 - thrust)) * dt).clamp(0.0, 1.0);
+        // social/kin need: a social creature isolated from genetic kin drains energy (loneliness). Being
+        // in a herd of kin removes the drain (and grants predation safety, see predation_step).
+        if genome.social > 0.0 {
+            let kinf = kin_fraction(entity, np, &signature(genome), &cre_snap);
+            energy.0 -= SOCIAL_COST * genome.social * (1.0 - kinf) * dt;
+        }
 
         // eat nearest plant on contact, IF bite beats its defense (arms race, see 13)
         let mut eat_reward = 0.0;
@@ -948,6 +969,31 @@ fn energy_max(g: &Genome) -> f32 {
     ENERGY_MAX * (1.0 + SIZE_ENERGY * g.size)
 }
 
+// Compact phenotype signature for KIN similarity (diet + body traits). Two creatures are "kin" when
+// their signatures are within SOCIAL_SIM -> drives flocking-by-species + the social need.
+fn signature(g: &Genome) -> [f32; 8] {
+    [g.expr0[0], g.expr0[1], g.expr0[2], g.expr0[3], g.size, g.swim, g.light_pref, g.height]
+}
+fn sig_dist(a: &[f32; 8], b: &[f32; 8]) -> f32 {
+    a.iter().zip(b).map(|(x, y)| (x - y).abs()).sum()
+}
+
+// Fraction of social satisfaction from nearby kin (0 isolated .. 1 fully in a herd), given a snapshot
+// of (entity, pos, signature). Excludes self by entity id.
+fn kin_fraction(me: Entity, pos: Vec3, sig: &[f32; 8], snap: &[(Entity, Vec3, [f32; 8])]) -> f32 {
+    let r2 = SOCIAL_RADIUS * SOCIAL_RADIUS;
+    let mut kin = 0.0f32;
+    for (e, p, s) in snap {
+        if *e == me {
+            continue;
+        }
+        if pos.distance_squared(*p) < r2 && sig_dist(sig, s) < SOCIAL_SIM {
+            kin += 1.0;
+        }
+    }
+    (kin / SOCIAL_TARGET).min(1.0)
+}
+
 // --- generation boundary: select + reproduce ---
 pub fn generation_step(
     mut gen: ResMut<GenState>,
@@ -1069,6 +1115,7 @@ pub fn generation_step(
     let avg_light: f32 = scored.iter().map(|(_, g)| g.light_pref).sum::<f32>() / n as f32; // niche: <0.5 nocturnal, >0.5 diurnal
     let avg_size: f32 = scored.iter().map(|(_, g)| g.size).sum::<f32>() / n as f32;
     let avg_swim: f32 = scored.iter().map(|(_, g)| g.swim).sum::<f32>() / n as f32; // >0.5 => aquatic niche emerging
+    let avg_social: f32 = scored.iter().map(|(_, g)| g.social).sum::<f32>() / n as f32; // herd instinct
     let tree_n = tq.iter().len();
     let avg_tree_h = if tree_n > 0 { tq.iter().map(|g| g.height).sum::<f32>() / tree_n as f32 } else { 0.0 }; // tree reach gene
     let avg_tree_b = if tree_n > 0 { tq.iter().map(|g| g.branches).sum::<f32>() / tree_n as f32 } else { 0.0 }; // tree branches gene
@@ -1080,7 +1127,7 @@ pub fn generation_step(
     let avg_wet: f32 = pq.iter().map(|(g, _)| g.wet).sum::<f32>() / plant_n as f32;
     if gen.diet {
         let avg_rig: f32 = scored.iter().map(|(_, g)| g.rigidity).sum::<f32>() / n as f32;
-        info!("gen {:>3} | nutri {:>6.2} | sens {:.1} r{:.0} | rig {:.2} | bite {:.2} vs def {:.2} | light {:.2} sz {:.2} sw {:.2} | plant-nut {:.2} qual {:.2} wet {:.2} | roam {:.2} elev {:.1} | plants {} soil {:.2} gw {:.2} | trees {} h{:.2} b{:.2}", gen.generation, avg, avg_sensors, avg_range, avg_rig, avg_bite, avg_def, avg_light, avg_size, avg_swim, avg_nut, avg_qual, avg_wet, avg_roam, avg_elev, plant_n, soil.avg(), gw.avg(), tree_n, avg_tree_h, avg_tree_b);
+        info!("gen {:>3} | nutri {:>6.2} | sens {:.1} r{:.0} | rig {:.2} | bite {:.2} vs def {:.2} | light {:.2} sz {:.2} sw {:.2} so {:.2} | plant-nut {:.2} qual {:.2} wet {:.2} | roam {:.2} elev {:.1} | plants {} soil {:.2} gw {:.2} | trees {} h{:.2} b{:.2}", gen.generation, avg, avg_sensors, avg_range, avg_rig, avg_bite, avg_def, avg_light, avg_size, avg_swim, avg_social, avg_nut, avg_qual, avg_wet, avg_roam, avg_elev, plant_n, soil.avg(), gw.avg(), tree_n, avg_tree_h, avg_tree_b);
     } else {
         info!("gen {:>3} | food {:>6.2} | sens {:.1} r{:.0} | bite {:.2} vs def {:.2} | plant-nut {:.2} qual {:.2} wet {:.2} | roam {:.2} elev {:.1} | plants {} soil {:.2} gw {:.2}", gen.generation, avg, avg_sensors, avg_range, avg_bite, avg_def, avg_nut, avg_qual, avg_wet, avg_roam, avg_elev, plant_n, soil.avg(), gw.avg());
     }
