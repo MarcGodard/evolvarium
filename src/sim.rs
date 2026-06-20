@@ -55,6 +55,14 @@ const SEASON_FREQ: f32 = 0.4; // seasonal wet/dry oscillation speed (radians per
 // toothless (plants stay capped anyway), so armored plants pegged defense ~free. Penalizing their
 // repro lets cheaper plants win the cap-slot competition -> defense settles at an interior value.
 const DEF_REPRO_COST: f32 = 0.7; // armored plant (def=1) reproduces at (1-0.7)=30% the base rate
+
+// Nutrient closed loop (M5): un-eaten carrion/detritus that fully decomposes releases fertility into a
+// soil grid at that spot; fertile patches boost nearby plant growth. Death -> soil -> richer food.
+pub const SOIL_RES: usize = 32; // fertility grid cells per axis
+const SOIL_DECAY: f32 = 0.999; // fertility leaches/is taken up each tick
+const DECOMP_FERT: f32 = 3.0; // fertility released on full decomposition (x corpse nutrient)
+const FERT_GROWTH: f32 = 0.6; // max growth-rate bonus from saturated soil
+const FERT_CAP: f32 = 1.5; // fertility level at which the growth bonus saturates
 const PLANT_REPRO_FRAC: f32 = 0.5; // fraction of mass kept after budding off a child
 
 // Poison mode (--poison): signed eat reward so learners associate type -> approach/avoid.
@@ -108,6 +116,39 @@ impl GenState {
     // Number of distinct food types in play this mode.
     pub fn ntypes(&self) -> u8 {
         if self.diet { NFOOD as u8 } else if self.poison { 2 } else { 1 }
+    }
+}
+
+// Dynamic soil-fertility grid (M5 closed loop): decomposing corpses deposit here; plants read it for a
+// growth boost; it decays each tick. Coarse grid over the arena so deposits are spatially local.
+#[derive(Resource)]
+pub struct Soil {
+    pub cell: Vec<f32>,
+}
+
+impl Soil {
+    pub fn new() -> Self {
+        Soil { cell: vec![0.0; SOIL_RES * SOIL_RES] }
+    }
+    fn index(x: f32, z: f32) -> usize {
+        let to_cell = |w: f32| {
+            (((w + WORLD_HALF) / (2.0 * WORLD_HALF)) * SOIL_RES as f32).clamp(0.0, (SOIL_RES - 1) as f32) as usize
+        };
+        to_cell(z) * SOIL_RES + to_cell(x)
+    }
+    fn add(&mut self, x: f32, z: f32, amt: f32) {
+        self.cell[Self::index(x, z)] += amt;
+    }
+    fn get(&self, x: f32, z: f32) -> f32 {
+        self.cell[Self::index(x, z)]
+    }
+    fn decay(&mut self) {
+        for c in &mut self.cell {
+            *c *= SOIL_DECAY;
+        }
+    }
+    pub fn avg(&self) -> f32 {
+        self.cell.iter().sum::<f32>() / self.cell.len() as f32
     }
 }
 
@@ -241,8 +282,10 @@ pub fn plant_step(
     mut commands: Commands,
     mut rng: ResMut<Rng>,
     gen: Res<GenState>,
+    mut soil: ResMut<Soil>,
     mut q: Query<(Entity, &mut PlantState, &PlantGenome, &Transform), Without<Rot>>, // living plants (not carrion)
 ) {
+    soil.decay(); // fertility leaches / is taken up over time
     let season = (gen.generation as f32 * SEASON_FREQ).sin(); // -1 dry .. +1 wet, drifts across generations
     let mut count = q.iter().len();
     let mut births: Vec<(PlantGenome, Vec3)> = Vec::new();
@@ -257,7 +300,10 @@ pub fn plant_step(
             count = count.saturating_sub(1);
             continue;
         }
-        st.mass += g.growth_rate() * DT;
+        // fertile soil (where things decomposed) speeds growth: death feeds the food web (M5)
+        let fert = soil.get(tf.translation.x, tf.translation.z);
+        let boost = 1.0 + FERT_GROWTH * (fert / FERT_CAP).min(1.0);
+        st.mass += g.growth_rate() * boost * DT;
         st.age += 1;
         if st.mass >= g.maturity
             && count + births.len() < PLANT_CAP
@@ -297,11 +343,17 @@ pub fn plant_step(
 }
 
 // --- carrion decomposition (P3): age each corpse, shrink its mass, despawn when fully rotted ---
-pub fn rot_step(mut commands: Commands, mut q: Query<(Entity, &mut Rot, &mut PlantState)>) {
-    for (e, mut rot, mut st) in &mut q {
+// On full decomposition, release fertility to the soil at that spot (M5 closed loop): death -> soil.
+pub fn rot_step(
+    mut commands: Commands,
+    mut soil: ResMut<Soil>,
+    mut q: Query<(Entity, &mut Rot, &mut PlantState, &PlantGenome, &Transform)>,
+) {
+    for (e, mut rot, mut st, g, tf) in &mut q {
         rot.age += 1;
         st.mass = (st.mass - CARRION_MASS / ROT_GONE as f32).max(0.0); // decompose: less to scavenge
         if rot.age >= ROT_GONE {
+            soil.add(tf.translation.x, tf.translation.z, DECOMP_FERT * g.nutrient); // return nutrients
             commands.entity(e).despawn(); // fully decomposed
         }
     }
@@ -552,6 +604,7 @@ pub fn generation_step(
         With<Creature>,
     >,
     pq: Query<(&PlantGenome, &PlantState), Without<Rot>>, // living plants only (carrion excluded from stats/save)
+    soil: Res<Soil>,
     mut exit: MessageWriter<AppExit>,
 ) {
     gen.ticks_left = gen.ticks_left.saturating_sub(1);
@@ -605,9 +658,9 @@ pub fn generation_step(
     let avg_wet: f32 = pq.iter().map(|(g, _)| g.wet).sum::<f32>() / plant_n as f32;
     if gen.diet {
         let avg_rig: f32 = scored.iter().map(|(_, g)| g.rigidity).sum::<f32>() / n as f32;
-        info!("gen {:>3} | nutri {:>6.2} | sens {:.1} | rig {:.2} | bite {:.2} vs def {:.2} | plant-nut {:.2} qual {:.2} wet {:.2} | roam {:.2} elev {:.1} | plants {}", gen.generation, avg, avg_sensors, avg_rig, avg_bite, avg_def, avg_nut, avg_qual, avg_wet, avg_roam, avg_elev, plant_n);
+        info!("gen {:>3} | nutri {:>6.2} | sens {:.1} | rig {:.2} | bite {:.2} vs def {:.2} | plant-nut {:.2} qual {:.2} wet {:.2} | roam {:.2} elev {:.1} | plants {} soil {:.2}", gen.generation, avg, avg_sensors, avg_rig, avg_bite, avg_def, avg_nut, avg_qual, avg_wet, avg_roam, avg_elev, plant_n, soil.avg());
     } else {
-        info!("gen {:>3} | food {:>6.2} | sens {:.1} | bite {:.2} vs def {:.2} | plant-nut {:.2} qual {:.2} wet {:.2} | roam {:.2} elev {:.1} | plants {}", gen.generation, avg, avg_sensors, avg_bite, avg_def, avg_nut, avg_qual, avg_wet, avg_roam, avg_elev, plant_n);
+        info!("gen {:>3} | food {:>6.2} | sens {:.1} | bite {:.2} vs def {:.2} | plant-nut {:.2} qual {:.2} wet {:.2} | roam {:.2} elev {:.1} | plants {} soil {:.2}", gen.generation, avg, avg_sensors, avg_bite, avg_def, avg_nut, avg_qual, avg_wet, avg_roam, avg_elev, plant_n, soil.avg());
     }
 
     // elite pool (clone+mutate, asexual)
