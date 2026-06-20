@@ -23,6 +23,8 @@ pub struct PlantGenome {
     pub height: f32,   // 0..1 plant height: short creatures can't reach tall plants (reach defense); costs growth
     #[serde(default = "half_light")]
     pub light_pref: f32, // 0=shade .. 1=full sun: growth peaks at preferred light (day/night + biome niche)
+    #[serde(default)]
+    pub regrow: f32,   // 0=consumed whole when eaten (carrot) .. 1=survives small bites + regrows (berry bush)
     pub spread: f32,   // offspring dispersal distance
     pub maturity: f32, // mass needed before it can reproduce
 }
@@ -49,6 +51,7 @@ impl PlantGenome {
             wet: rng.f32(),
             height: rng.f32() * 0.4,
             light_pref: rng.f32(),
+            regrow: rng.f32(),
             spread: rng.range(2.0, 8.0),
             maturity: rng.range(2.0, 6.0),
         }
@@ -65,6 +68,7 @@ impl PlantGenome {
         self.wet = (self.wet + rng.normal() * 0.1).clamp(0.0, 1.0);
         self.height = (self.height + rng.normal() * 0.1).clamp(0.0, 1.0);
         self.light_pref = (self.light_pref + rng.normal() * 0.1).clamp(0.0, 1.0);
+        self.regrow = (self.regrow + rng.normal() * 0.1).clamp(0.0, 1.0);
         self.spread = (self.spread + rng.normal() * 1.0).clamp(1.0, 12.0);
         self.maturity = (self.maturity + rng.normal() * 0.8).clamp(1.5, 10.0);
     }
@@ -79,7 +83,8 @@ impl PlantGenome {
                 - 0.3 * self.nutrient
                 - 0.85 * self.defense * self.defense
                 - 0.2 * self.quality
-                - 0.25 * self.height)
+                - 0.25 * self.height
+                - 0.15 * self.regrow)
                 .clamp(0.12, 1.0)
     }
 }

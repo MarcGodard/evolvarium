@@ -71,6 +71,7 @@ const TREE_DENSITY_R: f32 = 18.0; // trees self-limit clustering within this rad
 const TREE_MAX_LOCAL: usize = 4; // max trees within TREE_DENSITY_R before a tree stops seeding nearby
 const TREE_BITE_MASS: f32 = 2.5; // mass a creature strips per feeding (tree survives + regrows)
 const TREE_MIN_MASS: f32 = 1.0; // below this a fruit tree is over-eaten and dies
+const PLANT_MIN_MASS: f32 = 0.15; // below this a grazed plant is fully consumed (carrot eaten whole)
 const HEIGHT_COST: f32 = 1.4; // energy/sec upkeep per unit height (tall reaches trees but costs more)
 const SEED_VIA_GUT: f32 = 0.5; // max chance (x quality) an eaten plant disperses an offspring (13)
 const PLANT_START_MASS: f32 = 0.6;
@@ -216,6 +217,7 @@ fn spawn_carrion(commands: &mut Commands, pos: Vec3, mass: f32) {
             wet: 0.5,        // unused for carrion (excluded from moisture mortality by Without<Rot>)
             height: 0.0,     // carrion lies on the ground
             light_pref: 0.5, // unused for carrion
+            regrow: 0.0,     // unused for carrion (eaten whole)
             spread: 0.0,
             maturity: 999.0, // never reproduces via plant_step (also excluded by Without<Rot>)
         },
@@ -246,7 +248,7 @@ fn spawn_creature(commands: &mut Commands, g: Genome, pos: Vec3, rng: &mut Rng) 
 
 // Tree genome: near-uneatable (defense ~1) so only tall creatures reach it; rich; grows large + slow.
 fn tree_genome() -> PlantGenome {
-    PlantGenome { kind: 0, nutrient: TREE_NUTRIENT, defense: 0.99, quality: 0.2, wet: 0.5, height: 1.0, light_pref: 0.7, spread: 7.0, maturity: TREE_MATURITY }
+    PlantGenome { kind: 0, nutrient: TREE_NUTRIENT, defense: 0.99, quality: 0.2, wet: 0.5, height: 1.0, light_pref: 0.7, regrow: 0.0, spread: 7.0, maturity: TREE_MATURITY }
 }
 
 // Spawn one tree (long-lived plant + Tree marker). edible=true tall fruit tree, false=evergreen.
@@ -451,7 +453,18 @@ pub fn plant_step(
             }
             continue;
         }
-        // --- regular plant: mortality from moisture mismatch OR a poor site (deep water / desert) ---
+        // --- regular plant ---
+        // apply grazing from live_step: a plant eaten below PLANT_MIN_MASS was consumed (carrot) -> gone;
+        // a berry-bush (high regrow) only loses a small bite and survives to regrow.
+        if let Some(&bite) = tree_bites.0.get(&e) {
+            st.mass = (st.mass - bite).max(0.0);
+            if st.mass < PLANT_MIN_MASS {
+                commands.entity(e).despawn();
+                plant_count = plant_count.saturating_sub(1);
+                continue;
+            }
+        }
+        // mortality from moisture mismatch OR a poor site (deep water / desert)
         let m = crate::terrain::moisture(px, pz, season);
         let stress = (m - g.wet).abs();
         let hab = crate::terrain::plant_habitability(px, pz, season); // 0 in water/desert, 1 on good land
@@ -745,8 +758,13 @@ pub fn live_step(
                         diet.g += toxin * TOXIN_G;
                         eat_reward = freshness * 2.0 - 1.0; // fresh -> +1 (good), rotten -> -1 (avoid)
                     } else {
+                        // regular plant: strip a fraction set by `regrow` -- carrot (~whole) vs berry bush
+                        // (small bite, persists). Recorded as grazing; plant_step reduces mass / despawns.
+                        let frac = (1.0 - 0.85 * pg.regrow).clamp(0.12, 1.0);
+                        let bite_mass = mass * frac;
+                        *tree_bites.0.entry(e).or_insert(0.0) += bite_mass;
                         // quality scales extractable energy: factor 0.5..1.5, ~1.0 at quality 0.5 (balance-neutral)
-                        let base = mass * pg.nutrient * (0.5 + pg.quality);
+                        let base = bite_mass * pg.nutrient * (0.5 + pg.quality);
                         if gen.diet {
                             let t = pg.kind as usize;
                             let eff = diet.expr[t];
@@ -777,13 +795,14 @@ pub fn live_step(
                         energy.0 = ENERGY_MAX;
                         diet.g += excess * OVEREAT_G;
                     }
-                    // plants/carrion are consumed (despawn); trees PERSIST (mass reduced in plant_step)
+                    // carrion is eaten whole (despawn). Plants + trees PERSIST -- their mass is reduced by
+                    // the grazing recorded above, and plant_step despawns any grazed below its min mass.
                     if tree.is_none() {
-                        commands.entity(e).despawn();
-                        eaten.insert(e);
-                        // endozoochory (13): an eaten LIVING plant may disperse a mutated offspring near
-                        // the eater. Chance scales with quality -> tasty plants pay growth but win dispersal.
-                        if rot_age.is_none() && foods.len() < PLANT_CAP && rng.f32() < pg.quality * SEED_VIA_GUT {
+                        eaten.insert(e); // prevent same-tick re-eat
+                        if rot_age.is_some() {
+                            commands.entity(e).despawn(); // carrion consumed
+                        } else if foods.len() < PLANT_CAP && rng.f32() < pg.quality * SEED_VIA_GUT {
+                            // endozoochory (13): grazing a living plant may disperse a mutated offspring
                             let mut child = pg.clone();
                             child.mutate(&mut rng);
                             let off =

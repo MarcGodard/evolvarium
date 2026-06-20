@@ -132,11 +132,15 @@ fn size_plants(mut q: Query<(&PlantState, &PlantGenome, &mut Transform, Option<&
     }
 }
 
-// Day/night: dim the sun + ambient at night, bright at noon (drives the daylight the sim reacts to).
-fn day_night_lighting(gen: Res<GenState>, mut suns: Query<&mut DirectionalLight>) {
+// Day/night: dim the sun at night + bright at noon, AND arc it across the sky (so shadows sweep).
+fn day_night_lighting(gen: Res<GenState>, mut suns: Query<(&mut DirectionalLight, &mut Transform)>) {
     let d = daylight(gen.tick);
-    for mut sun in &mut suns {
+    let phase = (gen.tick as f32 / crate::sim::DAY_TICKS as f32) * std::f32::consts::TAU; // 0 = midnight
+    // sun arcs east (morning) -> overhead (noon) -> west (evening); below horizon at night
+    let sun_pos = Vec3::new(phase.sin() * 60.0, -phase.cos() * 60.0, 22.0);
+    for (mut sun, mut tf) in &mut suns {
         sun.illuminance = 150.0 + 11000.0 * d; // night dark .. noon bright
+        *tf = Transform::from_translation(sun_pos).looking_at(Vec3::ZERO, Vec3::Y);
     }
 }
 
