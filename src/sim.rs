@@ -60,6 +60,8 @@ const TREE_REACH_H: f32 = 0.6; // creature height needed to reach + eat fruit-tr
 const TREE_NUTRIENT: f32 = 0.9; // trees are rich food (worth the reach)
 const TREE_MATURITY: f32 = 14.0; // trees grow large before reproducing
 const P_TREE_REPRO: f32 = 0.004; // slow reproduction (long-lived, sparse)
+const TREE_DENSITY_R: f32 = 18.0; // trees self-limit clustering within this radius
+const TREE_MAX_LOCAL: usize = 4; // max trees within TREE_DENSITY_R before a tree stops seeding nearby
 const TREE_BITE_MASS: f32 = 2.5; // mass a creature strips per feeding (tree survives + regrows)
 const TREE_MIN_MASS: f32 = 1.0; // below this a fruit tree is over-eaten and dies
 const HEIGHT_COST: f32 = 1.4; // energy/sec upkeep per unit height (tall reaches trees but costs more)
@@ -399,6 +401,7 @@ pub fn plant_step(
     let season = (gen.tick as f32 / GEN_TICKS as f32 * SEASON_FREQ).sin(); // -1 dry .. +1 wet
     let mut plant_count = q.iter().filter(|(.., t)| t.is_none()).count();
     let tree_count = q.iter().filter(|(.., t)| t.is_some()).count();
+    let tree_positions: Vec<Vec3> = q.iter().filter_map(|(_, _, _, tf, t)| t.map(|_| tf.translation)).collect();
     let mut births: Vec<(PlantGenome, Vec3)> = Vec::new();
     let mut tree_births: Vec<(Vec3, bool)> = Vec::new(); // (pos, edible)
     let mut detritus: Vec<(PlantGenome, f32, Vec3)> = Vec::new(); // moisture-killed plants -> poison
@@ -415,10 +418,18 @@ pub fn plant_step(
                     continue;
                 }
             }
-            // trees: moisture-immune (long-lived), grow slowly + large, reproduce slowly into same kind
+            // trees: moisture-immune (long-lived), grow slowly + large. Reproduction FOLLOWS GROUND
+            // FERTILITY (fertile soil seeds more trees) and SELF-LIMITS by local density (no over-cluster).
             st.mass += g.growth_rate() * boost * DT;
             st.age += 1;
-            if st.mass >= g.maturity && tree_count + tree_births.len() < TREE_CAP && rng.f32() < P_TREE_REPRO {
+            let r2 = TREE_DENSITY_R * TREE_DENSITY_R;
+            let local = tree_positions.iter().filter(|p| p.distance_squared(tf.translation) < r2).count();
+            let fert_boost = 0.4 + 1.6 * (fert / FERT_CAP).min(1.0); // richer ground -> more new trees
+            if st.mass >= g.maturity
+                && tree_count + tree_births.len() < TREE_CAP
+                && local <= TREE_MAX_LOCAL
+                && rng.f32() < P_TREE_REPRO * fert_boost
+            {
                 let off = Vec3::new(rng.range(-g.spread, g.spread), 0.0, rng.range(-g.spread, g.spread));
                 let mut pos = tf.translation + off;
                 pos.x = pos.x.clamp(-WORLD_HALF, WORLD_HALF);
