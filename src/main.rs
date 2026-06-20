@@ -35,6 +35,11 @@ fn main() {
         .iter()
         .find_map(|a| a.strip_prefix("--seed=").and_then(|s| s.parse::<u64>().ok()))
         .unwrap_or(1);
+    // --gens=N: headless run length in generations (default 40). Use with --save to evolve a deep state.
+    let max_gens = args
+        .iter()
+        .find_map(|a| a.strip_prefix("--gens=").and_then(|s| s.parse::<u32>().ok()))
+        .unwrap_or(sim::MAX_GEN_HEADLESS);
     // --save=PATH writes survivors at run end; --load=PATH resumes from a saved population.
     let save = args.iter().find_map(|a| a.strip_prefix("--save=").map(String::from));
     let load = args.iter().find_map(|a| a.strip_prefix("--load=").map(String::from));
@@ -51,6 +56,7 @@ fn main() {
         diet,
         continuous,
         tick: 0,
+        max_gens,
         save,
         load,
     });
@@ -90,7 +96,7 @@ fn setup_scene(
     let span = sim::WORLD_HALF * 2.0 + 4.0;
     // heightfield terrain (P3): elevation-shaded landscape (vertex colors), white base lets them show
     commands.spawn((
-        Mesh3d(meshes.add(terrain::build_mesh(span, 140))),
+        Mesh3d(meshes.add(terrain::build_mesh(span, 200))),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::WHITE,
             perceptual_roughness: 0.95,

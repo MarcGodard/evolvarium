@@ -9,12 +9,11 @@ use crate::plant::{PlantGenome, PlantState, P_REPRO, PLANT_CAP, PLANT_MIN};
 use crate::rng::Rng;
 
 // --- tuning (god-tunable later, see 07) ---
-pub const POP: usize = 90;
-pub const FOOD: usize = 200;
-pub const WORLD_HALF: f32 = 40.0; // square arena [-H, H] in x,z (bigger playground)
+pub const POP: usize = 140;
+pub const FOOD: usize = 480;
+pub const WORLD_HALF: f32 = 80.0; // square arena [-H, H] in x,z (doubled playground)
 pub const GEN_TICKS: u32 = 1500; // fixed-steps per generation (generational mode); also the log interval
-pub const MAX_GEN_HEADLESS: u32 = 40; // headless stops after this many gens (generational mode)
-pub const MAX_TICKS_HEADLESS: u32 = MAX_GEN_HEADLESS * GEN_TICKS; // continuous-mode headless run length
+pub const MAX_GEN_HEADLESS: u32 = 40; // default headless run length in generations (override: --gens=N)
 
 // Continuous reproduction (default mode). A well-fed creature spends energy to bud a mutated child;
 // death is real (despawn + carrion). Selection is emergent (breed before you die), like the plants.
@@ -38,6 +37,7 @@ const TURN_SPEED: f32 = 3.0; // rad/sec at full turn
 // climb cost so a round trip is a net loss (dissipative, no free lunch -> high ground is "expensive").
 const CLIMB_COST: f32 = 1.2;
 const DESCEND_REFUND: f32 = 0.4;
+const ROCK_MOVE_COST: f32 = 9.0; // extra energy/sec moving over rocky highland (hard to cross)
 const EAT_RADIUS: f32 = 1.1;
 const ENERGY_MAX: f32 = 60.0; // energy ceiling; eating past it harms (overeating trade-off, see 12)
 const OVEREAT_G: f32 = 0.2; // growth-load gained per unit of energy eaten while already full
@@ -114,8 +114,9 @@ pub struct GenState {
     pub learn: bool,     // lifetime learning on/off (A/B vs M1 baseline)
     pub poison: bool,    // two food types (legacy --poison mode; sets ntypes=2)
     pub diet: bool,      // epigenetic diet model (NFOOD types, expression, growth-load, disease)
-    pub continuous: bool, // continuous reproduction (default) vs discrete generational GA (--generational)
+    pub continuous: bool, // continuous reproduction (--continuous) vs discrete generational GA (default)
     pub tick: u32,       // global tick clock (drives season + continuous logging/stop)
+    pub max_gens: u32,   // headless run length in generations (--gens=N); continuous uses N*GEN_TICKS
     pub save: Option<String>, // --save=PATH: write survivors at headless run end (BACKLOG P2)
     pub load: Option<String>, // --load=PATH: resume from a saved population instead of random
 }
@@ -491,8 +492,10 @@ pub fn live_step(
         ct.translation = np;
         ct.rotation = Quat::from_rotation_y(head.0);
 
-        // metabolism: basal + movement (convex in speed: rest cheap, sprint dear) + bite upkeep
-        energy.0 -= (BASAL_COST + MOVE_COST * thrust * thrust + BITE_COST * genome.bite) * dt;
+        // metabolism: basal + movement (convex in speed) + bite upkeep + rocky-terrain crossing cost
+        let rock = crate::terrain::rockiness(np.x, np.z);
+        energy.0 -=
+            (BASAL_COST + MOVE_COST * thrust * thrust + BITE_COST * genome.bite + ROCK_MOVE_COST * rock * thrust.abs()) * dt;
 
         // eat nearest plant on contact, IF bite beats its defense (arms race, see 13)
         let mut eat_reward = 0.0;
@@ -682,7 +685,7 @@ pub fn generation_step(
     // stop headless at MAX_TICKS_HEADLESS or on extinction. Selection is emergent (live_step). ---
     if gen.continuous && gen.generation >= WARMUP_GENS {
         let pop = cq.iter().count();
-        let done = gen.headless && (gen.tick >= MAX_TICKS_HEADLESS || pop == 0);
+        let done = gen.headless && (gen.tick >= gen.max_gens * GEN_TICKS || pop == 0);
         if gen.tick % GEN_TICKS == 0 || done {
             let n = pop.max(1) as f32;
             let mut e = 0.0;
@@ -829,7 +832,7 @@ pub fn generation_step(
     // Plants are NOT reset at the creature-generation boundary: they live + evolve continuously
     // (their own GA in plant_step), so the food supply co-evolves across creature generations.
 
-    if gen.headless && gen.generation >= MAX_GEN_HEADLESS {
+    if gen.headless && gen.generation >= gen.max_gens {
         // --save: persist the fitness-ranked survivors + current food web so the run can resume.
         if let Some(path) = &gen.save {
             let plants: Vec<crate::persist::SavedPlant> = pq

@@ -5,27 +5,35 @@ use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
-pub const HEIGHT_MAX: f32 = 8.0; // peak terrain elevation (world units)
-pub const WATER_LEVEL: f32 = 1.5; // y below which low basins flood (render water plane sits here)
+pub const HEIGHT_MAX: f32 = 12.0; // peak terrain elevation (world units)
+pub const WATER_LEVEL: f32 = 2.8; // y below which low basins flood (render water plane sits here)
+const ROCK_START: f32 = 0.6; // normalized height where rocky highland begins
 
-// Terrain color by height (wet valley green -> grass -> rocky tan), shifting to sand in arid zones
-// (low moisture = desert). Makes both relief AND biomes readable at a glance.
+// Rockiness 0..1 at (x,z): 0 below ROCK_START, ramps to 1 at the peaks. Rocky = hard to cross + barely
+// any plants grow (see sim movement cost + plant_habitability).
+pub fn rockiness(x: f32, z: f32) -> f32 {
+    ((height(x, z) / HEIGHT_MAX - ROCK_START) / (1.0 - ROCK_START)).clamp(0.0, 1.0)
+}
+
+fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
+    [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]
+}
+
+// Terrain color = four DEFINED biomes (sharp transitions): wet valley + grass (green), desert (sand,
+// low moisture), rocky highland (grey, high elevation). Reads the landscape + biomes at a glance.
 fn terrain_color(h01: f32, moist: f32) -> [f32; 4] {
-    let low = [0.13, 0.30, 0.20]; // wet valley
-    let mid = [0.33, 0.46, 0.24]; // grass
-    let high = [0.55, 0.50, 0.42]; // rocky upland
-    let sand = [0.80, 0.71, 0.45, 1.0]; // desert
-    let lerp = |a: [f32; 4], b: [f32; 4], t: f32| {
-        [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t, 1.0]
-    };
-    let a4 = |c: [f32; 3]| [c[0], c[1], c[2], 1.0];
-    let base = if h01 < 0.5 {
-        lerp(a4(low), a4(mid), h01 / 0.5)
-    } else {
-        lerp(a4(mid), a4(high), (h01 - 0.5) / 0.5)
-    };
-    let dry = (((1.0 - moist) - 0.45) / 0.55).clamp(0.0, 1.0); // ramp toward sand where dry
-    lerp(base, sand, dry)
+    let wet = [0.13, 0.44, 0.22]; // lush shoreline / wet valley
+    let grass = [0.22, 0.64, 0.18]; // vivid grassland (clearly green)
+    let sand = [0.86, 0.76, 0.48]; // desert
+    let rock = [0.38, 0.37, 0.36]; // dark rock (distinct from grass)
+    let peak = [0.88, 0.88, 0.92]; // bright bare peak
+    // grass band: darker green near water, brighter grass higher (narrow blend = defined shoreline)
+    let land = lerp3(wet, grass, ((h01 - 0.18) / 0.18).clamp(0.0, 1.0));
+    let arid = ((0.42 - moist) / 0.12).clamp(0.0, 1.0); // sharp desert edge around moisture 0.42
+    let land = lerp3(land, sand, arid);
+    let rk = ((h01 - ROCK_START) / 0.12).clamp(0.0, 1.0); // sharp rock edge at ROCK_START
+    let c = lerp3(land, lerp3(rock, peak, ((h01 - ROCK_START) / (1.0 - ROCK_START)).clamp(0.0, 1.0)), rk);
+    [c[0], c[1], c[2], 1.0]
 }
 
 // Surface height at (x,z). Two-frequency sinusoid hills normalized to 0..HEIGHT_MAX.
@@ -57,7 +65,8 @@ pub fn plant_habitability(x: f32, z: f32, season: f32) -> f32 {
     let water_ok = 1.0 - submerged;
     let arid = (1.0 - moisture(x, z, season) / 0.35).clamp(0.0, 1.0); // moisture < 0.35 -> increasingly arid
     let dry_ok = 1.0 - arid;
-    (water_ok * dry_ok).clamp(0.0, 1.0)
+    let rock_ok = 1.0 - 0.9 * rockiness(x, z); // rocky highland: very few plants grow
+    (water_ok * dry_ok * rock_ok).clamp(0.0, 1.0)
 }
 
 // Build a render mesh of the heightfield over [-span/2, span/2]^2 (render mode only).

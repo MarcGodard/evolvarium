@@ -7,8 +7,8 @@ use crate::rng::Rng;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-pub const PLANT_CAP: usize = 560; // carrying capacity (bounds population), scaled to the bigger arena
-pub const PLANT_MIN: usize = 60; // reseed floor so the food web can't fully collapse
+pub const PLANT_CAP: usize = 1400; // carrying capacity (bounds population), scaled to the doubled arena
+pub const PLANT_MIN: usize = 140; // reseed floor so the food web can't fully collapse
 pub const P_REPRO: f32 = 0.015; // per-tick reproduction chance for a mature plant
 const GROWTH_BASE: f32 = 1.2; // mass/sec at full growth allocation
 
