@@ -3,7 +3,7 @@
 use bevy::prelude::*;
 use std::collections::HashSet;
 
-use crate::components::{Alive, Brain, Creature, DietState, Energy, Fitness, Food, FoodKind, Heading, Locomotion, Rot};
+use crate::components::{Alive, Brain, Creature, DietState, Energy, Fitness, Food, Heading, Locomotion, Rot};
 use crate::genome::{forward, learn, Genome, CONE_HALF, GLOBAL_INPUTS, NFOOD, SIG_PER_SENSOR};
 use crate::plant::{PlantGenome, PlantState, P_REPRO, PLANT_CAP, PLANT_MIN};
 use crate::rng::Rng;
@@ -25,7 +25,6 @@ const TURN_SPEED: f32 = 3.0; // rad/sec at full turn
 const CLIMB_COST: f32 = 1.2;
 const DESCEND_REFUND: f32 = 0.4;
 const EAT_RADIUS: f32 = 1.1;
-const FOOD_VALUE: f32 = 14.0;
 const ENERGY_MAX: f32 = 60.0; // energy ceiling; eating past it harms (overeating trade-off, see 12)
 const OVEREAT_G: f32 = 0.2; // growth-load gained per unit of energy eaten while already full
 
@@ -65,11 +64,6 @@ const FERT_GROWTH: f32 = 0.6; // max growth-rate bonus from saturated soil
 const FERT_CAP: f32 = 1.5; // fertility level at which the growth bonus saturates
 const PLANT_REPRO_FRAC: f32 = 0.5; // fraction of mass kept after budding off a child
 
-// Poison mode (--poison): signed eat reward so learners associate type -> approach/avoid.
-const R_EAT_GOOD: f32 = 2.0;
-const R_EAT_POISON: f32 = -2.0;
-const POISON_COST: f32 = 6.0; // toxic energy hit: stings but survivable, so creature lives to learn
-
 // Diet/epigenetic model (--diet, see 12). Expression ramps on eaten type, decays on others.
 const EXPR_RAMP: f32 = 0.08; // how fast expression of the eaten type rises (x (1-rigidity))
 const EXPR_DECAY: f32 = 0.04; // how fast unused types' expression falls (x (1-rigidity))
@@ -103,11 +97,8 @@ pub struct GenState {
     pub ticks_left: u32,
     pub headless: bool,
     pub learn: bool,     // lifetime learning on/off (A/B vs M1 baseline)
-    pub poison: bool,    // two food types, nutritious/toxic flips each generation
-    pub good_type: u8,   // which FoodKind is nutritious this generation
+    pub poison: bool,    // two food types (legacy --poison mode; sets ntypes=2)
     pub diet: bool,      // epigenetic diet model (NFOOD types, expression, growth-load, disease)
-    pub shift: bool,     // food availability changes each generation (non-stationary)
-    pub avail: Vec<u8>,  // food types available this generation
     pub save: Option<String>, // --save=PATH: write survivors at headless run end (BACKLOG P2)
     pub load: Option<String>, // --load=PATH: resume from a saved population instead of random
 }
@@ -166,7 +157,6 @@ fn diet_state(g: &Genome) -> DietState {
 fn spawn_plant(commands: &mut Commands, g: PlantGenome, mass: f32, pos: Vec3) {
     commands.spawn((
         Food,
-        FoodKind(g.kind),
         PlantState { mass, age: 0 },
         g,
         Transform::from_translation(pos),
@@ -324,7 +314,6 @@ pub fn plant_step(
     for (g, mass, pos) in detritus {
         commands.spawn((
             Food,
-            FoodKind(g.kind),
             PlantState { mass: mass.min(CARRION_MASS), age: 0 },
             PlantGenome { nutrient: DETRITUS_NUTRIENT, defense: 0.0, quality: 0.0, ..g },
             Rot { age: 0 },
@@ -338,7 +327,6 @@ pub fn plant_step(
     }
     for (g, pos) in births {
         spawn_plant(&mut commands, g, PLANT_START_MASS, pos);
-        count += 1;
     }
 }
 
@@ -368,7 +356,7 @@ pub fn live_step(
         (With<Creature>, Without<Food>),
     >,
     mut commands: Commands,
-    fq: Query<(Entity, &Transform, &FoodKind, &PlantState, &PlantGenome, Option<&Rot>), (With<Food>, Without<Creature>)>,
+    fq: Query<(Entity, &Transform, &PlantState, &PlantGenome, Option<&Rot>), (With<Food>, Without<Creature>)>,
 ) {
     let dt = DT;
     let ntypes = gen.ntypes();
@@ -376,7 +364,7 @@ pub fn live_step(
     // None -> living plant. Genome carried so an eaten plant can disperse offspring (13).
     let foods: Vec<(Entity, Vec3, PlantGenome, f32, Option<u32>)> = fq
         .iter()
-        .map(|(e, t, _k, st, pg, rot)| (e, t.translation, pg.clone(), st.mass, rot.map(|r| r.age)))
+        .map(|(e, t, st, pg, rot)| (e, t.translation, pg.clone(), st.mass, rot.map(|r| r.age)))
         .collect();
     let mut eaten: HashSet<Entity> = HashSet::new();
 
@@ -572,7 +560,6 @@ pub fn live_step(
             let p = Vec3::new(cp.x, FOOD_Y + crate::terrain::height(cp.x, cp.z), cp.z);
             commands.spawn((
                 Food,
-                FoodKind(CARRION_KIND),
                 PlantState { mass: CARRION_MASS, age: 0 },
                 PlantGenome {
                     kind: CARRION_KIND,
@@ -647,7 +634,6 @@ pub fn generation_step(
 
     let n = scored.len().max(1);
     let avg: f32 = scored.iter().map(|(f, _)| f).sum::<f32>() / n as f32;
-    let best = scored.first().map(|(f, _)| *f).unwrap_or(0.0);
     let avg_sensors: f32 = scored.iter().map(|(_, g)| g.n_sensors() as f32).sum::<f32>() / n as f32;
     let avg_bite: f32 = scored.iter().map(|(_, g)| g.bite).sum::<f32>() / n as f32;
     // plant (food) co-evolution stats: arms race = bite vs defense

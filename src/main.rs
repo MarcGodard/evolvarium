@@ -26,9 +26,8 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let headless = args.iter().any(|a| a == "--headless");
     let learn = !args.iter().any(|a| a == "--nolearn"); // lifetime learning on by default
-    let poison = args.iter().any(|a| a == "--poison"); // two food types, nutritious flips per gen
+    let poison = args.iter().any(|a| a == "--poison"); // legacy: two food types (sets ntypes=2)
     let diet = args.iter().any(|a| a == "--diet"); // epigenetic diet model (NFOOD types)
-    let shift = args.iter().any(|a| a == "--shift"); // food availability changes each generation
     let seed = args
         .iter()
         .find_map(|a| a.strip_prefix("--seed=").and_then(|s| s.parse::<u64>().ok()))
@@ -36,8 +35,6 @@ fn main() {
     // --save=PATH writes survivors at run end; --load=PATH resumes from a saved population.
     let save = args.iter().find_map(|a| a.strip_prefix("--save=").map(String::from));
     let load = args.iter().find_map(|a| a.strip_prefix("--load=").map(String::from));
-
-    let ntypes: u8 = if diet { genome::NFOOD as u8 } else if poison { 2 } else { 1 };
 
     let mut app = App::new();
     app.insert_resource(rng::Rng::seed(seed));
@@ -48,10 +45,7 @@ fn main() {
         headless,
         learn,
         poison,
-        good_type: 0,
         diet,
-        shift,
-        avail: (0..ntypes).collect(), // gen 0: all types available
         save,
         load,
     });

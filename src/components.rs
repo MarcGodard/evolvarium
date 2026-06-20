@@ -7,11 +7,6 @@ pub struct Creature;
 #[derive(Component)]
 pub struct Food;
 
-// Food type 0 or 1. In --poison mode one type is nutritious, the other toxic, and which is
-// which flips each generation (unknowable at birth -> learners must taste + adapt). See 05.
-#[derive(Component)]
-pub struct FoodKind(pub u8);
-
 // Carrion marker + rot clock. A dead creature drops carrion: fresh = rich meat (no defense), but as
 // `age` climbs its nutrition fades and toxin rises -> rotten meat poisons the eater (BACKLOG P3).
 // Despawns once fully decomposed. Distinguishes carrion from living plants (which carry no Rot).
