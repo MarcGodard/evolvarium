@@ -1079,7 +1079,7 @@ pub fn generation_step(
         diet.age = if desync { (rng.f32() * 600.0) as u32 } else { 0 };
         diet.fatigue = 0.0;
         *g = child;
-        energy.0 = if desync { rng.range(0.4, 1.1) * START_ENERGY } else { START_ENERGY };
+        energy.0 = if desync { rng.range(0.8, 1.2) * START_ENERGY } else { START_ENERGY }; // stagger but never lethally low
         fit.0 = 0.0;
         head.0 = rng.range(-std::f32::consts::PI, std::f32::consts::PI);
         alive.0 = true;

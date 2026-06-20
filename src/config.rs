@@ -18,7 +18,7 @@ pub const FOOD_Y: f32 = 0.4;
 
 // --- day/night + light ---
 pub const DAY_TICKS: u32 = 2400; // ticks per full day-night cycle (40s at 60Hz render: slow, watchable sunrise->sunset)
-pub const LIGHT_COST: f32 = 1.2; // energy/sec per unit mismatch between local light and a creature's light_pref
+pub const LIGHT_COST: f32 = 0.8; // energy/sec per unit mismatch between local light and a creature's light_pref
 
 // --- fatigue/stress (rest instinct) ---
 // Exertion accrues fatigue, rest sheds it. Trade-off teeth: fatigue burns stress energy AND saps
@@ -34,10 +34,10 @@ pub const FATIGUE_DRAG: f32 = 0.6;  // fraction of thrust output lost at full fa
 // Continuous breeding must require GENUINELY EARNED surplus, else the warmup->continuous handoff (all
 // creatures at START_ENERGY 30) triggers a synchronized birth burst -> boom-bust extinction. Threshold
 // ABOVE start energy means no one breeds at the handoff; each must forage up to it -> staggered births.
-pub const REPRO_THRESHOLD: f32 = 42.0; // energy to be eligible (well above START_ENERGY 30 -> earned surplus, staggered)
-pub const REPRO_COST: f32 = 22.0; // energy the parent spends per child (>BIRTH_ENERGY: birth dissipates some)
-pub const BIRTH_ENERGY: f32 = 16.0; // offspring's starting energy (survival buffer to establish + forage)
-pub const P_REPRO_CREATURE: f32 = 0.01; // per-tick reproduction chance while eligible (gentle: damps overshoot)
+pub const REPRO_THRESHOLD: f32 = 30.0; // energy to be eligible (BELOW the ~33-37 foraging energy so the fed majority can breed -> R>1; density taper + competition cap the growth, not a high threshold)
+pub const REPRO_COST: f32 = 16.0; // energy the parent spends per child (parent stays viable after: 30->14)
+pub const BIRTH_ENERGY: f32 = 24.0; // offspring's starting energy: buffer so newborns establish before starving
+pub const P_REPRO_CREATURE: f32 = 0.025; // per-tick reproduction chance while eligible (x density taper)
 pub const REPRO_MIN_AGE: u32 = 180; // min ticks of life before breeding (newborns establish first; paces waves)
 pub const CREATURE_CAP: usize = 130; // population ceiling (kept below grazing pressure that crashes plants)
 pub const WARMUP_GENS: u32 = 12; // generational warm-up before continuous birth/death kicks in
@@ -45,7 +45,7 @@ pub const CONT_LOG_TICKS: u32 = 600; // continuous-mode stats log interval (fine
 
 // --- creature metabolism + movement ---
 pub const START_ENERGY: f32 = 30.0;
-pub const BASAL_COST: f32 = 0.8; // energy/sec just to live (lowered: a fed creature lives long enough to reproduce repeatedly -> continuous population persists instead of dying before R>=1)
+pub const BASAL_COST: f32 = 0.5; // energy/sec just to live (low so a fed creature can coast/rest and a competent forager is net-positive -> continuous persistence; bad foragers still starve = selection)
 pub const MOVE_COST: f32 = 6.0; // movement cost scales with thrust^2 (sprinting dear, gentle motion cheap)
 pub const MOVE_SPEED: f32 = 9.0; // units/sec at full thrust
 pub const TURN_SPEED: f32 = 3.0; // rad/sec at full turn
@@ -58,7 +58,7 @@ pub const SENSE_COST: f32 = 0.012; // energy/sec per unit of total sensor range 
 pub const EAT_RADIUS: f32 = 1.1;
 pub const ENERGY_MAX: f32 = 60.0; // energy ceiling; eating past it harms (overeating trade-off, see 12)
 pub const OVEREAT_G: f32 = 0.2; // growth-load gained per unit of energy eaten while already full
-pub const HEIGHT_COST: f32 = 1.4; // energy/sec upkeep per unit height (tall reaches trees but costs more)
+pub const HEIGHT_COST: f32 = 0.7; // energy/sec upkeep per unit height (tall reaches trees but costs more)
 // Body size (mass): a bigger creature stores more energy + hits harder in combat, but costs more to run
 // and to maintain. Small = nimble + cheap; large = a tank. A physical axis the visualizer shows as scale.
 pub const SIZE_ENERGY: f32 = 1.0;  // energy-store ceiling scales: ENERGY_MAX * (1 + this*size)
@@ -73,8 +73,8 @@ pub const SWIM_LAND_COST: f32 = 5.0;   // energy/sec penalty at full swim on ful
 
 // --- eating / arms race / predation (see 13, M5) ---
 pub const BITE_K: f32 = 8.0; // eat success = sigmoid(BITE_K*(bite - defense))
-pub const BITE_COST: f32 = 1.5; // energy/sec maintenance cost of bite strength
-pub const EAT_GAIN: f32 = 10.0; // energy per (mass * nutrient) consumed (raised: good foragers net-positive -> can reach the breed threshold + live long enough to reproduce, needed for continuous stability)
+pub const BITE_COST: f32 = 0.7; // energy/sec maintenance cost of bite strength
+pub const EAT_GAIN: f32 = 14.0; // energy per (mass * nutrient) consumed (raised: competent foragers clearly net-positive -> sustain + reproduce, needed for continuous stability)
 pub const MEAT_BONUS: f32 = 1.6; // meat (carrion) is richer + longer-lasting than plant food
 pub const ATTACK_RADIUS: f32 = 1.6; // must be adjacent to attack
 pub const PREDATION_GAIN: f32 = 22.0; // energy a predator gains from a kill
@@ -146,11 +146,13 @@ pub const PLANT_REPRO_FRAC: f32 = 0.5; // fraction of mass kept after budding of
 // --- diet/epigenetic model (--diet, see 12) ---
 pub const EXPR_RAMP: f32 = 0.08; // how fast expression of the eaten type rises (x (1-rigidity))
 pub const EXPR_DECAY: f32 = 0.04; // how fast unused types' expression falls (x (1-rigidity))
-pub const EXPR_OVERHEAD: f32 = 1.2; // maintenance energy/sec per unit total expression (generalist cost)
-pub const G_GAIN: f32 = 0.6; // growth-load gained per low-efficiency (mismatch) eat
-pub const G_DECAY: f32 = 0.01; // growth-load shed per tick when on-diet
-pub const DISEASE_K: f32 = 0.012; // per-tick disease mortality per unit growth-load
-pub const MISMATCH_STRESS: f32 = 3.0; // energy hit for eating a poorly-expressed (wrong) food
+pub const EXPR_OVERHEAD: f32 = 0.4; // maintenance energy/sec per unit total expression (generalist cost). Lowered: at 1.2 a generalist (4 types expressed) paid ~4.8/sec -> net-negative -> whole-cohort death every ~1300 ticks (masked by generational revival, fatal in continuous). Still a real specialist-vs-generalist trade-off, not lethal.
+// Diet penalties softened for continuous viability (were a death sentence masked by generational
+// revival): still penalize eating the wrong food, but survivably -> a fitness gradient, not mass death.
+pub const G_GAIN: f32 = 0.3; // growth-load gained per low-efficiency (mismatch) eat
+pub const G_DECAY: f32 = 0.015; // growth-load shed per tick when on-diet (faster recovery)
+pub const DISEASE_K: f32 = 0.004; // per-tick disease mortality per unit growth-load
+pub const MISMATCH_STRESS: f32 = 1.0; // energy hit for eating a poorly-expressed (wrong) food
 pub const AGE_HAZARD: f32 = 0.02; // late-life mortality ceiling (decelerates -> ~plateau)
 pub const AGE_SCALE: f32 = 2400.0; // ticks; age at which aging hazard reaches half its ceiling (longer lifespans)
 
