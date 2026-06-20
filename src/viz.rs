@@ -8,7 +8,7 @@ use bevy::prelude::*;
 use crate::components::{Alive, Creature, DietState, Energy, Fitness, Food, Heading, Rot, Tree};
 use crate::genome::{Genome, NFOOD};
 use crate::plant::{plant_color, PlantGenome, PlantState};
-use crate::sim::ROT_GONE;
+use crate::sim::{daylight, GenState, ROT_GONE};
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
 pub struct VizPlugin;
@@ -27,6 +27,7 @@ impl Plugin for VizPlugin {
                     add_plant_visuals,
                     size_plants,
                     ground_creatures,
+                    day_night_lighting,
                     hide_dead,
                     color_carrion,
                     pick_on_click,
@@ -128,6 +129,14 @@ fn size_plants(mut q: Query<(&PlantState, &PlantGenome, &mut Transform, Option<&
             // foliage base on the ground (sphere radius), lifted by the height gene (taller stalk)
             tf.translation.y = ground + 0.35 * s + g.height * 2.5;
         }
+    }
+}
+
+// Day/night: dim the sun + ambient at night, bright at noon (drives the daylight the sim reacts to).
+fn day_night_lighting(gen: Res<GenState>, mut suns: Query<&mut DirectionalLight>) {
+    let d = daylight(gen.tick);
+    for mut sun in &mut suns {
+        sun.illuminance = 150.0 + 11000.0 * d; // night dark .. noon bright
     }
 }
 

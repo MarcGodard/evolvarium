@@ -15,6 +15,13 @@ pub const WORLD_HALF: f32 = 80.0; // square arena [-H, H] in x,z (doubled playgr
 pub const GEN_TICKS: u32 = 1500; // fixed-steps per generation (generational mode); also the log interval
 pub const MAX_GEN_HEADLESS: u32 = 40; // default headless run length in generations (override: --gens=N)
 
+pub const DAY_TICKS: u32 = 1200; // ticks per full day-night cycle
+const LIGHT_COST: f32 = 2.2; // energy/sec per unit mismatch between local light and a creature's light_pref
+// Global daylight: 0 at midnight .. 1 at noon, cycling on the tick clock.
+pub fn daylight(tick: u32) -> f32 {
+    0.5 - 0.5 * (tick as f32 / DAY_TICKS as f32 * std::f32::consts::TAU).cos()
+}
+
 // Continuous reproduction (default mode). A well-fed creature spends energy to bud a mutated child;
 // death is real (despawn + carrion). Selection is emergent (breed before you die), like the plants.
 // Breed only when genuinely well-fed: this is density dependence -> high population means low per-capita
@@ -208,6 +215,7 @@ fn spawn_carrion(commands: &mut Commands, pos: Vec3, mass: f32) {
             quality: 0.0,    // unused for carrion (separate eat branch); never disperses
             wet: 0.5,        // unused for carrion (excluded from moisture mortality by Without<Rot>)
             height: 0.0,     // carrion lies on the ground
+            light_pref: 0.5, // unused for carrion
             spread: 0.0,
             maturity: 999.0, // never reproduces via plant_step (also excluded by Without<Rot>)
         },
@@ -238,7 +246,7 @@ fn spawn_creature(commands: &mut Commands, g: Genome, pos: Vec3, rng: &mut Rng) 
 
 // Tree genome: near-uneatable (defense ~1) so only tall creatures reach it; rich; grows large + slow.
 fn tree_genome() -> PlantGenome {
-    PlantGenome { kind: 0, nutrient: TREE_NUTRIENT, defense: 0.99, quality: 0.2, wet: 0.5, height: 1.0, spread: 7.0, maturity: TREE_MATURITY }
+    PlantGenome { kind: 0, nutrient: TREE_NUTRIENT, defense: 0.99, quality: 0.2, wet: 0.5, height: 1.0, light_pref: 0.7, spread: 7.0, maturity: TREE_MATURITY }
 }
 
 // Spawn one tree (long-lived plant + Tree marker). edible=true tall fruit tree, false=evergreen.
@@ -399,6 +407,7 @@ pub fn plant_step(
     soil.decay(); // fertility leaches / is taken up over time
     // season drifts on the global tick clock (advances in both modes; generation is frozen in continuous)
     let season = (gen.tick as f32 / GEN_TICKS as f32 * SEASON_FREQ).sin(); // -1 dry .. +1 wet
+    let light = daylight(gen.tick); // 0 night .. 1 noon: plants grow best near their light_pref
     let mut plant_count = q.iter().filter(|(.., t)| t.is_none()).count();
     let tree_count = q.iter().filter(|(.., t)| t.is_some()).count();
     let tree_positions: Vec<Vec3> = q.iter().filter_map(|(_, _, _, tf, t)| t.map(|_| tf.translation)).collect();
@@ -409,6 +418,8 @@ pub fn plant_step(
         let (px, pz) = (tf.translation.x, tf.translation.z);
         let fert = soil.get(px, pz);
         let boost = 1.0 + FERT_GROWTH * (fert / FERT_CAP).min(1.0);
+        // light factor: growth peaks when daylight matches this plant's light_pref (sun vs shade species)
+        let lf = 0.35 + 0.65 * (1.0 - (light - g.light_pref).abs());
         if let Some(tree) = tree {
             // apply this tick's grazing; a fruit tree grazed below TREE_MIN_MASS is over-eaten -> dies
             if let Some(&bite) = tree_bites.0.get(&e) {
@@ -420,7 +431,7 @@ pub fn plant_step(
             }
             // trees: moisture-immune (long-lived), grow slowly + large. Reproduction FOLLOWS GROUND
             // FERTILITY (fertile soil seeds more trees) and SELF-LIMITS by local density (no over-cluster).
-            st.mass += g.growth_rate() * boost * DT;
+            st.mass += g.growth_rate() * boost * lf * DT;
             st.age += 1;
             let r2 = TREE_DENSITY_R * TREE_DENSITY_R;
             let local = tree_positions.iter().filter(|p| p.distance_squared(tf.translation) < r2).count();
@@ -452,8 +463,8 @@ pub fn plant_step(
             plant_count = plant_count.saturating_sub(1);
             continue;
         }
-        // fertile soil speeds growth (M5); growth also scales with habitability (P3 sparse water/desert)
-        st.mass += g.growth_rate() * boost * hab * DT;
+        // fertile soil speeds growth (M5); scales with habitability (P3) and light match (day/night)
+        st.mass += g.growth_rate() * boost * hab * lf * DT;
         st.age += 1;
         if st.mass >= g.maturity
             && plant_count + births.len() < PLANT_CAP
@@ -590,6 +601,7 @@ pub fn live_step(
     let mut pop = cq.iter().count(); // live population (for the continuous-mode reproduction cap)
     // continuous birth/death is active only AFTER the generational warm-up (see WARMUP_GENS)
     let live_continuous = gen.continuous && gen.generation >= WARMUP_GENS;
+    let light = daylight(gen.tick); // current daylight: creatures pay for being far from their light_pref
     // snapshot: (entity, pos, genome, mass, rot_age, tree). rot_age=Some -> carrion; tree=Some(edible) ->
     // a tree (edible fruit tree if true, uneatable evergreen if false); else a living plant.
     let foods: Vec<(Entity, Vec3, PlantGenome, f32, Option<u32>, Option<bool>)> = fq
@@ -686,7 +698,8 @@ pub fn live_step(
             + BITE_COST * genome.bite
             + ROCK_MOVE_COST * rock * thrust.abs()
             + SENSE_COST * sense_range
-            + HEIGHT_COST * genome.height)
+            + HEIGHT_COST * genome.height
+            + LIGHT_COST * (light - genome.light_pref).abs())
             * dt;
 
         // eat nearest plant on contact, IF bite beats its defense (arms race, see 13)

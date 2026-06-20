@@ -21,8 +21,15 @@ pub struct PlantGenome {
     pub wet: f32,      // 0..1 preferred soil moisture; mismatch with local moisture stresses->kills (P3)
     #[serde(default)]
     pub height: f32,   // 0..1 plant height: short creatures can't reach tall plants (reach defense); costs growth
+    #[serde(default = "half_light")]
+    pub light_pref: f32, // 0=shade .. 1=full sun: growth peaks at preferred light (day/night + biome niche)
     pub spread: f32,   // offspring dispersal distance
     pub maturity: f32, // mass needed before it can reproduce
+}
+
+// serde default for light_pref on old saves: mid-light
+fn half_light() -> f32 {
+    0.5
 }
 
 // Per-plant state: mass grows over life; eaten plants are despawned.
@@ -41,6 +48,7 @@ impl PlantGenome {
             quality: rng.f32(),
             wet: rng.f32(),
             height: rng.f32() * 0.4,
+            light_pref: rng.f32(),
             spread: rng.range(2.0, 8.0),
             maturity: rng.range(2.0, 6.0),
         }
@@ -56,6 +64,7 @@ impl PlantGenome {
         self.quality = (self.quality + rng.normal() * 0.1).clamp(0.0, 1.0);
         self.wet = (self.wet + rng.normal() * 0.1).clamp(0.0, 1.0);
         self.height = (self.height + rng.normal() * 0.1).clamp(0.0, 1.0);
+        self.light_pref = (self.light_pref + rng.normal() * 0.1).clamp(0.0, 1.0);
         self.spread = (self.spread + rng.normal() * 1.0).clamp(1.0, 12.0);
         self.maturity = (self.maturity + rng.normal() * 0.8).clamp(1.5, 10.0);
     }
