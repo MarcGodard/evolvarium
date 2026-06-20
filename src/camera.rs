@@ -1,4 +1,5 @@
-// Free-fly camera. Click window to capture mouse + look; Esc to release. WASD move, Q/E down/up, Shift faster.
+// Free-fly camera. RIGHT-click to capture mouse + look; Esc to release. WASD move, Q/E down/up, Shift
+// faster. Left-click is left free for selecting creatures/plants (see viz::pick_on_click).
 // Render mode only. Lets you fly through the world and watch blobs (see 01).
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
@@ -14,7 +15,7 @@ impl Plugin for FlyCameraPlugin {
 }
 
 fn log_controls() {
-    info!("camera: CLICK window to capture mouse + look | ESC release | WASD move | Q/E down/up | Shift faster");
+    info!("camera: RIGHT-CLICK to look | ESC release | LEFT-CLICK select | WASD move | Q/E down/up | Shift faster");
 }
 
 #[derive(Component)]
@@ -39,7 +40,7 @@ fn spawn_camera(mut commands: Commands) {
     ));
 }
 
-// Click to capture (lock + hide cursor); Esc to release. Standard FPS-style.
+// Right-click to capture (lock + hide cursor); Esc to release. Left-click stays free for selection.
 // 0.18: CursorOptions is its own component on the window entity, not a Window field.
 fn cursor_capture(
     buttons: Res<ButtonInput<MouseButton>>,
@@ -47,7 +48,7 @@ fn cursor_capture(
     mut cursor: Query<&mut CursorOptions, With<PrimaryWindow>>,
 ) {
     let Ok(mut cursor) = cursor.single_mut() else { return };
-    if buttons.just_pressed(MouseButton::Left) {
+    if buttons.just_pressed(MouseButton::Right) {
         cursor.grab_mode = CursorGrabMode::Locked;
         cursor.visible = false;
     }

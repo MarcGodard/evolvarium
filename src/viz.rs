@@ -5,20 +5,33 @@
 // All cosmetic; never touches sim state.
 use bevy::prelude::*;
 
-use crate::components::{Alive, Creature, Food, Heading, Rot};
+use crate::components::{Alive, Creature, DietState, Energy, Fitness, Food, Heading, Rot};
 use crate::genome::{Genome, NFOOD};
 use crate::plant::{plant_color, PlantGenome, PlantState};
 use crate::sim::ROT_GONE;
+use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
 pub struct VizPlugin;
 
 impl Plugin for VizPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ShowSensors>()
-            .add_systems(Startup, log_viz_help)
+            .init_resource::<Selected>()
+            .add_systems(Startup, (log_viz_help, spawn_stats_ui))
             .add_systems(
                 Update,
-                (restyle_creatures, toggle_sensors, draw_sensors, add_plant_visuals, size_plants, hide_dead, color_carrion),
+                (
+                    restyle_creatures,
+                    toggle_sensors,
+                    draw_sensors,
+                    add_plant_visuals,
+                    size_plants,
+                    hide_dead,
+                    color_carrion,
+                    pick_on_click,
+                    update_stats,
+                    draw_selection,
+                ),
             );
     }
 }
@@ -117,6 +130,144 @@ fn restyle_creatures(
 fn toggle_sensors(keys: Res<ButtonInput<KeyCode>>, mut show: ResMut<ShowSensors>) {
     if keys.just_pressed(KeyCode::KeyG) {
         show.0 = !show.0;
+    }
+}
+
+// --- click-to-inspect (left-click selects a creature/plant; an on-screen panel shows its stats) ---
+
+#[derive(Resource, Default)]
+pub struct Selected(pub Option<Entity>);
+
+#[derive(Component)]
+struct StatsText;
+
+fn spawn_stats_ui(mut commands: Commands) {
+    commands.spawn((
+        Text::new("left-click a creature or plant to inspect"),
+        TextFont { font_size: 13.0, ..default() },
+        TextColor(Color::WHITE),
+        Node {
+            position_type: PositionType::Absolute,
+            top: Val::Px(8.0),
+            left: Val::Px(8.0),
+            ..default()
+        },
+        StatsText,
+    ));
+}
+
+// Ray-sphere hit: nearest positive t along (origin + t*dir) intersecting the sphere, else None.
+fn ray_hit(origin: Vec3, dir: Vec3, center: Vec3, r: f32) -> Option<f32> {
+    let oc = origin - center;
+    let b = oc.dot(dir);
+    let disc = b * b - (oc.dot(oc) - r * r);
+    if disc < 0.0 {
+        return None;
+    }
+    let s = disc.sqrt();
+    let t = -b - s;
+    if t >= 0.0 {
+        Some(t)
+    } else {
+        let t2 = -b + s;
+        (t2 >= 0.0).then_some(t2)
+    }
+}
+
+// Left-click picks the nearest creature/plant under the cursor (only when not in look mode).
+fn pick_on_click(
+    mouse: Res<ButtonInput<MouseButton>>,
+    windows: Query<(&Window, &CursorOptions), With<PrimaryWindow>>,
+    cam: Query<(&Camera, &GlobalTransform)>,
+    creatures: Query<(Entity, &GlobalTransform), With<Creature>>,
+    foods: Query<(Entity, &GlobalTransform), With<Food>>,
+    mut selected: ResMut<Selected>,
+) {
+    if !mouse.just_pressed(MouseButton::Left) {
+        return;
+    }
+    let Ok((window, cursor_opts)) = windows.single() else { return };
+    if cursor_opts.grab_mode != CursorGrabMode::None {
+        return; // in look mode (right-click captured): cursor not usable for picking
+    }
+    let Some(cursor) = window.cursor_position() else { return };
+    let Ok((camera, cam_tf)) = cam.single() else { return };
+    let Ok(ray) = camera.viewport_to_world(cam_tf, cursor) else { return };
+    let (o, d) = (ray.origin, *ray.direction);
+    let mut best: Option<(f32, Entity)> = None;
+    let consider = |e: Entity, pos: Vec3, r: f32, best: &mut Option<(f32, Entity)>| {
+        if let Some(t) = ray_hit(o, d, pos, r) {
+            if best.map_or(true, |(bt, _)| t < bt) {
+                *best = Some((t, e));
+            }
+        }
+    };
+    for (e, t) in &creatures {
+        consider(e, t.translation(), 1.0, &mut best);
+    }
+    for (e, t) in &foods {
+        consider(e, t.translation(), 0.8, &mut best);
+    }
+    selected.0 = best.map(|(_, e)| e);
+}
+
+// Draw a yellow ring around the selected entity each frame so you can see what's picked.
+fn draw_selection(selected: Res<Selected>, q: Query<&GlobalTransform>, mut gizmos: Gizmos) {
+    if let Some(e) = selected.0 {
+        if let Ok(tf) = q.get(e) {
+            gizmos.sphere(tf.translation(), 1.2, Color::srgb(1.0, 1.0, 0.2));
+        }
+    }
+}
+
+// Update the on-screen panel with the selected entity's live stats (creature or plant/carrion).
+fn update_stats(
+    selected: Res<Selected>,
+    creatures: Query<(&Energy, &Fitness, &Genome, &DietState, &Alive)>,
+    foods: Query<(&PlantGenome, &PlantState, Option<&Rot>)>,
+    mut text: Query<&mut Text, With<StatsText>>,
+) {
+    let Ok(mut text) = text.single_mut() else { return };
+    let Some(e) = selected.0 else {
+        text.0 = "left-click a creature or plant to inspect".into();
+        return;
+    };
+    if let Ok((energy, fit, g, diet, alive)) = creatures.get(e) {
+        // dominant diet type (highest current expression)
+        let mut dom = 0;
+        for t in 1..NFOOD {
+            if diet.expr[t] > diet.expr[dom] {
+                dom = t;
+            }
+        }
+        text.0 = format!(
+            "CREATURE  {}\nenergy   {:.1}\nfitness  {:.1}\nsensors  {}\nbite     {:.2}\nrigidity {:.2}\ndiet>type {} (eff {:.2})\nload(G)  {:.2}\nage      {}",
+            if alive.0 { "alive" } else { "DEAD" },
+            energy.0,
+            fit.0,
+            g.n_sensors(),
+            g.bite,
+            g.rigidity,
+            dom,
+            diet.expr[dom],
+            diet.g,
+            diet.age,
+        );
+    } else if let Ok((pg, st, rot)) = foods.get(e) {
+        if let Some(rot) = rot {
+            let f = (rot.age as f32 / ROT_GONE as f32 * 100.0).min(100.0);
+            text.0 = format!(
+                "CARRION / DETRITUS\nrotted   {:.0}%\nmass     {:.1}\nnutrient {:.2}",
+                f, st.mass, pg.nutrient
+            );
+        } else {
+            text.0 = format!(
+                "PLANT  type {}\nmass     {:.1}\nnutrient {:.2}\ndefense  {:.2}\nquality  {:.2}\nwet-pref {:.2}",
+                pg.kind, st.mass, pg.nutrient, pg.defense, pg.quality, pg.wet
+            );
+        }
+    } else {
+        text.0 = "(selection gone: eaten or died)".into();
     }
 }
 
