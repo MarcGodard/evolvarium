@@ -22,6 +22,8 @@ const MOVE_SPEED: f32 = 9.0; // units/sec at full thrust
 const TURN_SPEED: f32 = 3.0; // rad/sec at full turn
 const EAT_RADIUS: f32 = 1.1;
 const FOOD_VALUE: f32 = 14.0;
+const ENERGY_MAX: f32 = 60.0; // energy ceiling; eating past it harms (overeating trade-off, see 12)
+const OVEREAT_G: f32 = 0.2; // growth-load gained per unit of energy eaten while already full
 
 // Living food (see 13). Eat success = sigmoid(BITE_K*(bite - defense)); energy ∝ mass*nutrient.
 const BITE_K: f32 = 8.0;
@@ -334,6 +336,13 @@ pub fn live_step(
                         energy.0 += EAT_GAIN * base;
                         fit.0 += base;
                         eat_reward = R_EAT;
+                    }
+                    // overeating trade-off (12): energy is capped; eating while already full converts
+                    // the excess into growth-load (harm) -> gorging shortens life. Eat best, in moderation.
+                    if energy.0 > ENERGY_MAX {
+                        let excess = energy.0 - ENERGY_MAX;
+                        energy.0 = ENERGY_MAX;
+                        diet.g += excess * OVEREAT_G;
                     }
                     commands.entity(e).despawn();
                     eaten.insert(e);

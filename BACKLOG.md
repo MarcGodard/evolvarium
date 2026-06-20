@@ -13,7 +13,7 @@ verify headless, commit on `build` with a clear message, then tick the item here
 - [x] **Rest vs move economy.** Make resting genuinely valuable: low/zero cost when nearly still,
       rising cost with speed (replace flat MOVE_COST*thrust with a steeper curve), and a small basal
       that rewards stillness. Aim: aimless circling becomes costly, purposeful move+rest emerges.
-- [ ] **Overeating penalty.** Cap energy; eating at/near max converts the excess into growth-load G
+- [x] **Overeating penalty.** Cap energy; eating at/near max converts the excess into growth-load G
       (harm), so gorging shortens life. Pressure to eat the BEST food in moderation, not constantly.
 - [ ] **Remove dead creatures visually.** On death, despawn (or hide) the creature mesh in render.
 
