@@ -4,11 +4,14 @@
 //   cargo run                       -> render: watch creatures forage, fly camera
 //   cargo run -- --headless         -> no window, fast, logs avg/best food per generation, exits
 //   cargo run -- --headless --seed=7 -> reproducible run with a chosen seed
+//   cargo run -- --headless --save=run.json -> write fitness-ranked survivors at run end
+//   cargo run -- --headless --load=run.json -> resume from a saved population (BACKLOG P2)
 //
 // fields.rs (gravity/zone fields) returns at M4; not wired this milestone.
 mod camera;
 mod components;
 mod genome;
+mod persist;
 mod plant;
 mod rng;
 mod sim;
@@ -29,6 +32,9 @@ fn main() {
         .iter()
         .find_map(|a| a.strip_prefix("--seed=").and_then(|s| s.parse::<u64>().ok()))
         .unwrap_or(1);
+    // --save=PATH writes survivors at run end; --load=PATH resumes from a saved population.
+    let save = args.iter().find_map(|a| a.strip_prefix("--save=").map(String::from));
+    let load = args.iter().find_map(|a| a.strip_prefix("--load=").map(String::from));
 
     let ntypes: u8 = if diet { genome::NFOOD as u8 } else if poison { 2 } else { 1 };
 
@@ -44,6 +50,8 @@ fn main() {
         diet,
         shift,
         avail: (0..ntypes).collect(), // gen 0: all types available
+        save,
+        load,
     });
 
     if headless {

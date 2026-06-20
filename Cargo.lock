@@ -2342,6 +2342,8 @@ name = "evolvarium"
 version = "0.0.1"
 dependencies = [
  "bevy",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

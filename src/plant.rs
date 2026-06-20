@@ -5,13 +5,14 @@
 use crate::genome::NFOOD;
 use crate::rng::Rng;
 use bevy::prelude::*;
+use serde::{Deserialize, Serialize};
 
 pub const PLANT_CAP: usize = 220; // carrying capacity (bounds population)
 pub const PLANT_MIN: usize = 24; // reseed floor so the food web can't fully collapse
 pub const P_REPRO: f32 = 0.015; // per-tick reproduction chance for a mature plant
 const GROWTH_BASE: f32 = 1.2; // mass/sec at full growth allocation
 
-#[derive(Component, Clone)]
+#[derive(Component, Clone, Serialize, Deserialize)]
 pub struct PlantGenome {
     pub kind: u8,      // food/diet type (couples to creature expression, see 12)
     pub nutrient: f32, // 0..1 energy density delivered when eaten

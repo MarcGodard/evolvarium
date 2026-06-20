@@ -75,6 +75,8 @@ pub struct GenState {
     pub diet: bool,      // epigenetic diet model (NFOOD types, expression, growth-load, disease)
     pub shift: bool,     // food availability changes each generation (non-stationary)
     pub avail: Vec<u8>,  // food types available this generation
+    pub save: Option<String>, // --save=PATH: write survivors at headless run end (BACKLOG P2)
+    pub load: Option<String>, // --load=PATH: resume from a saved population instead of random
 }
 
 impl GenState {
@@ -107,10 +109,15 @@ fn spawn_plant(commands: &mut Commands, g: PlantGenome, mass: f32, pos: Vec3) {
 
 // Headless: components only, no render assets (absent under MinimalPlugins).
 pub fn spawn_world_headless(mut commands: Commands, mut rng: ResMut<Rng>, gen: Res<GenState>) {
-    for _ in 0..POP {
+    // --load resumes a saved population; otherwise a random founding pop. Positions re-randomized.
+    let snap = gen.load.as_deref().and_then(crate::persist::load_snapshot);
+    let genomes: Vec<Genome> = match &snap {
+        Some(s) if !s.creatures.is_empty() => s.creatures.clone(),
+        _ => (0..POP).map(|_| Genome::random(&mut rng)).collect(),
+    };
+    for g in genomes {
         let p = rand_pos(&mut rng, CREATURE_Y);
         let h = rng.range(-std::f32::consts::PI, std::f32::consts::PI);
-        let g = Genome::random(&mut rng);
         let brain = Brain { net: g.net.clone(), prev_dist: f32::INFINITY };
         let diet = diet_state(&g);
         commands.spawn((
@@ -127,10 +134,20 @@ pub fn spawn_world_headless(mut commands: Commands, mut rng: ResMut<Rng>, gen: R
         ));
     }
     let ntypes = gen.ntypes();
-    for _ in 0..FOOD {
-        let p = rand_pos(&mut rng, FOOD_Y);
-        let pg = PlantGenome::random(&mut rng, ntypes);
-        spawn_plant(&mut commands, pg, PLANT_START_MASS, p);
+    match &snap {
+        Some(s) if !s.plants.is_empty() => {
+            for sp in &s.plants {
+                let p = rand_pos(&mut rng, FOOD_Y);
+                spawn_plant(&mut commands, sp.g.clone(), sp.mass, p);
+            }
+        }
+        _ => {
+            for _ in 0..FOOD {
+                let p = rand_pos(&mut rng, FOOD_Y);
+                let pg = PlantGenome::random(&mut rng, ntypes);
+                spawn_plant(&mut commands, pg, PLANT_START_MASS, p);
+            }
+        }
     }
 }
 
@@ -146,10 +163,15 @@ pub fn spawn_world_render(
     // shared plant sphere mesh; viz::add_plant_visuals colors each plant by its genome
     commands.insert_resource(crate::viz::PlantMesh(meshes.add(Sphere::new(0.35))));
 
-    for _ in 0..POP {
+    // --load resumes a saved population; otherwise a random founding pop. Positions re-randomized.
+    let snap = gen.load.as_deref().and_then(crate::persist::load_snapshot);
+    let genomes: Vec<Genome> = match &snap {
+        Some(s) if !s.creatures.is_empty() => s.creatures.clone(),
+        _ => (0..POP).map(|_| Genome::random(&mut rng)).collect(),
+    };
+    for g in genomes {
         let p = rand_pos(&mut rng, CREATURE_Y);
         let h = rng.range(-std::f32::consts::PI, std::f32::consts::PI);
-        let g = Genome::random(&mut rng);
         let brain = Brain { net: g.net.clone(), prev_dist: f32::INFINITY };
         let diet = diet_state(&g);
         // own material per creature so viz can recolor it by evolved traits (see viz.rs)
@@ -170,10 +192,20 @@ pub fn spawn_world_render(
         ));
     }
     let ntypes = gen.ntypes();
-    for _ in 0..FOOD {
-        let p = rand_pos(&mut rng, FOOD_Y);
-        let pg = PlantGenome::random(&mut rng, ntypes);
-        spawn_plant(&mut commands, pg, PLANT_START_MASS, p);
+    match &snap {
+        Some(s) if !s.plants.is_empty() => {
+            for sp in &s.plants {
+                let p = rand_pos(&mut rng, FOOD_Y);
+                spawn_plant(&mut commands, sp.g.clone(), sp.mass, p);
+            }
+        }
+        _ => {
+            for _ in 0..FOOD {
+                let p = rand_pos(&mut rng, FOOD_Y);
+                let pg = PlantGenome::random(&mut rng, ntypes);
+                spawn_plant(&mut commands, pg, PLANT_START_MASS, p);
+            }
+        }
     }
 }
 
@@ -397,7 +429,7 @@ pub fn generation_step(
         (&mut Transform, &mut Energy, &mut Fitness, &mut Heading, &mut Alive, &mut Genome, &mut Brain, &mut DietState, &mut Locomotion),
         With<Creature>,
     >,
-    pq: Query<&PlantGenome>,
+    pq: Query<(&PlantGenome, &PlantState)>,
     mut exit: MessageWriter<AppExit>,
 ) {
     gen.ticks_left = gen.ticks_left.saturating_sub(1);
@@ -410,6 +442,13 @@ pub fn generation_step(
     let mut scored: Vec<(f32, Genome)> =
         cq.iter().map(|(_, _, fit, _, _, g, _, _, _)| (fit.0, g.clone())).collect();
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+
+    // capture fitness-ranked survivors for --save (only when saving; cheap clone of POP genomes)
+    let ranked: Vec<Genome> = if gen.save.is_some() {
+        scored.iter().map(|(_, g)| g.clone()).collect()
+    } else {
+        Vec::new()
+    };
 
     // roam ratio = net displacement / path walked, averaged. ~1 = straight rovers, ~0 = circlers.
     let mut roam_sum = 0.0f32;
@@ -429,8 +468,8 @@ pub fn generation_step(
     let avg_bite: f32 = scored.iter().map(|(_, g)| g.bite).sum::<f32>() / n as f32;
     // plant (food) co-evolution stats: arms race = bite vs defense
     let plant_n = pq.iter().len().max(1);
-    let avg_def: f32 = pq.iter().map(|g| g.defense).sum::<f32>() / plant_n as f32;
-    let avg_nut: f32 = pq.iter().map(|g| g.nutrient).sum::<f32>() / plant_n as f32;
+    let avg_def: f32 = pq.iter().map(|(g, _)| g.defense).sum::<f32>() / plant_n as f32;
+    let avg_nut: f32 = pq.iter().map(|(g, _)| g.nutrient).sum::<f32>() / plant_n as f32;
     if gen.diet {
         let avg_rig: f32 = scored.iter().map(|(_, g)| g.rigidity).sum::<f32>() / n as f32;
         info!("gen {:>3} | nutri {:>6.2} | sens {:.1} | rig {:.2} | bite {:.2} vs def {:.2} | plant-nut {:.2} | roam {:.2} | plants {}", gen.generation, avg, avg_sensors, avg_rig, avg_bite, avg_def, avg_nut, avg_roam, plant_n);
@@ -480,6 +519,17 @@ pub fn generation_step(
     // (their own GA in plant_step), so the food supply co-evolves across creature generations.
 
     if gen.headless && gen.generation >= MAX_GEN_HEADLESS {
+        // --save: persist the fitness-ranked survivors + current food web so the run can resume.
+        if let Some(path) = &gen.save {
+            let plants: Vec<crate::persist::SavedPlant> = pq
+                .iter()
+                .map(|(g, st)| crate::persist::SavedPlant { g: g.clone(), mass: st.mass })
+                .collect();
+            crate::persist::save_snapshot(
+                path,
+                &crate::persist::Snapshot { generation: gen.generation, creatures: ranked, plants },
+            );
+        }
         info!("headless run done after {} generations", gen.generation);
         exit.write(AppExit::Success);
     }

@@ -9,6 +9,10 @@ description = "Artificial-life sim: GA grows blob bodies + brain shape, brains l
 # M0 needs only the engine. bevy_rand / bevy_egui / spatial hash arrive in later milestones.
 bevy = "0.18"
 
+# Save/load survivor population (serde + JSON). Lets a good run stop + resume (BACKLOG P2).
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
 # Bevy build-speed profile (deps optimized, our crate fast to recompile).
 [profile.dev]
 opt-level = 1

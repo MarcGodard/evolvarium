@@ -4,6 +4,7 @@
 // growth come later (02/03). Weights kept as structured layers so adding/removing a sensor is clean.
 use crate::rng::Rng;
 use bevy::prelude::*;
+use serde::{Deserialize, Serialize};
 
 pub const HIDDEN: usize = 6;
 pub const OUTPUTS: usize = 2; // [thrust 0..1, turn -1..1]
@@ -18,20 +19,20 @@ const RANGE_MIN: f32 = 4.0;
 const RANGE_MAX: f32 = 14.0;
 
 // One directional food-eye. angle = offset from heading; range = how far it sees.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Serialize, Deserialize)]
 pub struct Sensor {
     pub angle: f32,
     pub range: f32,
 }
 
 // Layered weights. ih: HIDDEN rows, each (n_in + 1) incl. bias. ho: OUTPUTS rows, each (HIDDEN + 1).
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Net {
     pub ih: Vec<Vec<f32>>,
     pub ho: Vec<Vec<f32>>,
 }
 
-#[derive(Component, Clone)]
+#[derive(Component, Clone, Serialize, Deserialize)]
 pub struct Genome {
     pub sensors: Vec<Sensor>,
     pub net: Net,        // initial weights (heritable priors)

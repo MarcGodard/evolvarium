@@ -18,9 +18,10 @@ verify headless, commit on `build` with a clear message, then tick the item here
 - [ ] **Remove dead creatures visually.** On death, despawn (or hide) the creature mesh in render.
 
 ## P2 — persistence + food GA
-- [ ] **Save / load survivors.** `--save <path>` writes the surviving population's genomes (+plants?)
-      to disk (RON/JSON via serde); `--load <path>` resumes from it. So a good run can be stopped and
-      continued without starting from scratch.
+- [x] **Save / load survivors.** `--save=<path>` writes the fitness-ranked survivor genomes + current
+      food web (plant genomes + mass) to JSON at headless run end; `--load=<path>` resumes from it
+      (random spawn if missing/corrupt). Verified: resume opens at evolved fitness, not cold-start.
+      Positions re-randomized (only genes persist). persist.rs + serde/serde_json.
 - [ ] **Per-food digestibility GA.** Make some foods intrinsically more GA-beneficial: e.g. a plant
       `quality` gene that boosts a creature's digestion efficiency, and/or a heritable creature
       per-food digestion gene beyond the lifetime `expr`. Clarify vs existing diet model first.
