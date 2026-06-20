@@ -60,10 +60,13 @@ pub struct Locomotion {
 // Per-life epigenetic diet state (see 12). expr[t] = current expression of digestion genes for
 // food type t = efficiency on it. Eating a type ramps its expr, unused types decay (use-it-or-lose-it).
 // g = accumulated growth-signaling load (chronic mismatch -> disease). age in ticks (aging hazard).
+// fatigue = exertion debt 0..1: rises with movement, sheds while resting. High fatigue costs stress
+// energy + saps movement output (effort still burns) -> resting is the only recovery -> day/night rest.
 use crate::genome::NFOOD;
 #[derive(Component)]
 pub struct DietState {
     pub expr: [f32; NFOOD],
     pub g: f32,
     pub age: u32,
+    pub fatigue: f32,
 }

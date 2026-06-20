@@ -12,11 +12,19 @@ use crate::rng::Rng;
 pub const POP: usize = 140;
 pub const FOOD: usize = 480;
 pub const WORLD_HALF: f32 = 80.0; // square arena [-H, H] in x,z (doubled playground)
-pub const GEN_TICKS: u32 = 1500; // fixed-steps per generation (generational mode); also the log interval
+pub const GEN_TICKS: u32 = 4800; // steps/generation (generational mode) + log interval = 2 full days (see DAY_TICKS): longer lives, creatures live through several day/night cycles so rest-timing can pay off
 pub const MAX_GEN_HEADLESS: u32 = 40; // default headless run length in generations (override: --gens=N)
 
-pub const DAY_TICKS: u32 = 1200; // ticks per full day-night cycle
+pub const DAY_TICKS: u32 = 2400; // ticks per full day-night cycle (40s at 60Hz render: slow, watchable sunrise->sunset)
 const LIGHT_COST: f32 = 2.2; // energy/sec per unit mismatch between local light and a creature's light_pref
+// Fatigue/stress (rest instinct): exertion accrues fatigue, rest sheds it. Trade-off teeth: fatigue
+// burns stress energy AND saps movement output while effort still costs full MOVE_COST -> grinding while
+// exhausted is pure loss, so resting (low thrust) pays. Fed into the NN -> brains evolve to rest during
+// their unfavorable-light hours (diurnal vs nocturnal niches emerge), see daylight() + light_pref.
+const FATIGUE_GAIN: f32 = 0.5;  // fatigue/sec at full thrust (exertion debt)
+const FATIGUE_REST: f32 = 0.35; // fatigue/sec shed at zero thrust (recovery)
+const STRESS_COST: f32 = 1.6;   // energy/sec at full fatigue (chronic-exertion drain)
+const FATIGUE_DRAG: f32 = 0.6;  // fraction of thrust output lost at full fatigue (tired = sluggish)
 // Global daylight: 0 at midnight .. 1 at noon, cycling on the tick clock.
 pub fn daylight(tick: u32) -> f32 {
     0.5 - 0.5 * (tick as f32 / DAY_TICKS as f32 * std::f32::consts::TAU).cos()
@@ -115,7 +123,7 @@ const G_DECAY: f32 = 0.01; // growth-load shed per tick when on-diet
 const DISEASE_K: f32 = 0.012; // per-tick disease mortality per unit growth-load
 const MISMATCH_STRESS: f32 = 3.0; // energy hit for eating a poorly-expressed (wrong) food
 const AGE_HAZARD: f32 = 0.02; // late-life mortality ceiling (decelerates -> ~plateau)
-const AGE_SCALE: f32 = 900.0; // ticks; age at which aging hazard reaches half its ceiling
+const AGE_SCALE: f32 = 2400.0; // ticks; age at which aging hazard reaches half its ceiling (longer lifespans)
 
 const ELITE_FRAC: f32 = 0.3;
 const MUT_RATE: f32 = 0.12;
@@ -200,7 +208,7 @@ fn rand_pos(rng: &mut Rng, y: f32) -> Vec3 {
 }
 
 fn diet_state(g: &Genome) -> DietState {
-    DietState { expr: g.expr0, g: 0.0, age: 0 }
+    DietState { expr: g.expr0, g: 0.0, age: 0, fatigue: 0.0 }
 }
 
 // Spawn carrion (meat) at a spot: a Food entity with the Rot clock. Used by death + predation kills.
@@ -679,17 +687,22 @@ pub fn live_step(
             }
         }
         input.push(energy.0 / START_ENERGY);
+        input.push(light * 2.0 - 1.0); // daylight signal (-1 night .. +1 noon): brain can time rest by it
+        input.push(diet.fatigue * 2.0 - 1.0); // exertion debt: lets the brain "feel tired" and choose to rest
         input.push(1.0); // bias
 
         // think (per-life learned brain, dynamic topology matching this genome's sensor count)
         let (h, out) = forward(&brain.net, &input);
         let thrust = out[0];
         let turn = out[1];
+        // fatigue saps usable output (tired = sluggish); intended effort still costs full MOVE_COST below,
+        // so flailing while exhausted is a net loss -> resting to recover is the only way out.
+        let move_thrust = thrust * (1.0 - FATIGUE_DRAG * diet.fatigue);
 
         // act
         head.0 = wrap_angle(head.0 + turn * TURN_SPEED * dt);
         let dir = Vec3::new(head.0.sin(), 0.0, head.0.cos());
-        let mut np = pos + dir * (thrust * MOVE_SPEED * dt);
+        let mut np = pos + dir * (move_thrust * MOVE_SPEED * dt);
         np.x = np.x.clamp(-WORLD_HALF, WORLD_HALF);
         np.z = np.z.clamp(-WORLD_HALF, WORLD_HALF);
         // ride the terrain; pay for elevation change (P3): uphill costs, downhill partially refunds
@@ -712,8 +725,11 @@ pub fn live_step(
             + ROCK_MOVE_COST * rock * thrust.abs()
             + SENSE_COST * sense_range
             + HEIGHT_COST * genome.height
-            + LIGHT_COST * (light - genome.light_pref).abs())
+            + LIGHT_COST * (light - genome.light_pref).abs()
+            + STRESS_COST * diet.fatigue)
             * dt;
+        // fatigue dynamics: exertion (thrust) accrues debt; idling (low thrust) sheds it. Clamped 0..1.
+        diet.fatigue = (diet.fatigue + (FATIGUE_GAIN * thrust - FATIGUE_REST * (1.0 - thrust)) * dt).clamp(0.0, 1.0);
 
         // eat nearest plant on contact, IF bite beats its defense (arms race, see 13)
         let mut eat_reward = 0.0;
@@ -1015,6 +1031,7 @@ pub fn generation_step(
         .sum::<f32>()
         / n as f32;
     let avg_bite: f32 = scored.iter().map(|(_, g)| g.bite).sum::<f32>() / n as f32;
+    let avg_light: f32 = scored.iter().map(|(_, g)| g.light_pref).sum::<f32>() / n as f32; // niche: <0.5 nocturnal, >0.5 diurnal
     // plant (food) co-evolution stats: arms race = bite vs defense
     let plant_n = pq.iter().len().max(1);
     let avg_def: f32 = pq.iter().map(|(g, _)| g.defense).sum::<f32>() / plant_n as f32;
@@ -1023,7 +1040,7 @@ pub fn generation_step(
     let avg_wet: f32 = pq.iter().map(|(g, _)| g.wet).sum::<f32>() / plant_n as f32;
     if gen.diet {
         let avg_rig: f32 = scored.iter().map(|(_, g)| g.rigidity).sum::<f32>() / n as f32;
-        info!("gen {:>3} | nutri {:>6.2} | sens {:.1} r{:.0} | rig {:.2} | bite {:.2} vs def {:.2} | plant-nut {:.2} qual {:.2} wet {:.2} | roam {:.2} elev {:.1} | plants {} soil {:.2}", gen.generation, avg, avg_sensors, avg_range, avg_rig, avg_bite, avg_def, avg_nut, avg_qual, avg_wet, avg_roam, avg_elev, plant_n, soil.avg());
+        info!("gen {:>3} | nutri {:>6.2} | sens {:.1} r{:.0} | rig {:.2} | bite {:.2} vs def {:.2} | light {:.2} | plant-nut {:.2} qual {:.2} wet {:.2} | roam {:.2} elev {:.1} | plants {} soil {:.2}", gen.generation, avg, avg_sensors, avg_range, avg_rig, avg_bite, avg_def, avg_light, avg_nut, avg_qual, avg_wet, avg_roam, avg_elev, plant_n, soil.avg());
     } else {
         info!("gen {:>3} | food {:>6.2} | sens {:.1} r{:.0} | bite {:.2} vs def {:.2} | plant-nut {:.2} qual {:.2} wet {:.2} | roam {:.2} elev {:.1} | plants {} soil {:.2}", gen.generation, avg, avg_sensors, avg_range, avg_bite, avg_def, avg_nut, avg_qual, avg_wet, avg_roam, avg_elev, plant_n, soil.avg());
     }
@@ -1052,6 +1069,7 @@ pub fn generation_step(
         diet.expr = child.expr0;
         diet.g = 0.0;
         diet.age = 0;
+        diet.fatigue = 0.0;
         *g = child;
         energy.0 = START_ENERGY;
         fit.0 = 0.0;
