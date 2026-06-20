@@ -10,7 +10,7 @@ verify headless, commit on `build` with a clear message, then tick the item here
 - [x] **Movement-range diagnostic.** Track per-creature net displacement / area covered over life;
       log avg in generation_step. So we can SEE whether creatures roam vs circle. (No fitness change
       yet — just observability first.)
-- [ ] **Rest vs move economy.** Make resting genuinely valuable: low/zero cost when nearly still,
+- [x] **Rest vs move economy.** Make resting genuinely valuable: low/zero cost when nearly still,
       rising cost with speed (replace flat MOVE_COST*thrust with a steeper curve), and a small basal
       that rewards stillness. Aim: aimless circling becomes costly, purposeful move+rest emerges.
 - [ ] **Overeating penalty.** Cap energy; eating at/near max converts the excess into growth-load G

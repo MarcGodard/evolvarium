@@ -16,8 +16,8 @@ pub const GEN_TICKS: u32 = 1500; // fixed-steps per generation
 pub const MAX_GEN_HEADLESS: u32 = 40; // headless stops after this many gens
 
 const START_ENERGY: f32 = 30.0;
-const BASAL_COST: f32 = 2.0; // energy/sec just to live
-const MOVE_COST: f32 = 4.0; // extra energy/sec at full thrust
+const BASAL_COST: f32 = 1.4; // energy/sec just to live (low -> resting is genuinely valuable)
+const MOVE_COST: f32 = 6.0; // movement cost scales with thrust^2 (sprinting dear, gentle motion cheap)
 const MOVE_SPEED: f32 = 9.0; // units/sec at full thrust
 const TURN_SPEED: f32 = 3.0; // rad/sec at full turn
 const EAT_RADIUS: f32 = 1.1;
@@ -302,8 +302,8 @@ pub fn live_step(
         ct.translation = np;
         ct.rotation = Quat::from_rotation_y(head.0);
 
-        // metabolism: basal + movement + bite upkeep (stronger jaws cost more, see 13)
-        energy.0 -= (BASAL_COST + MOVE_COST * thrust + BITE_COST * genome.bite) * dt;
+        // metabolism: basal + movement (convex in speed: rest cheap, sprint dear) + bite upkeep
+        energy.0 -= (BASAL_COST + MOVE_COST * thrust * thrust + BITE_COST * genome.bite) * dt;
 
         // eat nearest plant on contact, IF bite beats its defense (arms race, see 13)
         let mut eat_reward = 0.0;
