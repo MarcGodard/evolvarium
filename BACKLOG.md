@@ -7,7 +7,7 @@ edit those tuning constants — it adds FEATURES. One item per fire: implement, 
 verify headless, commit on `build` with a clear message, then tick the item here.
 
 ## P1 — behavioral / energy economy (fixes the "creatures just circle" problem)
-- [ ] **Movement-range diagnostic.** Track per-creature net displacement / area covered over life;
+- [x] **Movement-range diagnostic.** Track per-creature net displacement / area covered over life;
       log avg in generation_step. So we can SEE whether creatures roam vs circle. (No fitness change
       yet — just observability first.)
 - [ ] **Rest vs move economy.** Make resting genuinely valuable: low/zero cost when nearly still,

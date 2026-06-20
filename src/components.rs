@@ -38,6 +38,14 @@ pub struct Brain {
     pub prev_dist: f32, // distance to nearest food last tick, for approach-reward shaping
 }
 
+// Per-life locomotion diagnostic: where the creature was born + total path walked. Lets us measure
+// roaming vs circling: net displacement / path ratio ~1 = straight rover, ~0 = spinning in place.
+#[derive(Component)]
+pub struct Locomotion {
+    pub start: Vec3,
+    pub path: f32,
+}
+
 // Per-life epigenetic diet state (see 12). expr[t] = current expression of digestion genes for
 // food type t = efficiency on it. Eating a type ramps its expr, unused types decay (use-it-or-lose-it).
 // g = accumulated growth-signaling load (chronic mismatch -> disease). age in ticks (aging hazard).

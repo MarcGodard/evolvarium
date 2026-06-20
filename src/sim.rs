@@ -3,7 +3,7 @@
 use bevy::prelude::*;
 use std::collections::HashSet;
 
-use crate::components::{Alive, Brain, Creature, DietState, Energy, Fitness, Food, FoodKind, Heading};
+use crate::components::{Alive, Brain, Creature, DietState, Energy, Fitness, Food, FoodKind, Heading, Locomotion};
 use crate::genome::{forward, learn, Genome, CONE_HALF, GLOBAL_INPUTS, NFOOD, SIG_PER_SENSOR};
 use crate::plant::{PlantGenome, PlantState, P_REPRO, PLANT_CAP, PLANT_MIN};
 use crate::rng::Rng;
@@ -120,6 +120,7 @@ pub fn spawn_world_headless(mut commands: Commands, mut rng: ResMut<Rng>, gen: R
             Fitness(0.0),
             Heading(h),
             Alive(true),
+            Locomotion { start: p, path: 0.0 },
             Transform::from_translation(p),
         ));
     }
@@ -160,6 +161,7 @@ pub fn spawn_world_render(
             Fitness(0.0),
             Heading(h),
             Alive(true),
+            Locomotion { start: p, path: 0.0 },
             Mesh3d(creature_mesh.clone()),
             MeshMaterial3d(mat),
             Transform::from_translation(p),
@@ -213,7 +215,7 @@ pub fn live_step(
     gen: Res<GenState>,
     mut rng: ResMut<Rng>,
     mut cq: Query<
-        (&mut Transform, &mut Energy, &mut Fitness, &mut Heading, &mut Alive, &Genome, &mut Brain, &mut DietState),
+        (&mut Transform, &mut Energy, &mut Fitness, &mut Heading, &mut Alive, &Genome, &mut Brain, &mut DietState, &mut Locomotion),
         (With<Creature>, Without<Food>),
     >,
     mut commands: Commands,
@@ -228,7 +230,7 @@ pub fn live_step(
         .collect();
     let mut eaten: HashSet<Entity> = HashSet::new();
 
-    for (mut ct, mut energy, mut fit, mut head, mut alive, genome, mut brain, mut diet) in &mut cq {
+    for (mut ct, mut energy, mut fit, mut head, mut alive, genome, mut brain, mut diet, mut loco) in &mut cq {
         if !alive.0 {
             continue;
         }
@@ -296,6 +298,7 @@ pub fn live_step(
         np.x = np.x.clamp(-WORLD_HALF, WORLD_HALF);
         np.z = np.z.clamp(-WORLD_HALF, WORLD_HALF);
         np.y = CREATURE_Y;
+        loco.path += np.distance(pos); // accumulate distance walked (diagnostic)
         ct.translation = np;
         ct.rotation = Quat::from_rotation_y(head.0);
 
@@ -382,22 +385,33 @@ pub fn generation_step(
     mut gen: ResMut<GenState>,
     mut rng: ResMut<Rng>,
     mut cq: Query<
-        (&mut Transform, &mut Energy, &mut Fitness, &mut Heading, &mut Alive, &mut Genome, &mut Brain, &mut DietState),
+        (&mut Transform, &mut Energy, &mut Fitness, &mut Heading, &mut Alive, &mut Genome, &mut Brain, &mut DietState, &mut Locomotion),
         With<Creature>,
     >,
     pq: Query<&PlantGenome>,
     mut exit: MessageWriter<AppExit>,
 ) {
     gen.ticks_left = gen.ticks_left.saturating_sub(1);
-    let any_alive = cq.iter().any(|(.., alive, _, _, _)| alive.0);
+    let any_alive = cq.iter().any(|(.., alive, _, _, _, _)| alive.0);
     if gen.ticks_left > 0 && any_alive {
         return;
     }
 
     // rank by fitness
     let mut scored: Vec<(f32, Genome)> =
-        cq.iter().map(|(_, _, fit, _, _, g, _, _)| (fit.0, g.clone())).collect();
+        cq.iter().map(|(_, _, fit, _, _, g, _, _, _)| (fit.0, g.clone())).collect();
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+
+    // roam ratio = net displacement / path walked, averaged. ~1 = straight rovers, ~0 = circlers.
+    let mut roam_sum = 0.0f32;
+    let mut roam_n = 0u32;
+    for it in cq.iter() {
+        if it.8.path > 0.5 {
+            roam_sum += (it.0.translation - it.8.start).length() / it.8.path;
+            roam_n += 1;
+        }
+    }
+    let avg_roam = if roam_n > 0 { roam_sum / roam_n as f32 } else { 0.0 };
 
     let n = scored.len().max(1);
     let avg: f32 = scored.iter().map(|(f, _)| f).sum::<f32>() / n as f32;
@@ -410,9 +424,9 @@ pub fn generation_step(
     let avg_nut: f32 = pq.iter().map(|g| g.nutrient).sum::<f32>() / plant_n as f32;
     if gen.diet {
         let avg_rig: f32 = scored.iter().map(|(_, g)| g.rigidity).sum::<f32>() / n as f32;
-        info!("gen {:>3} | nutri {:>6.2} | sens {:.1} | rig {:.2} | bite {:.2} vs def {:.2} | plant-nut {:.2} | plants {}", gen.generation, avg, avg_sensors, avg_rig, avg_bite, avg_def, avg_nut, plant_n);
+        info!("gen {:>3} | nutri {:>6.2} | sens {:.1} | rig {:.2} | bite {:.2} vs def {:.2} | plant-nut {:.2} | roam {:.2} | plants {}", gen.generation, avg, avg_sensors, avg_rig, avg_bite, avg_def, avg_nut, avg_roam, plant_n);
     } else {
-        info!("gen {:>3} | food {:>6.2} | sens {:.1} | bite {:.2} vs def {:.2} | plant-nut {:.2} | plants {}", gen.generation, avg, avg_sensors, avg_bite, avg_def, avg_nut, plant_n);
+        info!("gen {:>3} | food {:>6.2} | sens {:.1} | bite {:.2} vs def {:.2} | plant-nut {:.2} | roam {:.2} | plants {}", gen.generation, avg, avg_sensors, avg_bite, avg_def, avg_nut, avg_roam, plant_n);
     }
 
     // elite pool (clone+mutate, asexual)
@@ -431,7 +445,7 @@ pub fn generation_step(
     // overwrite creatures with next gen, reset state + reposition.
     // Brain relearns from scratch each life: w := child priors (learned weights NOT inherited).
     // Diet expression resets to the child's innate baseline (epigenetic state is not inherited).
-    for ((mut t, mut energy, mut fit, mut head, mut alive, mut g, mut brain, mut diet), child) in
+    for ((mut t, mut energy, mut fit, mut head, mut alive, mut g, mut brain, mut diet, mut loco), child) in
         cq.iter_mut().zip(next)
     {
         brain.net = child.net.clone();
@@ -444,8 +458,11 @@ pub fn generation_step(
         fit.0 = 0.0;
         head.0 = rng.range(-std::f32::consts::PI, std::f32::consts::PI);
         alive.0 = true;
-        t.translation = rand_pos(&mut rng, CREATURE_Y);
+        let p = rand_pos(&mut rng, CREATURE_Y);
+        t.translation = p;
         t.rotation = Quat::from_rotation_y(head.0);
+        loco.start = p;
+        loco.path = 0.0;
     }
 
     gen.generation += 1;
