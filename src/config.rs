@@ -3,7 +3,7 @@
 // No logic here -- pure parameters.
 
 // --- world + run length ---
-pub const POP: usize = 140;
+pub const POP: usize = 90; // founder/generational population. Near the continuous carrying capacity (~50-70) so the warmup->continuous handoff is a gentle settle, not a 140->K crash that overshoots to extinction on some seeds.
 pub const FOOD: usize = 480;
 pub const WORLD_HALF: f32 = 80.0; // square arena [-H, H] in x,z (doubled playground)
 pub const GEN_TICKS: u32 = 4800; // steps/generation (generational mode) + log interval = 2 full days (see DAY_TICKS): longer lives, creatures live through several day/night cycles so rest-timing can pay off
@@ -40,6 +40,7 @@ pub const BIRTH_ENERGY: f32 = 24.0; // offspring's starting energy: buffer so ne
 pub const P_REPRO_CREATURE: f32 = 0.025; // per-tick reproduction chance while eligible (x density taper)
 pub const REPRO_MIN_AGE: u32 = 180; // min ticks of life before breeding (newborns establish first; paces waves)
 pub const CREATURE_CAP: usize = 130; // population ceiling (kept below grazing pressure that crashes plants)
+pub const CREATURE_MIN: usize = 12; // reseed floor (safety net): below this, survivors' offspring are spawned so a continuous world can't fully go extinct (mirrors PLANT_MIN). Well below the ~60 equilibrium -> only fires in a crash.
 pub const WARMUP_GENS: u32 = 12; // generational warm-up before continuous birth/death kicks in
 pub const CONT_LOG_TICKS: u32 = 600; // continuous-mode stats log interval (fine enough to watch a crash unfold)
 

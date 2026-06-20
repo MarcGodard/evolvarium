@@ -604,10 +604,14 @@ pub fn live_step(
         })
         .collect();
     let mut eaten: HashSet<Entity> = HashSet::new();
+    let mut sample_genome: Option<Genome> = None; // a living genome, for the near-extinction reseed floor
 
     for (entity, mut ct, mut energy, mut fit, mut head, mut alive, genome, mut brain, mut diet, mut loco) in &mut cq {
         if !alive.0 {
             continue;
+        }
+        if sample_genome.is_none() {
+            sample_genome = Some(genome.clone());
         }
         let pos = ct.translation;
 
@@ -896,6 +900,19 @@ pub fn live_step(
             if live_continuous {
                 commands.entity(entity).despawn();
                 pop = pop.saturating_sub(1);
+            }
+        }
+    }
+    // Creature reseed floor (safety net, mirrors the plant PLANT_MIN floor): if continuous population
+    // crashes toward extinction, spawn mutated offspring of a survivor so the world can't fully die.
+    // Only fires near-extinction -> self-sustaining populations never touch it. Needs a survivor (pop>0).
+    if live_continuous && pop > 0 && pop < CREATURE_MIN {
+        if let Some(g) = sample_genome {
+            for _ in 0..(CREATURE_MIN - pop) {
+                let mut child = g.clone();
+                child.mutate(&mut rng, MUT_RATE, MUT_STD);
+                let p = rand_pos(&mut rng, CREATURE_Y);
+                spawn_creature(&mut commands, child, p, &mut rng);
             }
         }
     }
