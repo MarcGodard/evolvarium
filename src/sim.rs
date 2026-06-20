@@ -44,6 +44,13 @@ const CARRION_NUTRIENT: f32 = 0.9; // fresh meat is energy-dense
 const ROT_GONE: u32 = 900; // ticks from death to full decomposition (~15s sim)
 const TOXIN_MAX: f32 = 9.0; // energy hit from eating fully-rotten carrion (poison)
 const TOXIN_G: f32 = 0.15; // growth-load per unit toxin ingested
+
+// Moisture pressure (P3): a plant whose `wet` preference is far from local soil moisture is stressed
+// and may die; dead plants become poison detritus (rotting vegetation). Drives spatial niches.
+const DETRITUS_NUTRIENT: f32 = 0.3; // dead vegetation: poor food fresh, rots to poison
+const MOISTURE_TOLERANCE: f32 = 0.3; // mismatch under this is harmless
+const MOISTURE_KILL: f32 = 0.012; // per-tick death scale for mismatch beyond tolerance
+const SEASON_FREQ: f32 = 0.4; // seasonal wet/dry oscillation speed (radians per generation)
 const PLANT_REPRO_FRAC: f32 = 0.5; // fraction of mass kept after budding off a child
 
 // Poison mode (--poison): signed eat reward so learners associate type -> approach/avoid.
@@ -230,11 +237,22 @@ pub fn plant_step(
     mut commands: Commands,
     mut rng: ResMut<Rng>,
     gen: Res<GenState>,
-    mut q: Query<(&mut PlantState, &PlantGenome, &Transform), Without<Rot>>, // living plants only (not carrion)
+    mut q: Query<(Entity, &mut PlantState, &PlantGenome, &Transform), Without<Rot>>, // living plants (not carrion)
 ) {
+    let season = (gen.generation as f32 * SEASON_FREQ).sin(); // -1 dry .. +1 wet, drifts across generations
     let mut count = q.iter().len();
     let mut births: Vec<(PlantGenome, Vec3)> = Vec::new();
-    for (mut st, g, tf) in &mut q {
+    let mut detritus: Vec<(PlantGenome, f32, Vec3)> = Vec::new(); // moisture-killed plants -> poison
+    for (e, mut st, g, tf) in &mut q {
+        // moisture mortality (P3): too wet or too dry for this plant's preference can kill it
+        let m = crate::terrain::moisture(tf.translation.x, tf.translation.z, season);
+        let stress = (m - g.wet).abs();
+        if stress > MOISTURE_TOLERANCE && rng.f32() < MOISTURE_KILL * (stress - MOISTURE_TOLERANCE) {
+            commands.entity(e).despawn();
+            detritus.push((g.clone(), st.mass, tf.translation));
+            count = count.saturating_sub(1);
+            continue;
+        }
         st.mass += g.growth_rate() * DT;
         st.age += 1;
         if st.mass >= g.maturity && count + births.len() < PLANT_CAP && rng.f32() < P_REPRO {
@@ -248,6 +266,17 @@ pub fn plant_step(
             births.push((child, pos));
             st.mass *= PLANT_REPRO_FRAC;
         }
+    }
+    // dead plants -> poison detritus (completes the rot chain, P3): poor food that turns toxic, then gone
+    for (g, mass, pos) in detritus {
+        commands.spawn((
+            Food,
+            FoodKind(g.kind),
+            PlantState { mass: mass.min(CARRION_MASS), age: 0 },
+            PlantGenome { nutrient: DETRITUS_NUTRIENT, defense: 0.0, quality: 0.0, ..g },
+            Rot { age: 0 },
+            Transform::from_translation(pos),
+        ));
     }
     // reseed floor: keep a minimal seed bank so creatures can't drive food fully extinct
     let ntypes = gen.ntypes();
@@ -491,6 +520,7 @@ pub fn live_step(
                     nutrient: CARRION_NUTRIENT,
                     defense: 0.0,  // meat has no bite-defense: easy to scavenge while fresh
                     quality: 0.0,  // unused for carrion (separate eat branch); never disperses
+                    wet: 0.5,      // unused for carrion (excluded from moisture mortality by Without<Rot>)
                     spread: 0.0,
                     maturity: 999.0, // never reproduces via plant_step (also excluded by Without<Rot>)
                 },
@@ -565,11 +595,12 @@ pub fn generation_step(
     let avg_def: f32 = pq.iter().map(|(g, _)| g.defense).sum::<f32>() / plant_n as f32;
     let avg_nut: f32 = pq.iter().map(|(g, _)| g.nutrient).sum::<f32>() / plant_n as f32;
     let avg_qual: f32 = pq.iter().map(|(g, _)| g.quality).sum::<f32>() / plant_n as f32;
+    let avg_wet: f32 = pq.iter().map(|(g, _)| g.wet).sum::<f32>() / plant_n as f32;
     if gen.diet {
         let avg_rig: f32 = scored.iter().map(|(_, g)| g.rigidity).sum::<f32>() / n as f32;
-        info!("gen {:>3} | nutri {:>6.2} | sens {:.1} | rig {:.2} | bite {:.2} vs def {:.2} | plant-nut {:.2} qual {:.2} | roam {:.2} elev {:.1} | plants {}", gen.generation, avg, avg_sensors, avg_rig, avg_bite, avg_def, avg_nut, avg_qual, avg_roam, avg_elev, plant_n);
+        info!("gen {:>3} | nutri {:>6.2} | sens {:.1} | rig {:.2} | bite {:.2} vs def {:.2} | plant-nut {:.2} qual {:.2} wet {:.2} | roam {:.2} elev {:.1} | plants {}", gen.generation, avg, avg_sensors, avg_rig, avg_bite, avg_def, avg_nut, avg_qual, avg_wet, avg_roam, avg_elev, plant_n);
     } else {
-        info!("gen {:>3} | food {:>6.2} | sens {:.1} | bite {:.2} vs def {:.2} | plant-nut {:.2} qual {:.2} | roam {:.2} elev {:.1} | plants {}", gen.generation, avg, avg_sensors, avg_bite, avg_def, avg_nut, avg_qual, avg_roam, avg_elev, plant_n);
+        info!("gen {:>3} | food {:>6.2} | sens {:.1} | bite {:.2} vs def {:.2} | plant-nut {:.2} qual {:.2} wet {:.2} | roam {:.2} elev {:.1} | plants {}", gen.generation, avg, avg_sensors, avg_bite, avg_def, avg_nut, avg_qual, avg_wet, avg_roam, avg_elev, plant_n);
     }
 
     // elite pool (clone+mutate, asexual)

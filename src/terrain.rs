@@ -15,6 +15,16 @@ pub fn height(x: f32, z: f32) -> f32 {
     n * HEIGHT_MAX
 }
 
+// Soil moisture 0..1 at (x,z) for a given season phase (-1 dry .. +1 wet). Lowlands hold water, plus
+// a spatial patch pattern; season shifts the whole map wetter/drier over time. Drives plant mortality
+// (P3): a plant whose moisture preference is far from local moisture is stressed and may die.
+pub fn moisture(x: f32, z: f32, season: f32) -> f32 {
+    let low = 1.0 - height(x, z) / HEIGHT_MAX; // low ground = wet
+    let patch = 0.5 + 0.5 * (x * 0.08).sin() * (z * 0.06).cos();
+    let base = 0.6 * low + 0.4 * patch;
+    (base + 0.25 * season).clamp(0.0, 1.0)
+}
+
 // Build a render mesh of the heightfield over [-span/2, span/2]^2 (render mode only).
 pub fn build_mesh(span: f32, res: usize) -> Mesh {
     let half = span / 2.0;

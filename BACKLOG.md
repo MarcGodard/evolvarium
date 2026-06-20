@@ -36,14 +36,18 @@ verify headless, commit on `build` with a clear message, then tick the item here
       DESCEND_REFUND*dh (< cost -> net dissipative, no free lunch). Render shows a heightmesh.
       Verified headless: viable across seeds; roam ratio ROSE ~0.2 -> ~0.45 (relief reduces circling).
       `elev` added to gen log. (Future: tie altitude to a benefit so high ground is worth the climb.)
-- [~] **Rot chain.** DONE for creatures: death drops carrion (Rot component) = fresh defense-free meat;
-      over ROT_GONE ticks nutrition fades to 0 and toxin rises to TOXIN_MAX (eating rotten meat poisons
-      you + adds growth-load), then it despawns. Carrion is a Food entity (sensed/eaten via the normal
-      path, separate eat branch, excluded from plant cap/stats/dispersal). Emergent: a SCAVENGING niche
-      (survive on carrion instead of the bite-vs-defense arms race). PENDING: dead PLANTS → poison —
-      needs plant mortality first (plants currently only die by being eaten); folds into the rain item.
-- [ ] **Environmental pressure on plants.** Rain/moisture field: too much or too little kills plants
-      (and they rot to poison). Needs weather/field machinery (spec 06).
+- [x] **Rot chain.** Death drops carrion (Rot component) = fresh defense-free meat; over ROT_GONE ticks
+      nutrition fades to 0 and toxin rises to TOXIN_MAX (eating rotten meat poisons you + adds
+      growth-load), then it despawns. Dead PLANTS (killed by moisture, see below) likewise drop poison
+      detritus (DETRITUS_NUTRIENT, reuses Rot). Both are Food entities sensed/eaten via the normal path
+      (separate eat branch, excluded from plant cap/stats/dispersal). Emergent: a SCAVENGING niche
+      (survive on carrion instead of the bite-vs-defense arms race).
+- [x] **Environmental pressure on plants.** terrain::moisture(x,z,season): lowlands wet + spatial patches
+      + a seasonal wet/dry drift across generations. Plants carry a `wet` preference gene; mismatch
+      beyond MOISTURE_TOLERANCE can kill them (MOISTURE_KILL per-tick), and the corpse becomes poison
+      detritus. Drives spatial niches ("food near water") + local adaptation via dispersal. Verified
+      headless: populations stay viable (reseed floor holds); position-dependent early die-off observed.
+      `wet` added to gen log. (TOLERANCE/KILL/SEASON_FREQ tunable.)
 
 ## NOT for the build loop (owned elsewhere)
 - Plant defense cost / arms-race balance constants → the TUNING loop owns these.
