@@ -205,6 +205,7 @@ fn spawn_carrion(commands: &mut Commands, pos: Vec3, mass: f32) {
             defense: 0.0,    // meat has no bite-defense: easy to scavenge while fresh
             quality: 0.0,    // unused for carrion (separate eat branch); never disperses
             wet: 0.5,        // unused for carrion (excluded from moisture mortality by Without<Rot>)
+            height: 0.0,     // carrion lies on the ground
             spread: 0.0,
             maturity: 999.0, // never reproduces via plant_step (also excluded by Without<Rot>)
         },
@@ -235,7 +236,7 @@ fn spawn_creature(commands: &mut Commands, g: Genome, pos: Vec3, rng: &mut Rng) 
 
 // Tree genome: near-uneatable (defense ~1) so only tall creatures reach it; rich; grows large + slow.
 fn tree_genome() -> PlantGenome {
-    PlantGenome { kind: 0, nutrient: TREE_NUTRIENT, defense: 0.99, quality: 0.2, wet: 0.5, spread: 7.0, maturity: TREE_MATURITY }
+    PlantGenome { kind: 0, nutrient: TREE_NUTRIENT, defense: 0.99, quality: 0.2, wet: 0.5, height: 1.0, spread: 7.0, maturity: TREE_MATURITY }
 }
 
 // Spawn one tree (long-lived plant + Tree marker). edible=true tall fruit tree, false=evergreen.
@@ -689,7 +690,11 @@ pub fn live_step(
                 // (edible=false) are never eatable. Plants/carrion: bite vs defense as usual.
                 let success = match tree {
                     Some(edible) => edible && genome.height >= TREE_REACH_H, // tall creature reaches fruit tree
-                    None => rng.f32() < sigmoid(BITE_K * (genome.bite - pg.defense)),
+                    // plant: creature must be tall enough to reach it (height defense) AND bite its defense
+                    None => {
+                        genome.height + 0.15 >= pg.height
+                            && rng.f32() < sigmoid(BITE_K * (genome.bite - pg.defense))
+                    }
                 };
                 if success {
                     if let Some(true) = tree {

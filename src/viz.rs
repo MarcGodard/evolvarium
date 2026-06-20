@@ -26,6 +26,7 @@ impl Plugin for VizPlugin {
                     draw_sensors,
                     add_plant_visuals,
                     size_plants,
+                    ground_creatures,
                     hide_dead,
                     color_carrion,
                     pick_on_click,
@@ -112,14 +113,30 @@ fn color_carrion(mut mats: ResMut<Assets<StandardMaterial>>, q: Query<(&Rot, &Me
     }
 }
 
-// Scale plants by accumulated mass so growth is visible. Trees render much bigger (tall canopy).
-fn size_plants(mut q: Query<(&PlantState, &mut Transform, Option<&Tree>), With<Food>>) {
-    for (st, mut tf, tree) in &mut q {
-        tf.scale = if tree.is_some() {
-            Vec3::splat((0.9 + 0.28 * st.mass).clamp(0.9, 4.5))
+// Scale plants by mass (growth visible) AND sit them on the terrain: base on the ground, plus the
+// plant's height gene lifts the foliage onto a taller stalk. Trees render much bigger (tall canopy).
+fn size_plants(mut q: Query<(&PlantState, &PlantGenome, &mut Transform, Option<&Tree>), With<Food>>) {
+    for (st, g, mut tf, tree) in &mut q {
+        let ground = crate::terrain::height(tf.translation.x, tf.translation.z);
+        if tree.is_some() {
+            let s = (0.9 + 0.28 * st.mass).clamp(0.9, 4.5);
+            tf.scale = Vec3::splat(s);
+            tf.translation.y = ground + 1.5 * s; // trunk base rests on the ground
         } else {
-            Vec3::splat((0.25 + 0.13 * st.mass).clamp(0.25, 1.6))
-        };
+            let s = (0.25 + 0.13 * st.mass).clamp(0.25, 1.6);
+            tf.scale = Vec3::splat(s);
+            // foliage base on the ground (sphere radius), lifted by the height gene (taller stalk)
+            tf.translation.y = ground + 0.35 * s + g.height * 2.5;
+        }
+    }
+}
+
+// Sit creatures on the terrain (feet on the ground; taller bodies stand higher). Cosmetic; runs after
+// the sim's per-tick move so it just corrects the render height.
+fn ground_creatures(mut q: Query<&mut Transform, With<Creature>>) {
+    for mut tf in &mut q {
+        let ground = crate::terrain::height(tf.translation.x, tf.translation.z);
+        tf.translation.y = ground + 0.8 * tf.scale.y;
     }
 }
 

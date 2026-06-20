@@ -19,6 +19,8 @@ pub struct PlantGenome {
     pub defense: f32,  // 0..1 resistance to being eaten (vs creature bite)
     pub quality: f32,  // 0..1 digestibility: scales energy the eater extracts AND seed-dispersal-on-eat (13)
     pub wet: f32,      // 0..1 preferred soil moisture; mismatch with local moisture stresses->kills (P3)
+    #[serde(default)]
+    pub height: f32,   // 0..1 plant height: short creatures can't reach tall plants (reach defense); costs growth
     pub spread: f32,   // offspring dispersal distance
     pub maturity: f32, // mass needed before it can reproduce
 }
@@ -38,6 +40,7 @@ impl PlantGenome {
             defense: rng.f32() * 0.5,
             quality: rng.f32(),
             wet: rng.f32(),
+            height: rng.f32() * 0.4,
             spread: rng.range(2.0, 8.0),
             maturity: rng.range(2.0, 6.0),
         }
@@ -52,6 +55,7 @@ impl PlantGenome {
         self.defense = (self.defense + rng.normal() * 0.1).clamp(0.0, 1.0);
         self.quality = (self.quality + rng.normal() * 0.1).clamp(0.0, 1.0);
         self.wet = (self.wet + rng.normal() * 0.1).clamp(0.0, 1.0);
+        self.height = (self.height + rng.normal() * 0.1).clamp(0.0, 1.0);
         self.spread = (self.spread + rng.normal() * 1.0).clamp(1.0, 12.0);
         self.maturity = (self.maturity + rng.normal() * 0.8).clamp(1.5, 10.0);
     }
@@ -62,7 +66,11 @@ impl PlantGenome {
     // costs growth too; its payoff is dispersal-on-eat (13), so quality reaches an interior optimum.
     pub fn growth_rate(&self) -> f32 {
         GROWTH_BASE
-            * (1.0_f32 - 0.3 * self.nutrient - 0.85 * self.defense * self.defense - 0.2 * self.quality)
+            * (1.0_f32
+                - 0.3 * self.nutrient
+                - 0.85 * self.defense * self.defense
+                - 0.2 * self.quality
+                - 0.25 * self.height)
                 .clamp(0.12, 1.0)
     }
 }
