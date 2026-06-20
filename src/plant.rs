@@ -1,0 +1,72 @@
+// Living food: plants are organisms with their own genome + continuous GA (see 13).
+// They grow mass (autotroph), reproduce by dispersing mutated offspring, evolve, and die when eaten.
+// Selection is implicit: a plant that reproduces before being eaten passes on its genes.
+// Arms race: plant `defense` vs creature `bite` decides whether a contact actually consumes it.
+use crate::genome::NFOOD;
+use crate::rng::Rng;
+use bevy::prelude::*;
+
+pub const PLANT_CAP: usize = 220; // carrying capacity (bounds population)
+pub const PLANT_MIN: usize = 24; // reseed floor so the food web can't fully collapse
+pub const P_REPRO: f32 = 0.015; // per-tick reproduction chance for a mature plant
+const GROWTH_BASE: f32 = 1.2; // mass/sec at full growth allocation
+
+#[derive(Component, Clone)]
+pub struct PlantGenome {
+    pub kind: u8,      // food/diet type (couples to creature expression, see 12)
+    pub nutrient: f32, // 0..1 energy density delivered when eaten
+    pub defense: f32,  // 0..1 resistance to being eaten (vs creature bite)
+    pub spread: f32,   // offspring dispersal distance
+    pub maturity: f32, // mass needed before it can reproduce
+}
+
+// Per-plant state: mass grows over life; eaten plants are despawned.
+#[derive(Component)]
+pub struct PlantState {
+    pub mass: f32,
+    pub age: u32,
+}
+
+impl PlantGenome {
+    pub fn random(rng: &mut Rng, ntypes: u8) -> Self {
+        PlantGenome {
+            kind: ((rng.f32() * ntypes as f32) as u8).min(ntypes.saturating_sub(1)),
+            nutrient: rng.f32(),
+            defense: rng.f32() * 0.5,
+            spread: rng.range(2.0, 8.0),
+            maturity: rng.range(2.0, 6.0),
+        }
+    }
+
+    pub fn mutate(&mut self, rng: &mut Rng) {
+        // kind rarely flips; trait values drift
+        if rng.f32() < 0.03 {
+            self.kind ^= if rng.f32() < 0.5 { 0 } else { 1 };
+        }
+        self.nutrient = (self.nutrient + rng.normal() * 0.1).clamp(0.0, 1.0);
+        self.defense = (self.defense + rng.normal() * 0.1).clamp(0.0, 1.0);
+        self.spread = (self.spread + rng.normal() * 1.0).clamp(1.0, 12.0);
+        self.maturity = (self.maturity + rng.normal() * 0.8).clamp(1.5, 10.0);
+    }
+
+    // Investing in nutrient richness and defense slows growth (no free lunch, see 10).
+    // Defense penalty is QUADRATIC: cheap when light, crippling when maxed -> bounds the arms race so
+    // plants can't armor up to ~1.0 for free (balance lever, iter 1).
+    pub fn growth_rate(&self) -> f32 {
+        GROWTH_BASE * (1.0_f32 - 0.3 * self.nutrient - 0.85 * self.defense * self.defense).clamp(0.12, 1.0)
+    }
+}
+
+// Plant render color encodes its genome: hue by kind, but tinted by nutrient (brighter = richer)
+// and defense (toward red = tougher). Makes food variability visible at a glance.
+pub fn plant_color(g: &PlantGenome) -> Color {
+    let base_hue = match g.kind as usize % NFOOD {
+        0 => 130.0,
+        1 => 285.0,
+        2 => 45.0,
+        _ => 190.0,
+    };
+    let hue = base_hue - 40.0 * g.defense; // tougher plants shift toward warmer/red
+    let light = 0.35 + 0.35 * g.nutrient; // richer plants brighter
+    Color::hsl(hue, 0.7, light)
+}

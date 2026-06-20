@@ -1,0 +1,22 @@
+[package]
+name = "evolvarium"
+version = "0.0.1"
+edition = "2021"
+description = "Artificial-life sim: GA grows blob bodies + brain shape, brains learn in life, multi-nutrient ecosystem. M0 skeleton."
+
+[dependencies]
+# Pin Bevy. Ecosystem crates gate the version (see 11-crate-stack.md) so do NOT float.
+# M0 needs only the engine. bevy_rand / bevy_egui / spatial hash arrive in later milestones.
+bevy = "0.18"
+
+# Bevy build-speed profile (deps optimized, our crate fast to recompile).
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
