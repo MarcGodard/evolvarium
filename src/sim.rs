@@ -41,7 +41,7 @@ const PLANT_START_MASS: f32 = 0.6;
 const CARRION_KIND: u8 = 0; // meat = food type 0 (couples to diet expr only via sensing, not digestion)
 const CARRION_MASS: f32 = 3.0; // a meaty chunk: worth scavenging while fresh
 const CARRION_NUTRIENT: f32 = 0.9; // fresh meat is energy-dense
-const ROT_GONE: u32 = 900; // ticks from death to full decomposition (~15s sim)
+pub const ROT_GONE: u32 = 900; // ticks from death to full decomposition (~15s sim); viz reads it for color
 const TOXIN_MAX: f32 = 9.0; // energy hit from eating fully-rotten carrion (poison)
 const TOXIN_G: f32 = 0.15; // growth-load per unit toxin ingested
 

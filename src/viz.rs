@@ -5,9 +5,10 @@
 // All cosmetic; never touches sim state.
 use bevy::prelude::*;
 
-use crate::components::{Alive, Creature, Food, Heading};
+use crate::components::{Alive, Creature, Food, Heading, Rot};
 use crate::genome::{Genome, NFOOD};
 use crate::plant::{plant_color, PlantGenome, PlantState};
+use crate::sim::ROT_GONE;
 
 pub struct VizPlugin;
 
@@ -17,7 +18,7 @@ impl Plugin for VizPlugin {
             .add_systems(Startup, log_viz_help)
             .add_systems(
                 Update,
-                (restyle_creatures, toggle_sensors, draw_sensors, add_plant_visuals, size_plants, hide_dead),
+                (restyle_creatures, toggle_sensors, draw_sensors, add_plant_visuals, size_plants, hide_dead, color_carrion),
             );
     }
 }
@@ -49,6 +50,17 @@ fn hide_dead(mut q: Query<(&Alive, &mut Visibility), With<Creature>>) {
         let want = if alive.0 { Visibility::Inherited } else { Visibility::Hidden };
         if *vis != want {
             *vis = want;
+        }
+    }
+}
+
+// Carrion/detritus (Rot) color tells its rot stage: fresh = meaty red, rotten = dark muddy green.
+// So the rot chain (P3) reads at a glance: bright red corpse -> darkening -> gone.
+fn color_carrion(mut mats: ResMut<Assets<StandardMaterial>>, q: Query<(&Rot, &MeshMaterial3d<StandardMaterial>)>) {
+    for (rot, mm) in &q {
+        let f = (rot.age as f32 / ROT_GONE as f32).clamp(0.0, 1.0); // 0 fresh .. 1 rotten
+        if let Some(m) = mats.get_mut(&mm.0) {
+            m.base_color = Color::hsl(10.0 + 90.0 * f, 0.6, 0.5 - 0.35 * f); // red->sick-green, darkening
         }
     }
 }
