@@ -501,11 +501,11 @@ pub fn predation_step(
     mut commands: Commands,
     mut cq: Query<(Entity, &Transform, &mut Energy, &mut Fitness, &mut Alive, &Genome), With<Creature>>,
 ) {
-    // snapshot living creatures: (entity, pos, bite)
+    // snapshot living creatures: (entity, pos, combat). Combat power = bite + size bonus (mass wins fights).
     let snap: Vec<(Entity, Vec3, f32)> = cq
         .iter()
         .filter(|(_, _, _, _, a, _)| a.0)
-        .map(|(e, t, _, _, _, g)| (e, t.translation, g.bite))
+        .map(|(e, t, _, _, _, g)| (e, t.translation, g.bite + SIZE_COMBAT * g.size))
         .collect();
     if snap.len() < 2 {
         return;
@@ -540,9 +540,9 @@ pub fn predation_step(
         return;
     }
     let continuous_live = gen.continuous && gen.generation >= WARMUP_GENS;
-    for (e, t, mut energy, mut fit, mut alive, _g) in &mut cq {
+    for (e, t, mut energy, mut fit, mut alive, gen_e) in &mut cq {
         if let Some(g) = gains.get(&e) {
-            energy.0 = (energy.0 + g).min(ENERGY_MAX);
+            energy.0 = (energy.0 + g).min(energy_max(gen_e));
             fit.0 += g * 0.3; // predation counts toward selection
         }
         if killed.contains(&e) {
@@ -665,11 +665,15 @@ pub fn live_step(
         // fatigue saps usable output (tired = sluggish); intended effort still costs full MOVE_COST below,
         // so flailing while exhausted is a net loss -> resting to recover is the only way out.
         let move_thrust = thrust * (1.0 - FATIGUE_DRAG * diet.fatigue);
+        // aquatic factor at this spot: 1 in water / wet lowland, 0 on high dry ground. Swimmers move
+        // faster here (fins) and pay a penalty on dry land (see metabolism) -> a wetland/fish niche.
+        let wet_here = ((SWIM_WET_LEVEL - crate::terrain::height(pos.x, pos.z)) / SWIM_WET_LEVEL).clamp(0.0, 1.0);
+        let speed = MOVE_SPEED * (1.0 + SWIM_SPEED * genome.swim * wet_here);
 
         // act
         head.0 = wrap_angle(head.0 + turn * TURN_SPEED * dt);
         let dir = Vec3::new(head.0.sin(), 0.0, head.0.cos());
-        let mut np = pos + dir * (move_thrust * MOVE_SPEED * dt);
+        let mut np = pos + dir * (move_thrust * speed * dt);
         np.x = np.x.clamp(-WORLD_HALF, WORLD_HALF);
         np.z = np.z.clamp(-WORLD_HALF, WORLD_HALF);
         // ride the terrain; pay for elevation change (P3): uphill costs, downhill partially refunds
@@ -687,12 +691,14 @@ pub fn live_step(
         let rock = crate::terrain::rockiness(np.x, np.z);
         let sense_range: f32 = genome.sensors.iter().map(|s| s.range).sum();
         energy.0 -= (BASAL_COST
-            + MOVE_COST * thrust * thrust
+            + SIZE_BASAL * genome.size // bigger body costs more just to maintain
+            + MOVE_COST * (1.0 + SIZE_MOVE * genome.size) * thrust * thrust // more mass to push
             + BITE_COST * genome.bite
             + ROCK_MOVE_COST * rock * thrust.abs()
             + SENSE_COST * sense_range
             + HEIGHT_COST * genome.height
             + LIGHT_COST * (light - genome.light_pref).abs()
+            + SWIM_LAND_COST * genome.swim * (1.0 - wet_here) // fins are a liability on dry land
             + STRESS_COST * diet.fatigue)
             * dt;
         // fatigue dynamics: exertion (thrust) accrues debt; idling (low thrust) sheds it. Clamped 0..1.
@@ -782,9 +788,10 @@ pub fn live_step(
                     }
                     // overeating trade-off (12): energy is capped; eating while already full converts
                     // the excess into growth-load (harm) -> gorging shortens life. Eat best, in moderation.
-                    if energy.0 > ENERGY_MAX {
-                        let excess = energy.0 - ENERGY_MAX;
-                        energy.0 = ENERGY_MAX;
+                    let emax = energy_max(genome);
+                    if energy.0 > emax {
+                        let excess = energy.0 - emax;
+                        energy.0 = emax;
                         diet.g += excess * OVEREAT_G;
                     }
                     // carrion is eaten whole (despawn). Plants + trees PERSIST -- their mass is reduced by
@@ -889,6 +896,11 @@ pub fn live_step(
 
 fn sigmoid(x: f32) -> f32 {
     1.0 / (1.0 + (-x).exp())
+}
+
+// Per-creature energy-store ceiling: bigger bodies bank more energy (buffers starvation, costs upkeep).
+fn energy_max(g: &Genome) -> f32 {
+    ENERGY_MAX * (1.0 + SIZE_ENERGY * g.size)
 }
 
 // --- generation boundary: select + reproduce ---
@@ -1010,6 +1022,8 @@ pub fn generation_step(
         / n as f32;
     let avg_bite: f32 = scored.iter().map(|(_, g)| g.bite).sum::<f32>() / n as f32;
     let avg_light: f32 = scored.iter().map(|(_, g)| g.light_pref).sum::<f32>() / n as f32; // niche: <0.5 nocturnal, >0.5 diurnal
+    let avg_size: f32 = scored.iter().map(|(_, g)| g.size).sum::<f32>() / n as f32;
+    let avg_swim: f32 = scored.iter().map(|(_, g)| g.swim).sum::<f32>() / n as f32; // >0.5 => aquatic niche emerging
     let tree_n = tq.iter().len();
     let avg_tree_h = if tree_n > 0 { tq.iter().map(|g| g.height).sum::<f32>() / tree_n as f32 } else { 0.0 }; // tree reach gene
     let avg_tree_b = if tree_n > 0 { tq.iter().map(|g| g.branches).sum::<f32>() / tree_n as f32 } else { 0.0 }; // tree branches gene
@@ -1021,7 +1035,7 @@ pub fn generation_step(
     let avg_wet: f32 = pq.iter().map(|(g, _)| g.wet).sum::<f32>() / plant_n as f32;
     if gen.diet {
         let avg_rig: f32 = scored.iter().map(|(_, g)| g.rigidity).sum::<f32>() / n as f32;
-        info!("gen {:>3} | nutri {:>6.2} | sens {:.1} r{:.0} | rig {:.2} | bite {:.2} vs def {:.2} | light {:.2} | plant-nut {:.2} qual {:.2} wet {:.2} | roam {:.2} elev {:.1} | plants {} soil {:.2} gw {:.2} | trees {} h{:.2} b{:.2}", gen.generation, avg, avg_sensors, avg_range, avg_rig, avg_bite, avg_def, avg_light, avg_nut, avg_qual, avg_wet, avg_roam, avg_elev, plant_n, soil.avg(), gw.avg(), tree_n, avg_tree_h, avg_tree_b);
+        info!("gen {:>3} | nutri {:>6.2} | sens {:.1} r{:.0} | rig {:.2} | bite {:.2} vs def {:.2} | light {:.2} sz {:.2} sw {:.2} | plant-nut {:.2} qual {:.2} wet {:.2} | roam {:.2} elev {:.1} | plants {} soil {:.2} gw {:.2} | trees {} h{:.2} b{:.2}", gen.generation, avg, avg_sensors, avg_range, avg_rig, avg_bite, avg_def, avg_light, avg_size, avg_swim, avg_nut, avg_qual, avg_wet, avg_roam, avg_elev, plant_n, soil.avg(), gw.avg(), tree_n, avg_tree_h, avg_tree_b);
     } else {
         info!("gen {:>3} | food {:>6.2} | sens {:.1} r{:.0} | bite {:.2} vs def {:.2} | plant-nut {:.2} qual {:.2} wet {:.2} | roam {:.2} elev {:.1} | plants {} soil {:.2} gw {:.2}", gen.generation, avg, avg_sensors, avg_range, avg_bite, avg_def, avg_nut, avg_qual, avg_wet, avg_roam, avg_elev, plant_n, soil.avg(), gw.avg());
     }

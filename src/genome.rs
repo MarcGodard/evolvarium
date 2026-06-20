@@ -44,11 +44,18 @@ pub struct Genome {
     pub height: f32,         // 0..1 body height/reach: tall reaches fruit trees but costs upkeep (no free lunch)
     #[serde(default = "half")]
     pub light_pref: f32,     // 0=night .. 1=full sun; being far from preferred light costs energy (diurnal/nocturnal niche)
+    #[serde(default = "third")]
+    pub size: f32,           // 0..1 body mass: more energy store + combat power, but higher basal + move upkeep
+    #[serde(default)]
+    pub swim: f32,           // 0..1 aquatic adaptation: fast + cheap in water/wet lowland, clumsy + costly on dry land
 }
 
-// serde default for light_pref on old saves: mid-light (0.5)
+// serde defaults for traits absent in old saves
 fn half() -> f32 {
     0.5
+}
+fn third() -> f32 {
+    0.33
 }
 
 pub fn n_inputs(n_sensors: usize) -> usize {
@@ -85,6 +92,8 @@ impl Genome {
             bite: rng.f32() * 0.5,
             height: rng.f32() * 0.5,
             light_pref: rng.f32(),
+            size: rng.range(0.2, 0.6),
+            swim: rng.f32() * 0.3,
         }
     }
 
@@ -134,6 +143,12 @@ impl Genome {
         }
         if rng.f32() < rate {
             self.light_pref = (self.light_pref + rng.normal() * 0.12).clamp(0.0, 1.0);
+        }
+        if rng.f32() < rate {
+            self.size = (self.size + rng.normal() * 0.12).clamp(0.0, 1.0);
+        }
+        if rng.f32() < rate {
+            self.swim = (self.swim + rng.normal() * 0.12).clamp(0.0, 1.0);
         }
         // structural: add / remove a sensor (and the matching input-weight columns)
         if rng.f32() < 0.06 && self.sensors.len() < MAX_SENSORS {

@@ -54,6 +54,17 @@ pub const EAT_RADIUS: f32 = 1.1;
 pub const ENERGY_MAX: f32 = 60.0; // energy ceiling; eating past it harms (overeating trade-off, see 12)
 pub const OVEREAT_G: f32 = 0.2; // growth-load gained per unit of energy eaten while already full
 pub const HEIGHT_COST: f32 = 1.4; // energy/sec upkeep per unit height (tall reaches trees but costs more)
+// Body size (mass): a bigger creature stores more energy + hits harder in combat, but costs more to run
+// and to maintain. Small = nimble + cheap; large = a tank. A physical axis the visualizer shows as scale.
+pub const SIZE_ENERGY: f32 = 1.0;  // energy-store ceiling scales: ENERGY_MAX * (1 + this*size)
+pub const SIZE_COMBAT: f32 = 0.5;  // added to bite as effective combat power in predation (mass wins fights)
+pub const SIZE_BASAL: f32 = 1.6;   // energy/sec extra basal upkeep at full size (big bodies cost to maintain)
+pub const SIZE_MOVE: f32 = 1.2;    // movement cost multiplier scales by (1 + this*size) (more mass to push)
+// Swim (aquatic adaptation): in water / wet lowland a swimmer moves faster + cheaper (exploits the river +
+// productive moist shoreline -> a "fish" niche); on dry high ground its fins are a liability (move penalty).
+pub const SWIM_WET_LEVEL: f32 = 4.0;   // terrain height below which it counts as wet/aquatic (near WATER_LEVEL 2.8)
+pub const SWIM_SPEED: f32 = 0.8;       // speed bonus fraction at full swim in water (fast fish)
+pub const SWIM_LAND_COST: f32 = 5.0;   // energy/sec penalty at full swim on fully-dry land (clumsy on land)
 
 // --- eating / arms race / predation (see 13, M5) ---
 pub const BITE_K: f32 = 8.0; // eat success = sigmoid(BITE_K*(bite - defense))

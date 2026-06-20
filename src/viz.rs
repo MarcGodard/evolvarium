@@ -187,14 +187,20 @@ fn restyle_creatures(
                 dom = t;
             }
         }
-        // rigidity -> saturation: pinned specialist = vivid, flexible generalist = washed out
+        // rigidity -> saturation: pinned specialist = vivid, flexible generalist = washed out.
+        // swim -> hue shifts toward cyan/blue (aquatic look); diet hue otherwise.
         let sat = 0.2 + 0.7 * g.rigidity;
+        let hue = type_hue(dom) * (1.0 - g.swim) + 200.0 * g.swim;
         if let Some(m) = mats.get_mut(&mm.0) {
-            m.base_color = Color::hsl(type_hue(dom), sat, 0.55);
+            m.base_color = Color::hsl(hue, sat, 0.55);
         }
-        // body scale: girth from sensor count, vertical stretch from the height gene (tall reaches trees)
-        let girth = 0.7 + 0.06 * g.n_sensors() as f32;
-        tf.scale = Vec3::new(girth, girth * (0.7 + 1.6 * g.height), girth);
+        // body plan: girth from sensors, overall bulk from size, vertical stretch from height; swim
+        // flattens + elongates the body into a fish shape (longer along travel, lower + narrower).
+        let girth = (0.7 + 0.06 * g.n_sensors() as f32) * (0.6 + 0.9 * g.size);
+        let sx = girth * (1.0 - 0.25 * g.swim);
+        let sy = girth * (0.7 + 1.6 * g.height) * (1.0 - 0.3 * g.swim);
+        let sz = girth * (1.0 + 0.8 * g.swim);
+        tf.scale = Vec3::new(sx, sy, sz);
     }
 }
 
@@ -323,14 +329,18 @@ fn update_stats(
             }
         }
         let mode = if g.light_pref > 0.6 { "diurnal" } else if g.light_pref < 0.4 { "nocturnal" } else { "cathemeral" };
+        let habitat = if g.swim > 0.6 { "aquatic" } else if g.swim < 0.3 { "land" } else { "amphibious" };
         text.0 = format!(
-            "CREATURE  {}\nenergy   {:.1}\nfitness  {:.1}\nsensors  {}\nbite     {:.2}\nheight   {:.2}\nrigidity {:.2}\nlight    {:.2} ({})\nfatigue  {:.2}\ndiet>type {} (eff {:.2})\nload(G)  {:.2}\nage      {}",
+            "CREATURE  {}\nenergy   {:.1}\nfitness  {:.1}\nsensors  {}\nbite     {:.2}\nheight   {:.2}\nsize     {:.2}\nswim     {:.2} ({})\nrigidity {:.2}\nlight    {:.2} ({})\nfatigue  {:.2}\ndiet>type {} (eff {:.2})\nload(G)  {:.2}\nage      {}",
             if alive.0 { "alive" } else { "DEAD" },
             energy.0,
             fit.0,
             g.n_sensors(),
             g.bite,
             g.height,
+            g.size,
+            g.swim,
+            habitat,
             g.rigidity,
             g.light_pref,
             mode,
