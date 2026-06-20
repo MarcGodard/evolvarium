@@ -46,6 +46,7 @@ const OVEREAT_G: f32 = 0.2; // growth-load gained per unit of energy eaten while
 const BITE_K: f32 = 8.0;
 const BITE_COST: f32 = 1.5; // energy/sec maintenance cost of bite strength
 const EAT_GAIN: f32 = 7.0; // energy per (mass * nutrient) consumed
+const MEAT_BONUS: f32 = 1.6; // meat (carrion) is richer + longer-lasting than plant food
 const SEED_VIA_GUT: f32 = 0.5; // max chance (x quality) an eaten plant disperses an offspring (13)
 const PLANT_START_MASS: f32 = 0.6;
 
@@ -507,17 +508,18 @@ pub fn live_step(
                 let success = rng.f32() < sigmoid(BITE_K * (genome.bite - pg.defense));
                 if success {
                     if let Some(age) = rot_age {
-                        // CARRION (P3): fresh meat is rich + defense-free; as it rots, nutrition fades and
-                        // toxin rises -> eating rotten meat poisons you. Not gated by diet expr (meat is
-                        // universally digestible) and never disperses seeds.
+                        // CARRION / MEAT (P3): eating another creature = TOP nutrition, near-zero toxicity
+                        // while fresh, and richer + longer-lasting than plants (MEAT_BONUS). Toxin only
+                        // ramps once well-rotted (>60%). Not gated by diet expr; never disperses seeds.
                         let f = (age as f32 / ROT_GONE as f32).clamp(0.0, 1.0); // 0 fresh .. 1 rotten
-                        let meat = mass * pg.nutrient * (1.0 - f);
-                        let toxin = TOXIN_MAX * f;
-                        energy.0 += EAT_GAIN * meat;
-                        fit.0 += meat;
+                        let freshness = 1.0 - (f / 0.6).min(1.0); // stays ~1 for the first 60% of decomposition
+                        let meat = mass * pg.nutrient * freshness;
+                        let toxin = TOXIN_MAX * ((f - 0.6) / 0.4).max(0.0); // no toxin until 60% rotted
+                        energy.0 += EAT_GAIN * MEAT_BONUS * meat;
+                        fit.0 += meat * MEAT_BONUS;
                         energy.0 -= toxin;
                         diet.g += toxin * TOXIN_G;
-                        eat_reward = 1.0 - 2.0 * f; // fresh -> +1 (good), rotten -> -1 (avoid)
+                        eat_reward = freshness * 2.0 - 1.0; // fresh -> +1 (good), rotten -> -1 (avoid)
                     } else {
                         // quality scales extractable energy: factor 0.5..1.5, ~1.0 at quality 0.5 (balance-neutral)
                         let base = mass * pg.nutrient * (0.5 + pg.quality);

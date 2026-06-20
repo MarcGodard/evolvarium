@@ -36,12 +36,52 @@ fn terrain_color(h01: f32, moist: f32) -> [f32; 4] {
     [c[0], c[1], c[2], 1.0]
 }
 
-// Surface height at (x,z). Two-frequency sinusoid hills normalized to 0..HEIGHT_MAX.
+// --- value-noise fBm for organic terrain (deterministic, no external crate) ---
+fn hash2(i: i32, j: i32) -> f32 {
+    let mut h = (i.wrapping_mul(374761393).wrapping_add(j.wrapping_mul(668265263))) as u32;
+    h = (h ^ (h >> 13)).wrapping_mul(1274126177);
+    ((h ^ (h >> 16)) & 0xffff) as f32 / 65535.0
+}
+fn value_noise(x: f32, z: f32) -> f32 {
+    let (xi, zi) = (x.floor(), z.floor());
+    let (xf, zf) = (x - xi, z - zi);
+    let (i, j) = (xi as i32, zi as i32);
+    let smooth = |t: f32| t * t * (3.0 - 2.0 * t); // smoothstep
+    let (u, v) = (smooth(xf), smooth(zf));
+    let n00 = hash2(i, j);
+    let n10 = hash2(i + 1, j);
+    let n01 = hash2(i, j + 1);
+    let n11 = hash2(i + 1, j + 1);
+    let nx0 = n00 + (n10 - n00) * u;
+    let nx1 = n01 + (n11 - n01) * u;
+    nx0 + (nx1 - nx0) * v
+}
+// fractional Brownian motion: sum octaves of value noise -> natural rolling terrain, ~0..1.
+fn fbm(x: f32, z: f32) -> f32 {
+    let mut sum = 0.0;
+    let mut amp = 0.5;
+    let mut freq = 1.0;
+    for _ in 0..4 {
+        sum += amp * value_noise(x * freq, z * freq);
+        amp *= 0.5;
+        freq *= 2.0;
+    }
+    sum / 0.9375 // normalize (0.5+0.25+0.125+0.0625) to ~0..1
+}
+
+// A meandering river: 1 along a winding centerline, falling to 0 past the bank. Carves the channel low
+// so water flows as a river rather than round pools. Centerline winds in world coords (z varies x).
+fn river(x: f32, z: f32) -> f32 {
+    let center_x = 34.0 * (z * 0.018).sin() + 16.0 * (z * 0.047 + 1.3).sin();
+    let bank = 9.0;
+    1.0 - ((x - center_x).abs() / bank).min(1.0)
+}
+
+// Surface height at (x,z): organic fBm hills, with a winding river channel carved in.
 pub fn height(x: f32, z: f32) -> f32 {
-    let a = (x * 0.12).sin() * (z * 0.10).cos();
-    let b = 0.5 * (x * 0.05 + 1.3).sin() * (z * 0.07 - 0.7).sin();
-    let n = ((a + b) * 0.5 + 0.5).clamp(0.0, 1.0); // ~0..1
-    n * HEIGHT_MAX
+    let base = fbm(x * 0.022, z * 0.022); // broad natural hills/valleys (~0..1)
+    let h = base * (1.0 - 0.92 * river(x, z)); // carve the river channel down toward the floor
+    h * HEIGHT_MAX
 }
 
 // Soil moisture 0..1 at (x,z) for a given season phase (-1 dry .. +1 wet). Lowlands hold water, plus
