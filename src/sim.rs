@@ -49,6 +49,7 @@ const TOXIN_G: f32 = 0.15; // growth-load per unit toxin ingested
 const DETRITUS_NUTRIENT: f32 = 0.3; // dead vegetation: poor food fresh, rots to poison
 const MOISTURE_TOLERANCE: f32 = 0.3; // mismatch under this is harmless
 const MOISTURE_KILL: f32 = 0.012; // per-tick death scale for mismatch beyond tolerance
+const HABITAT_KILL: f32 = 0.03; // per-tick death scale in poor sites (deep water / arid desert)
 const SEASON_FREQ: f32 = 0.4; // seasonal wet/dry oscillation speed (radians per generation)
 // Defense also taxes REPRODUCTION, not just growth (tuning): at carrying capacity, growth cost is
 // toothless (plants stay capped anyway), so armored plants pegged defense ~free. Penalizing their
@@ -281,19 +282,24 @@ pub fn plant_step(
     let mut births: Vec<(PlantGenome, Vec3)> = Vec::new();
     let mut detritus: Vec<(PlantGenome, f32, Vec3)> = Vec::new(); // moisture-killed plants -> poison
     for (e, mut st, g, tf) in &mut q {
-        // moisture mortality (P3): too wet or too dry for this plant's preference can kill it
-        let m = crate::terrain::moisture(tf.translation.x, tf.translation.z, season);
+        let (px, pz) = (tf.translation.x, tf.translation.z);
+        // mortality: moisture mismatch (wrong `wet` for the spot) OR a poor site (deep water / desert).
+        let m = crate::terrain::moisture(px, pz, season);
         let stress = (m - g.wet).abs();
-        if stress > MOISTURE_TOLERANCE && rng.f32() < MOISTURE_KILL * (stress - MOISTURE_TOLERANCE) {
+        let hab = crate::terrain::plant_habitability(px, pz, season); // 0 in water/desert, 1 on good land
+        let p_mort =
+            MOISTURE_KILL * (stress - MOISTURE_TOLERANCE).max(0.0) + HABITAT_KILL * (0.3 - hab).max(0.0);
+        if rng.f32() < p_mort {
             commands.entity(e).despawn();
             detritus.push((g.clone(), st.mass, tf.translation));
             count = count.saturating_sub(1);
             continue;
         }
-        // fertile soil (where things decomposed) speeds growth: death feeds the food web (M5)
-        let fert = soil.get(tf.translation.x, tf.translation.z);
+        // fertile soil (where things decomposed) speeds growth: death feeds the food web (M5).
+        // Growth also scales with habitability -> sparse food in water + desert (P3 limitation).
+        let fert = soil.get(px, pz);
         let boost = 1.0 + FERT_GROWTH * (fert / FERT_CAP).min(1.0);
-        st.mass += g.growth_rate() * boost * DT;
+        st.mass += g.growth_rate() * boost * hab * DT;
         st.age += 1;
         if st.mass >= g.maturity
             && count + births.len() < PLANT_CAP

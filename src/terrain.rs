@@ -50,6 +50,16 @@ pub fn moisture(x: f32, z: f32, season: f32) -> f32 {
     (m + 0.2 * season).clamp(0.0, 1.0)
 }
 
+// Plant habitability 0..1 at (x,z): near 0 in deep water (land flora drowns) and in arid desert
+// (desiccation), high on moderate-moisture land. Limits food growth + survival in both extremes (P3).
+pub fn plant_habitability(x: f32, z: f32, season: f32) -> f32 {
+    let submerged = ((WATER_LEVEL - height(x, z)) / 2.0).clamp(0.0, 1.0); // depth below water, ~2 units to 0
+    let water_ok = 1.0 - submerged;
+    let arid = (1.0 - moisture(x, z, season) / 0.35).clamp(0.0, 1.0); // moisture < 0.35 -> increasingly arid
+    let dry_ok = 1.0 - arid;
+    (water_ok * dry_ok).clamp(0.0, 1.0)
+}
+
 // Build a render mesh of the heightfield over [-span/2, span/2]^2 (render mode only).
 pub fn build_mesh(span: f32, res: usize) -> Mesh {
     let half = span / 2.0;
