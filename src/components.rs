@@ -7,6 +7,14 @@ pub struct Creature;
 #[derive(Component)]
 pub struct Food;
 
+// Tree marker: a long-lived plant. Two kinds: edible=true is a tall fruit tree only TALL creatures
+// (sensors >= TREE_REACH) can reach + eat; edible=false is an evergreen that NOTHING can eat (pure
+// structure / refuge). Moisture-immune; grows large; reproduces slowly into its own kind. (BACKLOG trees)
+#[derive(Component, Clone, Copy)]
+pub struct Tree {
+    pub edible: bool,
+}
+
 // Carrion marker + rot clock. A dead creature drops carrion: fresh = rich meat (no defense), but as
 // `age` climbs its nutrition fades and toxin rises -> rotten meat poisons the eater (BACKLOG P3).
 // Despawns once fully decomposed. Distinguishes carrion from living plants (which carry no Rot).

@@ -5,7 +5,7 @@
 // All cosmetic; never touches sim state.
 use bevy::prelude::*;
 
-use crate::components::{Alive, Creature, DietState, Energy, Fitness, Food, Heading, Rot};
+use crate::components::{Alive, Creature, DietState, Energy, Fitness, Food, Heading, Rot, Tree};
 use crate::genome::{Genome, NFOOD};
 use crate::plant::{plant_color, PlantGenome, PlantState};
 use crate::sim::ROT_GONE;
@@ -46,13 +46,19 @@ fn add_plant_visuals(
     mut commands: Commands,
     mesh: Option<Res<PlantMesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    q: Query<(Entity, &PlantGenome), (With<Food>, Without<Mesh3d>)>,
+    q: Query<(Entity, &PlantGenome, Option<&Tree>), (With<Food>, Without<Mesh3d>)>,
 ) {
     let Some(mesh) = mesh else { return };
-    for (e, g) in &q {
+    for (e, g, tree) in &q {
+        // trees: leafy green (edible fruit tree) vs dark evergreen; other food colored by genome
+        let color = match tree {
+            Some(Tree { edible: true }) => Color::srgb(0.20, 0.56, 0.16),
+            Some(Tree { edible: false }) => Color::srgb(0.07, 0.27, 0.20),
+            None => plant_color(g),
+        };
         commands
             .entity(e)
-            .insert((Mesh3d(mesh.0.clone()), MeshMaterial3d(materials.add(plant_color(g)))));
+            .insert((Mesh3d(mesh.0.clone()), MeshMaterial3d(materials.add(color))));
     }
 }
 
@@ -78,10 +84,14 @@ fn color_carrion(mut mats: ResMut<Assets<StandardMaterial>>, q: Query<(&Rot, &Me
     }
 }
 
-// Scale plants by accumulated mass so growth is visible.
-fn size_plants(mut q: Query<(&PlantState, &mut Transform), With<Food>>) {
-    for (st, mut tf) in &mut q {
-        tf.scale = Vec3::splat((0.25 + 0.13 * st.mass).clamp(0.25, 1.6));
+// Scale plants by accumulated mass so growth is visible. Trees render much bigger (tall canopy).
+fn size_plants(mut q: Query<(&PlantState, &mut Transform, Option<&Tree>), With<Food>>) {
+    for (st, mut tf, tree) in &mut q {
+        tf.scale = if tree.is_some() {
+            Vec3::splat((0.9 + 0.28 * st.mass).clamp(0.9, 4.5))
+        } else {
+            Vec3::splat((0.25 + 0.13 * st.mass).clamp(0.25, 1.6))
+        };
     }
 }
 

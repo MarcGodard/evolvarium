@@ -3,7 +3,7 @@
 use bevy::prelude::*;
 use std::collections::{HashMap, HashSet};
 
-use crate::components::{Alive, Brain, Creature, DietState, Energy, Fitness, Food, Heading, Locomotion, Rot};
+use crate::components::{Alive, Brain, Creature, DietState, Energy, Fitness, Food, Heading, Locomotion, Rot, Tree};
 use crate::genome::{forward, learn, Genome, CONE_HALF, GLOBAL_INPUTS, NFOOD, SIG_PER_SENSOR};
 use crate::plant::{PlantGenome, PlantState, P_REPRO, PLANT_CAP, PLANT_MIN};
 use crate::rng::Rng;
@@ -51,6 +51,14 @@ const MEAT_BONUS: f32 = 1.6; // meat (carrion) is richer + longer-lasting than p
 // defense). A kill = top energy + fitness. Predators need high bite, whose upkeep (BITE_COST) is the cost.
 const ATTACK_RADIUS: f32 = 1.6; // must be adjacent to attack
 const PREDATION_GAIN: f32 = 22.0; // energy a predator gains from a kill
+// Trees (BACKLOG): long-lived, near-uneatable plants. Only TALL creatures (sensors >= TREE_REACH)
+// can reach + eat them; moisture-immune; grow large; reproduce slowly toward TREE_CAP.
+const N_TREES: usize = 40; // initial trees
+const TREE_CAP: usize = 70; // max trees
+const TREE_REACH: usize = 6; // sensor count a creature needs to reach tree food (big body)
+const TREE_NUTRIENT: f32 = 0.9; // trees are rich food (worth the reach)
+const TREE_MATURITY: f32 = 14.0; // trees grow large before reproducing
+const P_TREE_REPRO: f32 = 0.004; // slow reproduction (long-lived, sparse)
 const SEED_VIA_GUT: f32 = 0.5; // max chance (x quality) an eaten plant disperses an offspring (13)
 const PLANT_START_MASS: f32 = 0.6;
 
@@ -216,6 +224,22 @@ fn spawn_creature(commands: &mut Commands, g: Genome, pos: Vec3, rng: &mut Rng) 
     ));
 }
 
+// Tree genome: near-uneatable (defense ~1) so only tall creatures reach it; rich; grows large + slow.
+fn tree_genome() -> PlantGenome {
+    PlantGenome { kind: 0, nutrient: TREE_NUTRIENT, defense: 0.99, quality: 0.2, wet: 0.5, spread: 7.0, maturity: TREE_MATURITY }
+}
+
+// Spawn one tree (long-lived plant + Tree marker). edible=true tall fruit tree, false=evergreen.
+fn spawn_tree(commands: &mut Commands, mass: f32, pos: Vec3, edible: bool) {
+    commands.spawn((
+        Food,
+        Tree { edible },
+        PlantState { mass, age: 0 },
+        tree_genome(),
+        Transform::from_translation(pos),
+    ));
+}
+
 // Spawn one plant (living food). No render mesh; add_plant_visuals (render mode) gives it one.
 fn spawn_plant(commands: &mut Commands, g: PlantGenome, mass: f32, pos: Vec3) {
     commands.spawn((
@@ -269,6 +293,21 @@ pub fn spawn_world_headless(mut commands: Commands, mut rng: ResMut<Rng>, gen: R
                 spawn_plant(&mut commands, pg, PLANT_START_MASS, p);
             }
         }
+    }
+    spawn_trees(&mut commands, &mut rng);
+}
+
+// Scatter the initial trees (half tall fruit trees, half uneatable evergreens) on habitable land.
+fn spawn_trees(commands: &mut Commands, rng: &mut Rng) {
+    for i in 0..N_TREES {
+        let mut p = rand_pos(rng, FOOD_Y);
+        for _ in 0..6 {
+            if crate::terrain::plant_habitability(p.x, p.z, 0.0) > 0.4 {
+                break;
+            }
+            p = rand_pos(rng, FOOD_Y);
+        }
+        spawn_tree(commands, rng.range(3.0, 9.0), p, i % 2 == 0); // alternate fruit tree / evergreen
     }
 }
 
@@ -328,6 +367,7 @@ pub fn spawn_world_render(
             }
         }
     }
+    spawn_trees(&mut commands, &mut rng);
 }
 
 // --- plants: grow, reproduce (disperse mutated offspring), reseed if the web nearly collapses (13) ---
@@ -336,17 +376,36 @@ pub fn plant_step(
     mut rng: ResMut<Rng>,
     gen: Res<GenState>,
     mut soil: ResMut<Soil>,
-    mut q: Query<(Entity, &mut PlantState, &PlantGenome, &Transform), Without<Rot>>, // living plants (not carrion)
+    mut q: Query<(Entity, &mut PlantState, &PlantGenome, &Transform, Option<&Tree>), Without<Rot>>, // not carrion
 ) {
     soil.decay(); // fertility leaches / is taken up over time
     // season drifts on the global tick clock (advances in both modes; generation is frozen in continuous)
     let season = (gen.tick as f32 / GEN_TICKS as f32 * SEASON_FREQ).sin(); // -1 dry .. +1 wet
-    let mut count = q.iter().len();
+    let mut plant_count = q.iter().filter(|(.., t)| t.is_none()).count();
+    let tree_count = q.iter().filter(|(.., t)| t.is_some()).count();
     let mut births: Vec<(PlantGenome, Vec3)> = Vec::new();
+    let mut tree_births: Vec<(Vec3, bool)> = Vec::new(); // (pos, edible)
     let mut detritus: Vec<(PlantGenome, f32, Vec3)> = Vec::new(); // moisture-killed plants -> poison
-    for (e, mut st, g, tf) in &mut q {
+    for (e, mut st, g, tf, tree) in &mut q {
         let (px, pz) = (tf.translation.x, tf.translation.z);
-        // mortality: moisture mismatch (wrong `wet` for the spot) OR a poor site (deep water / desert).
+        let fert = soil.get(px, pz);
+        let boost = 1.0 + FERT_GROWTH * (fert / FERT_CAP).min(1.0);
+        if let Some(tree) = tree {
+            // trees: moisture-immune (long-lived), grow slowly + large, reproduce slowly into same kind
+            st.mass += g.growth_rate() * boost * DT;
+            st.age += 1;
+            if st.mass >= g.maturity && tree_count + tree_births.len() < TREE_CAP && rng.f32() < P_TREE_REPRO {
+                let off = Vec3::new(rng.range(-g.spread, g.spread), 0.0, rng.range(-g.spread, g.spread));
+                let mut pos = tf.translation + off;
+                pos.x = pos.x.clamp(-WORLD_HALF, WORLD_HALF);
+                pos.z = pos.z.clamp(-WORLD_HALF, WORLD_HALF);
+                pos.y = FOOD_Y + crate::terrain::height(pos.x, pos.z);
+                tree_births.push((pos, tree.edible));
+                st.mass *= PLANT_REPRO_FRAC;
+            }
+            continue;
+        }
+        // --- regular plant: mortality from moisture mismatch OR a poor site (deep water / desert) ---
         let m = crate::terrain::moisture(px, pz, season);
         let stress = (m - g.wet).abs();
         let hab = crate::terrain::plant_habitability(px, pz, season); // 0 in water/desert, 1 on good land
@@ -355,17 +414,14 @@ pub fn plant_step(
         if rng.f32() < p_mort {
             commands.entity(e).despawn();
             detritus.push((g.clone(), st.mass, tf.translation));
-            count = count.saturating_sub(1);
+            plant_count = plant_count.saturating_sub(1);
             continue;
         }
-        // fertile soil (where things decomposed) speeds growth: death feeds the food web (M5).
-        // Growth also scales with habitability -> sparse food in water + desert (P3 limitation).
-        let fert = soil.get(px, pz);
-        let boost = 1.0 + FERT_GROWTH * (fert / FERT_CAP).min(1.0);
+        // fertile soil speeds growth (M5); growth also scales with habitability (P3 sparse water/desert)
         st.mass += g.growth_rate() * boost * hab * DT;
         st.age += 1;
         if st.mass >= g.maturity
-            && count + births.len() < PLANT_CAP
+            && plant_count + births.len() < PLANT_CAP
             && rng.f32() < P_REPRO * (1.0 - DEF_REPRO_COST * g.defense)
         {
             let mut child = g.clone();
@@ -391,11 +447,14 @@ pub fn plant_step(
     }
     // reseed floor: keep a minimal seed bank so creatures can't drive food fully extinct
     let ntypes = gen.ntypes();
-    while count + births.len() < PLANT_MIN {
+    while plant_count + births.len() < PLANT_MIN {
         births.push((PlantGenome::random(&mut rng, ntypes), rand_pos(&mut rng, FOOD_Y)));
     }
     for (g, pos) in births {
         spawn_plant(&mut commands, g, PLANT_START_MASS, pos);
+    }
+    for (pos, edible) in tree_births {
+        spawn_tree(&mut commands, PLANT_START_MASS, pos, edible);
     }
 }
 
@@ -487,18 +546,20 @@ pub fn live_step(
         (With<Creature>, Without<Food>),
     >,
     mut commands: Commands,
-    fq: Query<(Entity, &Transform, &PlantState, &PlantGenome, Option<&Rot>), (With<Food>, Without<Creature>)>,
+    fq: Query<(Entity, &Transform, &PlantState, &PlantGenome, Option<&Rot>, Option<&Tree>), (With<Food>, Without<Creature>)>,
 ) {
     let dt = DT;
     let ntypes = gen.ntypes();
     let mut pop = cq.iter().count(); // live population (for the continuous-mode reproduction cap)
     // continuous birth/death is active only AFTER the generational warm-up (see WARMUP_GENS)
     let live_continuous = gen.continuous && gen.generation >= WARMUP_GENS;
-    // snapshot: (entity, pos, genome, mass, rot_age). rot_age=Some -> carrion (meat that rots to poison);
-    // None -> living plant. Genome carried so an eaten plant can disperse offspring (13).
-    let foods: Vec<(Entity, Vec3, PlantGenome, f32, Option<u32>)> = fq
+    // snapshot: (entity, pos, genome, mass, rot_age, tree). rot_age=Some -> carrion; tree=Some(edible) ->
+    // a tree (edible fruit tree if true, uneatable evergreen if false); else a living plant.
+    let foods: Vec<(Entity, Vec3, PlantGenome, f32, Option<u32>, Option<bool>)> = fq
         .iter()
-        .map(|(e, t, st, pg, rot)| (e, t.translation, pg.clone(), st.mass, rot.map(|r| r.age)))
+        .map(|(e, t, st, pg, rot, tree)| {
+            (e, t.translation, pg.clone(), st.mass, rot.map(|r| r.age), tree.map(|t| t.edible))
+        })
         .collect();
     let mut eaten: HashSet<Entity> = HashSet::new();
 
@@ -590,8 +651,14 @@ pub fn live_step(
             let (e, fp, mass) = (foods[i].0, foods[i].1, foods[i].3);
             let pg = foods[i].2.clone();
             let rot_age = foods[i].4;
+            let tree = foods[i].5; // None=plant/carrion, Some(true)=fruit tree, Some(false)=evergreen
             if np.distance(fp) < EAT_RADIUS {
-                let success = rng.f32() < sigmoid(BITE_K * (genome.bite - pg.defense));
+                // trees: only a TALL creature (sensors >= TREE_REACH) reaches an EDIBLE tree; evergreens
+                // (edible=false) are never eatable. Plants/carrion: bite vs defense as usual.
+                let success = match tree {
+                    Some(edible) => edible && genome.n_sensors() >= TREE_REACH,
+                    None => rng.f32() < sigmoid(BITE_K * (genome.bite - pg.defense)),
+                };
                 if success {
                     if let Some(age) = rot_age {
                         // CARRION / MEAT (P3): eating another creature = TOP nutrition, near-zero toxicity
@@ -643,7 +710,7 @@ pub fn live_step(
                     eaten.insert(e);
                     // endozoochory (13): an eaten LIVING plant may disperse a mutated offspring near the
                     // eater. Chance scales with quality -> tasty plants pay slower growth but win dispersal.
-                    if rot_age.is_none() && foods.len() < PLANT_CAP && rng.f32() < pg.quality * SEED_VIA_GUT {
+                    if rot_age.is_none() && tree.is_none() && foods.len() < PLANT_CAP && rng.f32() < pg.quality * SEED_VIA_GUT {
                         let mut child = pg.clone();
                         child.mutate(&mut rng);
                         let off =
