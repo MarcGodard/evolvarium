@@ -40,25 +40,53 @@ impl Plugin for VizPlugin {
 #[derive(Resource)]
 pub struct PlantMesh(pub Handle<Mesh>);
 
+// Tree part meshes (inserted by spawn_world_render): a trunk + two canopy shapes.
+#[derive(Resource)]
+pub struct TreeMeshes {
+    pub trunk: Handle<Mesh>,
+    pub broadleaf: Handle<Mesh>, // round canopy for fruit trees
+    pub conifer: Handle<Mesh>,   // cone canopy for evergreens
+}
+
 // Give any plant lacking a mesh its visuals: shared sphere + a material colored by its genome
 // (hue=kind, brightness=nutrient, warmth=defense). Covers initial plants AND new offspring.
 fn add_plant_visuals(
     mut commands: Commands,
     mesh: Option<Res<PlantMesh>>,
+    trees: Option<Res<TreeMeshes>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     q: Query<(Entity, &PlantGenome, Option<&Tree>), (With<Food>, Without<Mesh3d>)>,
 ) {
     let Some(mesh) = mesh else { return };
     for (e, g, tree) in &q {
-        // trees: leafy green (edible fruit tree) vs dark evergreen; other food colored by genome
-        let color = match tree {
-            Some(Tree { edible: true }) => Color::srgb(0.20, 0.56, 0.16),
-            Some(Tree { edible: false }) => Color::srgb(0.07, 0.27, 0.20),
-            None => plant_color(g),
-        };
-        commands
-            .entity(e)
-            .insert((Mesh3d(mesh.0.clone()), MeshMaterial3d(materials.add(color))));
+        match (tree, &trees) {
+            // tree = a brown trunk (this entity) + a green canopy child (cone evergreen / round fruit)
+            (Some(t), Some(tm)) => {
+                commands.entity(e).insert((
+                    Mesh3d(tm.trunk.clone()),
+                    MeshMaterial3d(materials.add(Color::srgb(0.40, 0.26, 0.13))),
+                ));
+                let (canopy, color) = if t.edible {
+                    (tm.broadleaf.clone(), Color::srgb(0.20, 0.60, 0.16))
+                } else {
+                    (tm.conifer.clone(), Color::srgb(0.06, 0.30, 0.18))
+                };
+                let child = commands
+                    .spawn((
+                        Mesh3d(canopy),
+                        MeshMaterial3d(materials.add(color)),
+                        Transform::from_xyz(0.0, 2.2, 0.0),
+                    ))
+                    .id();
+                commands.entity(e).add_child(child);
+            }
+            // plain plant: shared sphere, colored by genome
+            _ => {
+                commands
+                    .entity(e)
+                    .insert((Mesh3d(mesh.0.clone()), MeshMaterial3d(materials.add(plant_color(g)))));
+            }
+        }
     }
 }
 
@@ -132,8 +160,9 @@ fn restyle_creatures(
         if let Some(m) = mats.get_mut(&mm.0) {
             m.base_color = Color::hsl(type_hue(dom), sat, 0.55);
         }
-        // body scale reflects sensor count
-        tf.scale = Vec3::splat(0.8 + 0.07 * g.n_sensors() as f32);
+        // body scale: girth from sensor count, vertical stretch from the height gene (tall reaches trees)
+        let girth = 0.7 + 0.06 * g.n_sensors() as f32;
+        tf.scale = Vec3::new(girth, girth * (0.7 + 1.6 * g.height), girth);
     }
 }
 
@@ -194,7 +223,7 @@ fn pick_on_click(
     windows: Query<(&Window, &CursorOptions), With<PrimaryWindow>>,
     cam: Query<(&Camera, &GlobalTransform)>,
     creatures: Query<(Entity, &GlobalTransform), With<Creature>>,
-    foods: Query<(Entity, &GlobalTransform), With<Food>>,
+    foods: Query<(Entity, &GlobalTransform, Option<&Tree>), With<Food>>,
     mut selected: ResMut<Selected>,
 ) {
     if !mouse.just_pressed(MouseButton::Left) {
@@ -219,8 +248,10 @@ fn pick_on_click(
     for (e, t) in &creatures {
         consider(e, t.translation(), 1.0, &mut best);
     }
-    for (e, t) in &foods {
-        consider(e, t.translation(), 0.8, &mut best);
+    for (e, t, tree) in &foods {
+        // trees are big -> use a generous pick radius scaled by their size; plants are small
+        let r = if tree.is_some() { 2.0 * t.compute_transform().scale.max_element() } else { 0.8 };
+        consider(e, t.translation(), r, &mut best);
     }
     if let Some((_, e)) = best {
         selected.entity = Some(e);
@@ -232,7 +263,9 @@ fn pick_on_click(
 fn draw_selection(selected: Res<Selected>, q: Query<&GlobalTransform>, mut gizmos: Gizmos) {
     if let Some(e) = selected.entity {
         if let Ok(tf) = q.get(e) {
-            gizmos.sphere(tf.translation(), 1.2, Color::srgb(1.0, 1.0, 0.2));
+            // ring scales with the entity's size so it reads around big things (trees) too
+            let r = 1.0 + 1.4 * tf.compute_transform().scale.max_element();
+            gizmos.sphere(tf.translation(), r, Color::srgb(1.0, 1.0, 0.2));
         }
     }
 }
@@ -241,7 +274,7 @@ fn draw_selection(selected: Res<Selected>, q: Query<&GlobalTransform>, mut gizmo
 fn update_stats(
     selected: Res<Selected>,
     creatures: Query<(&Energy, &Fitness, &Genome, &DietState, &Alive)>,
-    foods: Query<(&PlantGenome, &PlantState, Option<&Rot>)>,
+    foods: Query<(&PlantGenome, &PlantState, Option<&Rot>, Option<&Tree>)>,
     mut text: Query<&mut Text, With<StatsText>>,
 ) {
     let Ok(mut text) = text.single_mut() else { return };
@@ -258,20 +291,29 @@ fn update_stats(
             }
         }
         text.0 = format!(
-            "CREATURE  {}\nenergy   {:.1}\nfitness  {:.1}\nsensors  {}\nbite     {:.2}\nrigidity {:.2}\ndiet>type {} (eff {:.2})\nload(G)  {:.2}\nage      {}",
+            "CREATURE  {}\nenergy   {:.1}\nfitness  {:.1}\nsensors  {}\nbite     {:.2}\nheight   {:.2}\nrigidity {:.2}\ndiet>type {} (eff {:.2})\nload(G)  {:.2}\nage      {}",
             if alive.0 { "alive" } else { "DEAD" },
             energy.0,
             fit.0,
             g.n_sensors(),
             g.bite,
+            g.height,
             g.rigidity,
             dom,
             diet.expr[dom],
             diet.g,
             diet.age,
         );
-    } else if let Ok((pg, st, rot)) = foods.get(e) {
-        if let Some(rot) = rot {
+    } else if let Ok((pg, st, rot, tree)) = foods.get(e) {
+        if let Some(tree) = tree {
+            text.0 = format!(
+                "TREE  {}\nmass     {:.1}\nnutrient {:.2}\n{}",
+                if tree.edible { "fruit (tall creatures eat)" } else { "evergreen (uneatable)" },
+                st.mass,
+                pg.nutrient,
+                if tree.edible { "reach: needs height >= 0.6" } else { "pure structure / refuge" },
+            );
+        } else if let Some(rot) = rot {
             let f = (rot.age as f32 / ROT_GONE as f32 * 100.0).min(100.0);
             text.0 = format!(
                 "CARRION / DETRITUS\nrotted   {:.0}%\nmass     {:.1}\nnutrient {:.2}",

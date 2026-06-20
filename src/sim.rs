@@ -56,10 +56,13 @@ const PREDATION_GAIN: f32 = 22.0; // energy a predator gains from a kill
 // can reach + eat them; moisture-immune; grow large; reproduce slowly toward TREE_CAP.
 const N_TREES: usize = 40; // initial trees
 const TREE_CAP: usize = 70; // max trees
-const TREE_REACH: usize = 6; // sensor count a creature needs to reach tree food (big body)
+const TREE_REACH_H: f32 = 0.6; // creature height needed to reach + eat fruit-tree food
 const TREE_NUTRIENT: f32 = 0.9; // trees are rich food (worth the reach)
 const TREE_MATURITY: f32 = 14.0; // trees grow large before reproducing
 const P_TREE_REPRO: f32 = 0.004; // slow reproduction (long-lived, sparse)
+const TREE_BITE_MASS: f32 = 2.5; // mass a creature strips per feeding (tree survives + regrows)
+const TREE_MIN_MASS: f32 = 1.0; // below this a fruit tree is over-eaten and dies
+const HEIGHT_COST: f32 = 1.4; // energy/sec upkeep per unit height (tall reaches trees but costs more)
 const SEED_VIA_GUT: f32 = 0.5; // max chance (x quality) an eaten plant disperses an offspring (13)
 const PLANT_START_MASS: f32 = 0.6;
 
@@ -174,6 +177,11 @@ impl Soil {
         self.cell.iter().sum::<f32>() / self.cell.len() as f32
     }
 }
+
+// Mass stripped from each fruit tree this tick (live_step records, plant_step applies). Trees persist
+// and regrow; a tree only dies when grazed below TREE_MIN_MASS (over-eaten).
+#[derive(Resource, Default)]
+pub struct TreeBites(pub HashMap<Entity, f32>);
 
 fn rand_pos(rng: &mut Rng, y: f32) -> Vec3 {
     let x = rng.range(-WORLD_HALF, WORLD_HALF);
@@ -323,6 +331,11 @@ pub fn spawn_world_render(
     let creature_mesh = meshes.add(Capsule3d::new(0.4, 0.8));
     // shared plant sphere mesh; viz::add_plant_visuals colors each plant by its genome
     commands.insert_resource(crate::viz::PlantMesh(meshes.add(Sphere::new(0.35))));
+    commands.insert_resource(crate::viz::TreeMeshes {
+        trunk: meshes.add(Cylinder::new(0.16, 3.0)),
+        broadleaf: meshes.add(Sphere::new(1.3)),
+        conifer: meshes.add(Cone { radius: 1.2, height: 3.2 }),
+    });
 
     // --load resumes a saved population; otherwise a random founding pop. Positions re-randomized.
     let snap = gen.load.as_deref().and_then(crate::persist::load_snapshot);
@@ -377,6 +390,7 @@ pub fn plant_step(
     mut rng: ResMut<Rng>,
     gen: Res<GenState>,
     mut soil: ResMut<Soil>,
+    mut tree_bites: ResMut<TreeBites>,
     mut q: Query<(Entity, &mut PlantState, &PlantGenome, &Transform, Option<&Tree>), Without<Rot>>, // not carrion
 ) {
     soil.decay(); // fertility leaches / is taken up over time
@@ -392,6 +406,14 @@ pub fn plant_step(
         let fert = soil.get(px, pz);
         let boost = 1.0 + FERT_GROWTH * (fert / FERT_CAP).min(1.0);
         if let Some(tree) = tree {
+            // apply this tick's grazing; a fruit tree grazed below TREE_MIN_MASS is over-eaten -> dies
+            if let Some(&bite) = tree_bites.0.get(&e) {
+                st.mass = (st.mass - bite).max(0.0);
+                if st.mass < TREE_MIN_MASS {
+                    commands.entity(e).despawn();
+                    continue;
+                }
+            }
             // trees: moisture-immune (long-lived), grow slowly + large, reproduce slowly into same kind
             st.mass += g.growth_rate() * boost * DT;
             st.age += 1;
@@ -457,6 +479,7 @@ pub fn plant_step(
     for (pos, edible) in tree_births {
         spawn_tree(&mut commands, PLANT_START_MASS, pos, edible);
     }
+    tree_bites.0.clear(); // consumed this tick
 }
 
 // --- predation (M5): creatures attack + eat each other. bite = combat (attack + defense). Opportunistic
@@ -547,6 +570,7 @@ pub fn live_step(
         (With<Creature>, Without<Food>),
     >,
     mut commands: Commands,
+    mut tree_bites: ResMut<TreeBites>,
     fq: Query<(Entity, &Transform, &PlantState, &PlantGenome, Option<&Rot>, Option<&Tree>), (With<Food>, Without<Creature>)>,
 ) {
     let dt = DT;
@@ -649,7 +673,8 @@ pub fn live_step(
             + MOVE_COST * thrust * thrust
             + BITE_COST * genome.bite
             + ROCK_MOVE_COST * rock * thrust.abs()
-            + SENSE_COST * sense_range)
+            + SENSE_COST * sense_range
+            + HEIGHT_COST * genome.height)
             * dt;
 
         // eat nearest plant on contact, IF bite beats its defense (arms race, see 13)
@@ -663,11 +688,21 @@ pub fn live_step(
                 // trees: only a TALL creature (sensors >= TREE_REACH) reaches an EDIBLE tree; evergreens
                 // (edible=false) are never eatable. Plants/carrion: bite vs defense as usual.
                 let success = match tree {
-                    Some(edible) => edible && genome.n_sensors() >= TREE_REACH,
+                    Some(edible) => edible && genome.height >= TREE_REACH_H, // tall creature reaches fruit tree
                     None => rng.f32() < sigmoid(BITE_K * (genome.bite - pg.defense)),
                 };
                 if success {
-                    if let Some(age) = rot_age {
+                    if let Some(true) = tree {
+                        // FRUIT TREE: strip a chunk of foliage; the tree persists + regrows and only dies
+                        // if grazed below TREE_MIN_MASS (over-eaten). Rich reward for the reach.
+                        let bite_mass = TREE_BITE_MASS.min(mass);
+                        let base = bite_mass * pg.nutrient * (0.5 + pg.quality);
+                        let eff = if gen.diet { diet.expr[pg.kind as usize] } else { 1.0 };
+                        energy.0 += EAT_GAIN * base * eff;
+                        fit.0 += base * eff;
+                        *tree_bites.0.entry(e).or_insert(0.0) += bite_mass;
+                        eat_reward = R_EAT;
+                    } else if let Some(age) = rot_age {
                         // CARRION / MEAT (P3): eating another creature = TOP nutrition, near-zero toxicity
                         // while fresh, and richer + longer-lasting than plants (MEAT_BONUS). Toxin only
                         // ramps once well-rotted (>60%). Not gated by diet expr; never disperses seeds.
@@ -713,20 +748,23 @@ pub fn live_step(
                         energy.0 = ENERGY_MAX;
                         diet.g += excess * OVEREAT_G;
                     }
-                    commands.entity(e).despawn();
-                    eaten.insert(e);
-                    // endozoochory (13): an eaten LIVING plant may disperse a mutated offspring near the
-                    // eater. Chance scales with quality -> tasty plants pay slower growth but win dispersal.
-                    if rot_age.is_none() && tree.is_none() && foods.len() < PLANT_CAP && rng.f32() < pg.quality * SEED_VIA_GUT {
-                        let mut child = pg.clone();
-                        child.mutate(&mut rng);
-                        let off =
-                            Vec3::new(rng.range(-pg.spread, pg.spread), 0.0, rng.range(-pg.spread, pg.spread));
-                        let mut sp = np + off;
-                        sp.x = sp.x.clamp(-WORLD_HALF, WORLD_HALF);
-                        sp.z = sp.z.clamp(-WORLD_HALF, WORLD_HALF);
-                        sp.y = FOOD_Y + crate::terrain::height(sp.x, sp.z);
-                        spawn_plant(&mut commands, child, PLANT_START_MASS, sp);
+                    // plants/carrion are consumed (despawn); trees PERSIST (mass reduced in plant_step)
+                    if tree.is_none() {
+                        commands.entity(e).despawn();
+                        eaten.insert(e);
+                        // endozoochory (13): an eaten LIVING plant may disperse a mutated offspring near
+                        // the eater. Chance scales with quality -> tasty plants pay growth but win dispersal.
+                        if rot_age.is_none() && foods.len() < PLANT_CAP && rng.f32() < pg.quality * SEED_VIA_GUT {
+                            let mut child = pg.clone();
+                            child.mutate(&mut rng);
+                            let off =
+                                Vec3::new(rng.range(-pg.spread, pg.spread), 0.0, rng.range(-pg.spread, pg.spread));
+                            let mut sp = np + off;
+                            sp.x = sp.x.clamp(-WORLD_HALF, WORLD_HALF);
+                            sp.z = sp.z.clamp(-WORLD_HALF, WORLD_HALF);
+                            sp.y = FOOD_Y + crate::terrain::height(sp.x, sp.z);
+                            spawn_plant(&mut commands, child, PLANT_START_MASS, sp);
+                        }
                     }
                 }
                 // failed bite: the plant's defense held; it survives this contact

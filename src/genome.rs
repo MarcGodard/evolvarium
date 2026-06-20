@@ -40,6 +40,8 @@ pub struct Genome {
     pub expr0: [f32; NFOOD], // innate diet-gene expression baseline (see 12)
     pub rigidity: f32,       // 0=flexible generalist .. 1=pinned specialist (koala)
     pub bite: f32,           // 0..1 eating strength vs plant defense (arms race, see 13); costs energy
+    #[serde(default)]
+    pub height: f32,         // 0..1 body height/reach: tall reaches fruit trees but costs upkeep (no free lunch)
 }
 
 pub fn n_inputs(n_sensors: usize) -> usize {
@@ -74,6 +76,7 @@ impl Genome {
             expr0,
             rigidity: rng.f32(),
             bite: rng.f32() * 0.5,
+            height: rng.f32() * 0.5,
         }
     }
 
@@ -117,6 +120,9 @@ impl Genome {
         }
         if rng.f32() < rate {
             self.bite = (self.bite + rng.normal() * 0.15).clamp(0.0, 1.0);
+        }
+        if rng.f32() < rate {
+            self.height = (self.height + rng.normal() * 0.15).clamp(0.0, 1.0);
         }
         // structural: add / remove a sensor (and the matching input-weight columns)
         if rng.f32() < 0.06 && self.sensors.len() < MAX_SENSORS {

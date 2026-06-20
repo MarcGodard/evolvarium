@@ -47,6 +47,7 @@ fn main() {
     let mut app = App::new();
     app.insert_resource(rng::Rng::seed(seed));
     app.insert_resource(sim::Soil::new()); // dynamic soil-fertility grid (M5 nutrient loop)
+    app.init_resource::<sim::TreeBites>(); // per-tick fruit-tree grazing accumulator
     app.insert_resource(sim::GenState {
         generation: 0,
         ticks_left: sim::GEN_TICKS,
