@@ -114,8 +114,9 @@ fn color_carrion(mut mats: ResMut<Assets<StandardMaterial>>, q: Query<(&Rot, &Me
     }
 }
 
-// Scale plants by mass (growth visible) AND sit them on the terrain: base on the ground, plus the
-// plant's height gene lifts the foliage onto a taller stalk. Trees render much bigger (tall canopy).
+// Scale plants by mass (growth visible) AND root them on the terrain. The height gene STRETCHES a
+// plant vertically (taller plant) rather than lifting it into the air -> tall plants read as tall but
+// their base stays on the ground (no floating). Trees render much bigger (tall trunk + canopy).
 fn size_plants(mut q: Query<(&PlantState, &PlantGenome, &mut Transform, Option<&Tree>), With<Food>>) {
     for (st, g, mut tf, tree) in &mut q {
         let ground = crate::terrain::height(tf.translation.x, tf.translation.z);
@@ -124,10 +125,11 @@ fn size_plants(mut q: Query<(&PlantState, &PlantGenome, &mut Transform, Option<&
             tf.scale = Vec3::splat(s);
             tf.translation.y = ground + 1.5 * s; // trunk base rests on the ground
         } else {
-            let s = (0.25 + 0.13 * st.mass).clamp(0.25, 1.6);
-            tf.scale = Vec3::splat(s);
-            // foliage base on the ground (sphere radius), lifted by the height gene (taller stalk)
-            tf.translation.y = ground + 0.35 * s + g.height * 2.5;
+            // sphere mesh radius 0.35; girth from mass, vertical stretch from the height gene
+            let girth = (0.25 + 0.13 * st.mass).clamp(0.25, 1.6);
+            let tall = 1.0 + 2.0 * g.height; // taller plants = harder for short creatures to reach
+            tf.scale = Vec3::new(girth, girth * tall, girth);
+            tf.translation.y = ground + 0.35 * girth * tall; // base rooted on the ground (no float)
         }
     }
 }
