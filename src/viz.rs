@@ -136,7 +136,11 @@ fn toggle_sensors(keys: Res<ButtonInput<KeyCode>>, mut show: ResMut<ShowSensors>
 // --- click-to-inspect (left-click selects a creature/plant; an on-screen panel shows its stats) ---
 
 #[derive(Resource, Default)]
-pub struct Selected(pub Option<Entity>);
+pub struct Selected {
+    pub entity: Option<Entity>,
+    pub follow: bool,        // camera tracks the selected entity (toggle with F)
+    pub follow_offset: Vec3, // camera offset from target captured when follow engaged
+}
 
 #[derive(Component)]
 struct StatsText;
@@ -208,12 +212,15 @@ fn pick_on_click(
     for (e, t) in &foods {
         consider(e, t.translation(), 0.8, &mut best);
     }
-    selected.0 = best.map(|(_, e)| e);
+    if let Some((_, e)) = best {
+        selected.entity = Some(e);
+    }
+    // miss keeps the current selection (so follow isn't lost by a stray click)
 }
 
 // Draw a yellow ring around the selected entity each frame so you can see what's picked.
 fn draw_selection(selected: Res<Selected>, q: Query<&GlobalTransform>, mut gizmos: Gizmos) {
-    if let Some(e) = selected.0 {
+    if let Some(e) = selected.entity {
         if let Ok(tf) = q.get(e) {
             gizmos.sphere(tf.translation(), 1.2, Color::srgb(1.0, 1.0, 0.2));
         }
@@ -228,7 +235,7 @@ fn update_stats(
     mut text: Query<&mut Text, With<StatsText>>,
 ) {
     let Ok(mut text) = text.single_mut() else { return };
-    let Some(e) = selected.0 else {
+    let Some(e) = selected.entity else {
         text.0 = "left-click a creature or plant to inspect".into();
         return;
     };

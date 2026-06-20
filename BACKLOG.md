@@ -49,6 +49,17 @@ verify headless, commit on `build` with a clear message, then tick the item here
       headless: populations stay viable (reseed floor holds); position-dependent early die-off observed.
       `wet` added to gen log. (TOLERANCE/KILL/SEASON_FREQ tunable.)
 
+## M6 — reproduction modes + interactive viz
+- [~] **Continuous reproduction** (`--continuous`, experimental; default stays generational). Warm-up
+      generationally for WARMUP_GENS to evolve foragers, then switch to emergent birth/death: a well-fed
+      creature (energy > REPRO_THRESHOLD) spends REPRO_COST to bud a mutated child; death despawns +
+      drops carrion. Density-dependent (breed only when fed) + CREATURE_CAP bound it. STATUS: stable +
+      sustained on some seeds (seed 1 base survives full run, cycling 46-130), collapses on others
+      (seed 3) and in `--diet` (diet energy drains + sync warm-up cohort). NEEDS: robust cross-seed
+      balance (softer warm-up transition, gentler diet economy) before it can be the default.
+- [x] **Click-to-inspect + follow.** Left-click selects a creature/plant -> live stats panel + yellow
+      ring; F toggles a follow-cam that tracks the selected entity. Camera look moved to RIGHT-click.
+
 ## NOT for the build loop (owned elsewhere)
 - Plant defense cost / arms-race balance constants → the TUNING loop owns these.
 - Genome/learning architecture changes → discuss with the human first.

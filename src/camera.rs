@@ -1,6 +1,7 @@
 // Free-fly camera. RIGHT-click to capture mouse + look; Esc to release. WASD move, Q/E down/up, Shift
 // faster. Left-click is left free for selecting creatures/plants (see viz::pick_on_click).
 // Render mode only. Lets you fly through the world and watch blobs (see 01).
+use crate::viz::Selected;
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
@@ -10,12 +11,12 @@ pub struct FlyCameraPlugin;
 impl Plugin for FlyCameraPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, (spawn_camera, log_controls))
-            .add_systems(Update, (cursor_capture, look, movement));
+            .add_systems(Update, (cursor_capture, look, movement, follow_camera));
     }
 }
 
 fn log_controls() {
-    info!("camera: RIGHT-CLICK to look | ESC release | LEFT-CLICK select | WASD move | Q/E down/up | Shift faster");
+    info!("camera: RIGHT-CLICK look | LEFT-CLICK select | F follow selected | ESC release | WASD move | Q/E down/up | Shift faster");
 }
 
 #[derive(Component)]
@@ -62,8 +63,12 @@ fn cursor_capture(
 fn look(
     motion: Res<AccumulatedMouseMotion>,
     cursor: Query<&CursorOptions, With<PrimaryWindow>>,
+    selected: Res<Selected>,
     mut q: Query<(&mut Transform, &mut FlyCam)>,
 ) {
+    if selected.follow {
+        return; // follow_camera owns the camera while following
+    }
     let Ok(cursor) = cursor.single() else { return };
     if cursor.grab_mode == CursorGrabMode::None {
         return; // not captured: don't steal mouse
@@ -79,8 +84,12 @@ fn look(
 fn movement(
     keys: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
+    selected: Res<Selected>,
     mut q: Query<(&mut Transform, &FlyCam)>,
 ) {
+    if selected.follow {
+        return; // follow_camera owns the camera while following
+    }
     let Ok((mut t, cam)) = q.single_mut() else { return };
     let mut dir = Vec3::ZERO;
     let fwd = *t.forward();
@@ -95,5 +104,39 @@ fn movement(
     if dir != Vec3::ZERO {
         let boost = if keys.pressed(KeyCode::ShiftLeft) { 3.0 } else { 1.0 };
         t.translation += dir.normalize() * cam.speed * boost * time.delta_secs();
+    }
+}
+
+// Follow the selected entity (toggle with F). Captures the current camera offset when engaged, then
+// keeps that offset while tracking the target each frame. Stops if the target dies/despawns.
+fn follow_camera(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut selected: ResMut<Selected>,
+    targets: Query<&GlobalTransform>,
+    mut cam: Query<&mut Transform, With<FlyCam>>,
+) {
+    let Ok(mut cam_tf) = cam.single_mut() else { return };
+    if keys.just_pressed(KeyCode::KeyF) {
+        if let Some(e) = selected.entity {
+            selected.follow = !selected.follow;
+            if selected.follow {
+                if let Ok(t) = targets.get(e) {
+                    let off = cam_tf.translation - t.translation();
+                    // avoid a degenerate zero offset (camera sitting on the target)
+                    selected.follow_offset = if off.length() < 1.0 { Vec3::new(0.0, 6.0, 12.0) } else { off };
+                }
+            }
+        }
+    }
+    if !selected.follow {
+        return;
+    }
+    match selected.entity.and_then(|e| targets.get(e).ok()) {
+        Some(t) => {
+            let tp = t.translation();
+            cam_tf.translation = tp + selected.follow_offset;
+            cam_tf.look_at(tp, Vec3::Y);
+        }
+        None => selected.follow = false, // target gone
     }
 }

@@ -12,8 +12,22 @@ use crate::rng::Rng;
 pub const POP: usize = 90;
 pub const FOOD: usize = 200;
 pub const WORLD_HALF: f32 = 40.0; // square arena [-H, H] in x,z (bigger playground)
-pub const GEN_TICKS: u32 = 1500; // fixed-steps per generation
-pub const MAX_GEN_HEADLESS: u32 = 40; // headless stops after this many gens
+pub const GEN_TICKS: u32 = 1500; // fixed-steps per generation (generational mode); also the log interval
+pub const MAX_GEN_HEADLESS: u32 = 40; // headless stops after this many gens (generational mode)
+pub const MAX_TICKS_HEADLESS: u32 = MAX_GEN_HEADLESS * GEN_TICKS; // continuous-mode headless run length
+
+// Continuous reproduction (default mode). A well-fed creature spends energy to bud a mutated child;
+// death is real (despawn + carrion). Selection is emergent (breed before you die), like the plants.
+// Breed only when genuinely well-fed: this is density dependence -> high population means low per-capita
+// food means few reach the threshold means breeding self-throttles (prevents boom-bust to extinction).
+const REPRO_THRESHOLD: f32 = 22.0; // energy to be eligible (near the sustained-forager equilibrium ~18)
+const REPRO_COST: f32 = 10.0; // energy the parent spends per child (>BIRTH_ENERGY: birth dissipates some)
+const BIRTH_ENERGY: f32 = 8.0; // offspring's starting energy
+const P_REPRO_CREATURE: f32 = 0.02; // per-tick reproduction chance while eligible (gentle: damps overshoot)
+pub const CREATURE_CAP: usize = 130; // population ceiling (kept below grazing pressure that crashes plants)
+// Continuous mode cold-starts badly (random foragers starve before breeding). Bootstrap with a short
+// GENERATIONAL warm-up to evolve competent foragers, THEN switch to continuous birth/death.
+const WARMUP_GENS: u32 = 12;
 
 const START_ENERGY: f32 = 30.0;
 const BASAL_COST: f32 = 1.4; // energy/sec just to live (low -> resting is genuinely valuable)
@@ -100,6 +114,8 @@ pub struct GenState {
     pub learn: bool,     // lifetime learning on/off (A/B vs M1 baseline)
     pub poison: bool,    // two food types (legacy --poison mode; sets ntypes=2)
     pub diet: bool,      // epigenetic diet model (NFOOD types, expression, growth-load, disease)
+    pub continuous: bool, // continuous reproduction (default) vs discrete generational GA (--generational)
+    pub tick: u32,       // global tick clock (drives season + continuous logging/stop)
     pub save: Option<String>, // --save=PATH: write survivors at headless run end (BACKLOG P2)
     pub load: Option<String>, // --load=PATH: resume from a saved population instead of random
 }
@@ -152,6 +168,26 @@ fn rand_pos(rng: &mut Rng, y: f32) -> Vec3 {
 
 fn diet_state(g: &Genome) -> DietState {
     DietState { expr: g.expr0, g: 0.0, age: 0 }
+}
+
+// Spawn one creature (no render mesh; viz::add_creature_visuals gives it one in render mode).
+// Used for continuous-mode offspring; fresh brain from the genome's priors, learns over its own life.
+fn spawn_creature(commands: &mut Commands, g: Genome, pos: Vec3, rng: &mut Rng) {
+    let h = rng.range(-std::f32::consts::PI, std::f32::consts::PI);
+    let brain = Brain { net: g.net.clone(), prev_dist: f32::INFINITY };
+    let diet = diet_state(&g);
+    commands.spawn((
+        Creature,
+        g,
+        brain,
+        diet,
+        Energy(BIRTH_ENERGY),
+        Fitness(0.0),
+        Heading(h),
+        Alive(true),
+        Locomotion { start: pos, path: 0.0 },
+        Transform::from_translation(pos),
+    ));
 }
 
 // Spawn one plant (living food). No render mesh; add_plant_visuals (render mode) gives it one.
@@ -277,7 +313,8 @@ pub fn plant_step(
     mut q: Query<(Entity, &mut PlantState, &PlantGenome, &Transform), Without<Rot>>, // living plants (not carrion)
 ) {
     soil.decay(); // fertility leaches / is taken up over time
-    let season = (gen.generation as f32 * SEASON_FREQ).sin(); // -1 dry .. +1 wet, drifts across generations
+    // season drifts on the global tick clock (advances in both modes; generation is frozen in continuous)
+    let season = (gen.tick as f32 / GEN_TICKS as f32 * SEASON_FREQ).sin(); // -1 dry .. +1 wet
     let mut count = q.iter().len();
     let mut births: Vec<(PlantGenome, Vec3)> = Vec::new();
     let mut detritus: Vec<(PlantGenome, f32, Vec3)> = Vec::new(); // moisture-killed plants -> poison
@@ -358,7 +395,7 @@ pub fn live_step(
     gen: Res<GenState>,
     mut rng: ResMut<Rng>,
     mut cq: Query<
-        (&mut Transform, &mut Energy, &mut Fitness, &mut Heading, &mut Alive, &Genome, &mut Brain, &mut DietState, &mut Locomotion),
+        (Entity, &mut Transform, &mut Energy, &mut Fitness, &mut Heading, &mut Alive, &Genome, &mut Brain, &mut DietState, &mut Locomotion),
         (With<Creature>, Without<Food>),
     >,
     mut commands: Commands,
@@ -366,6 +403,9 @@ pub fn live_step(
 ) {
     let dt = DT;
     let ntypes = gen.ntypes();
+    let mut pop = cq.iter().count(); // live population (for the continuous-mode reproduction cap)
+    // continuous birth/death is active only AFTER the generational warm-up (see WARMUP_GENS)
+    let live_continuous = gen.continuous && gen.generation >= WARMUP_GENS;
     // snapshot: (entity, pos, genome, mass, rot_age). rot_age=Some -> carrion (meat that rots to poison);
     // None -> living plant. Genome carried so an eaten plant can disperse offspring (13).
     let foods: Vec<(Entity, Vec3, PlantGenome, f32, Option<u32>)> = fq
@@ -374,7 +414,7 @@ pub fn live_step(
         .collect();
     let mut eaten: HashSet<Entity> = HashSet::new();
 
-    for (mut ct, mut energy, mut fit, mut head, mut alive, genome, mut brain, mut diet, mut loco) in &mut cq {
+    for (entity, mut ct, mut energy, mut fit, mut head, mut alive, genome, mut brain, mut diet, mut loco) in &mut cq {
         if !alive.0 {
             continue;
         }
@@ -528,17 +568,27 @@ pub fn live_step(
             }
         }
 
-        // per-tick diet upkeep: aging, generalist overhead, growth-load decay, disease mortality (12).
+        // per-tick upkeep. Age every creature; diet mode adds expression overhead + growth-load decay.
+        diet.age += 1;
         if gen.diet {
-            diet.age += 1;
             let total_expr: f32 = diet.expr.iter().sum();
             energy.0 -= EXPR_OVERHEAD * total_expr * dt; // cost of keeping many genes expressed
             diet.g = (diet.g - G_DECAY).max(0.0);
-            let age_frac = diet.age as f32 / AGE_SCALE;
-            let aging = AGE_HAZARD * (age_frac / (age_frac + 1.0)); // rises then plateaus (~95 effect)
+        }
+        // mortality from the diet model (aging + disease). In continuous mode death is otherwise
+        // starvation-driven (density-dependent), which regulates the population logistically.
+        if gen.diet {
+            // aging only in generational mode (fixed lifespan -> ~95 plateau). In continuous it would
+            // sync-kill the warm-up cohort; there death is starvation + disease (density-regulated).
+            let aging = if gen.continuous {
+                0.0
+            } else {
+                let age_frac = diet.age as f32 / AGE_SCALE;
+                AGE_HAZARD * (age_frac / (age_frac + 1.0))
+            };
             let p_death = (aging + DISEASE_K * diet.g) * dt;
             if rng.f32() < p_death {
-                alive.0 = false; // disease / old-age death
+                alive.0 = false; // old-age / disease death
             }
         }
 
@@ -557,6 +607,26 @@ pub fn live_step(
 
         if energy.0 <= 0.0 {
             alive.0 = false;
+        }
+
+        // continuous reproduction: a well-fed creature spends energy to bud a mutated child nearby.
+        // Energy cost is the trade-off (breeding vs survival); cap bounds the population.
+        if live_continuous
+            && alive.0
+            && energy.0 > REPRO_THRESHOLD
+            && pop < CREATURE_CAP
+            && rng.f32() < P_REPRO_CREATURE
+        {
+            energy.0 -= REPRO_COST;
+            let mut child = genome.clone();
+            child.mutate(&mut rng, MUT_RATE, MUT_STD);
+            let off = Vec3::new(rng.range(-2.0, 2.0), 0.0, rng.range(-2.0, 2.0));
+            let mut cp = ct.translation + off;
+            cp.x = cp.x.clamp(-WORLD_HALF, WORLD_HALF);
+            cp.z = cp.z.clamp(-WORLD_HALF, WORLD_HALF);
+            cp.y = CREATURE_Y + crate::terrain::height(cp.x, cp.z);
+            spawn_creature(&mut commands, child, cp, &mut rng);
+            pop += 1;
         }
 
         // died this tick (loop skips already-dead creatures at the top) -> drop carrion here, which
@@ -579,6 +649,12 @@ pub fn live_step(
                 Rot { age: 0 },
                 Transform::from_translation(p),
             ));
+            // continuous (post-warmup): the corpse entity is gone (became carrion). Generational mode
+            // and the warm-up keep it (Alive=false) to be recycled into the next generation.
+            if live_continuous {
+                commands.entity(entity).despawn();
+                pop = pop.saturating_sub(1);
+            }
         }
     }
     // eaten plants are despawned above; population is replenished by plant_step (reproduction).
@@ -600,6 +676,63 @@ pub fn generation_step(
     soil: Res<Soil>,
     mut exit: MessageWriter<AppExit>,
 ) {
+    gen.tick = gen.tick.wrapping_add(1); // global clock: drives season (plant_step) + continuous timing
+
+    // --- continuous mode (after warm-up): no generation boundary. Snapshot the ecosystem periodically;
+    // stop headless at MAX_TICKS_HEADLESS or on extinction. Selection is emergent (live_step). ---
+    if gen.continuous && gen.generation >= WARMUP_GENS {
+        let pop = cq.iter().count();
+        let done = gen.headless && (gen.tick >= MAX_TICKS_HEADLESS || pop == 0);
+        if gen.tick % GEN_TICKS == 0 || done {
+            let n = pop.max(1) as f32;
+            let mut e = 0.0;
+            let mut f = 0.0;
+            let mut sens = 0.0;
+            let mut bite = 0.0;
+            let mut rig = 0.0;
+            let mut age = 0.0;
+            for (_t, en, fit, _h, _a, g, _b, diet, _l) in cq.iter() {
+                e += en.0;
+                f += fit.0;
+                sens += g.n_sensors() as f32;
+                bite += g.bite;
+                rig += g.rigidity;
+                age += diet.age as f32;
+            }
+            let plant_n = pq.iter().len().max(1);
+            let avg_def: f32 = pq.iter().map(|(g, _)| g.defense).sum::<f32>() / plant_n as f32;
+            let avg_nut: f32 = pq.iter().map(|(g, _)| g.nutrient).sum::<f32>() / plant_n as f32;
+            let avg_qual: f32 = pq.iter().map(|(g, _)| g.quality).sum::<f32>() / plant_n as f32;
+            let avg_wet: f32 = pq.iter().map(|(g, _)| g.wet).sum::<f32>() / plant_n as f32;
+            info!(
+                "t {:>6} | pop {:>3} | energy {:.1} | life-fit {:.1} | age {:.0} | sens {:.1} | bite {:.2} | rig {:.2} | def {:.2} nut {:.2} qual {:.2} wet {:.2} | plants {} | soil {:.2}",
+                gen.tick, pop, e / n, f / n, age / n, sens / n, bite / n, rig / n, avg_def, avg_nut, avg_qual, avg_wet, plant_n, soil.avg()
+            );
+        }
+        if done {
+            if let Some(path) = &gen.save {
+                let mut creatures: Vec<(f32, Genome)> =
+                    cq.iter().map(|(_, _, fit, _, _, g, _, _, _)| (fit.0, g.clone())).collect();
+                creatures.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+                let plants: Vec<crate::persist::SavedPlant> = pq
+                    .iter()
+                    .map(|(g, st)| crate::persist::SavedPlant { g: g.clone(), mass: st.mass })
+                    .collect();
+                crate::persist::save_snapshot(
+                    path,
+                    &crate::persist::Snapshot {
+                        generation: gen.tick / GEN_TICKS,
+                        creatures: creatures.into_iter().map(|(_, g)| g).collect(),
+                        plants,
+                    },
+                );
+            }
+            info!("continuous headless done at tick {} (pop {})", gen.tick, pop);
+            exit.write(AppExit::Success);
+        }
+        return;
+    }
+
     gen.ticks_left = gen.ticks_left.saturating_sub(1);
     let any_alive = cq.iter().any(|(.., alive, _, _, _, _)| alive.0);
     if gen.ticks_left > 0 && any_alive {
