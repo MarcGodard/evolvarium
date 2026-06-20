@@ -273,7 +273,7 @@ pub fn spawn_world_headless(mut commands: Commands, mut rng: ResMut<Rng>, gen: R
             for _ in 0..FOOD {
                 let p = rand_pos(&mut rng, FOOD_Y);
                 let pg = PlantGenome::random(&mut rng, ntypes);
-                spawn_plant(&mut commands, pg, PLANT_START_MASS, p);
+                spawn_plant(&mut commands, pg, rng.range(0.3, 1.4) * PLANT_START_MASS, p); // varied mass desyncs the food supply
             }
         }
     }
@@ -353,7 +353,7 @@ pub fn spawn_world_render(
             for _ in 0..FOOD {
                 let p = rand_pos(&mut rng, FOOD_Y);
                 let pg = PlantGenome::random(&mut rng, ntypes);
-                spawn_plant(&mut commands, pg, PLANT_START_MASS, p);
+                spawn_plant(&mut commands, pg, rng.range(0.3, 1.4) * PLANT_START_MASS, p); // varied mass desyncs the food supply
             }
         }
     }
@@ -485,7 +485,7 @@ pub fn plant_step(
         births.push((PlantGenome::random(&mut rng, ntypes), rand_pos(&mut rng, FOOD_Y)));
     }
     for (g, pos) in births {
-        spawn_plant(&mut commands, g, PLANT_START_MASS, pos);
+        spawn_plant(&mut commands, g, rng.range(0.5, 1.3) * PLANT_START_MASS, pos); // varied reseed mass (staggered maturity)
     }
     for (pos, edible, g) in tree_births {
         spawn_tree(&mut commands, PLANT_START_MASS, pos, edible, g);
@@ -501,11 +501,11 @@ pub fn predation_step(
     mut commands: Commands,
     mut cq: Query<(Entity, &Transform, &mut Energy, &mut Fitness, &mut Alive, &Genome), With<Creature>>,
 ) {
-    // snapshot living creatures: (entity, pos, combat). Combat power = bite + size bonus (mass wins fights).
-    let snap: Vec<(Entity, Vec3, f32)> = cq
+    // snapshot living creatures: (entity, pos, combat, energy). Combat = bite + size bonus (mass wins).
+    let snap: Vec<(Entity, Vec3, f32, f32)> = cq
         .iter()
         .filter(|(_, _, _, _, a, _)| a.0)
-        .map(|(e, t, _, _, _, g)| (e, t.translation, g.bite + SIZE_COMBAT * g.size))
+        .map(|(e, t, en, _, _, g)| (e, t.translation, g.bite + SIZE_COMBAT * g.size, en.0))
         .collect();
     if snap.len() < 2 {
         return;
@@ -513,12 +513,17 @@ pub fn predation_step(
     let mut killed: HashSet<Entity> = HashSet::new();
     let mut gains: HashMap<Entity, f32> = HashMap::new();
     let r2 = ATTACK_RADIUS * ATTACK_RADIUS;
-    for (ai, &(ae, apos, abite)) in snap.iter().enumerate() {
+    for (ai, &(ae, apos, abite, aenergy)) in snap.iter().enumerate() {
         if killed.contains(&ae) {
             continue; // a creature killed this tick doesn't also attack
         }
+        // only a HUNGRY creature hunts -> well-fed crowds don't cannibalize each other (this was the
+        // continuous-mode killer: at high density, packed well-fed creatures mass-cannibalized -> crash).
+        if aenergy > PREDATION_HUNGER {
+            continue;
+        }
         let mut best: Option<(f32, usize)> = None;
-        for (bi, &(be, bpos, _)) in snap.iter().enumerate() {
+        for (bi, &(be, bpos, _, _)) in snap.iter().enumerate() {
             if bi == ai || killed.contains(&be) {
                 continue;
             }
@@ -528,7 +533,7 @@ pub fn predation_step(
             }
         }
         if let Some((_, bi)) = best {
-            let (be, _, bbite) = snap[bi];
+            let (be, _, bbite, _) = snap[bi];
             // success = attacker bite vs prey bite (bite doubles as defense)
             if rng.f32() < sigmoid(BITE_K * (abite - bbite)) {
                 killed.insert(be);
@@ -864,8 +869,11 @@ pub fn live_step(
         if live_continuous
             && alive.0
             && energy.0 > REPRO_THRESHOLD
+            && diet.age > REPRO_MIN_AGE // newborns must establish before breeding (paces birth waves)
             && pop < CREATURE_CAP
-            && rng.f32() < P_REPRO_CREATURE
+            // density-dependent: breeding rate tapers to 0 as pop approaches cap -> population asymptotes
+            // to carrying capacity instead of slamming the cap and crashing (no boom-bust overshoot).
+            && rng.f32() < P_REPRO_CREATURE * (1.0 - pop as f32 / CREATURE_CAP as f32)
         {
             energy.0 -= REPRO_COST;
             let mut child = genome.clone();
@@ -924,7 +932,7 @@ pub fn generation_step(
     if gen.continuous && gen.generation >= WARMUP_GENS {
         let pop = cq.iter().count();
         let done = gen.headless && (gen.tick >= gen.max_gens * GEN_TICKS || pop == 0);
-        if gen.tick % GEN_TICKS == 0 || done {
+        if gen.tick % CONT_LOG_TICKS == 0 || done {
             let n = pop.max(1) as f32;
             let mut e = 0.0;
             let mut f = 0.0;
@@ -1056,6 +1064,11 @@ pub fn generation_step(
     // overwrite creatures with next gen, reset state + reposition.
     // Brain relearns from scratch each life: w := child priors (learned weights NOT inherited).
     // Diet expression resets to the child's innate baseline (epigenetic state is not inherited).
+    // The cohort about to ENTER continuous mode (this is the last warm-up reset) is desynchronized:
+    // random starting energy + life-age so they don't all reach the breed threshold / min-age / death
+    // at the same tick. Synchronized cohorts breed in one burst -> a newborn wave that starves together
+    // -> boom-bust extinction. Staggering ages spreads births + deaths so the population can overlap.
+    let desync = gen.continuous && gen.generation + 1 >= WARMUP_GENS;
     for ((mut t, mut energy, mut fit, mut head, mut alive, mut g, mut brain, mut diet, mut loco), child) in
         cq.iter_mut().zip(next)
     {
@@ -1063,10 +1076,10 @@ pub fn generation_step(
         brain.prev_dist = f32::INFINITY;
         diet.expr = child.expr0;
         diet.g = 0.0;
-        diet.age = 0;
+        diet.age = if desync { (rng.f32() * 600.0) as u32 } else { 0 };
         diet.fatigue = 0.0;
         *g = child;
-        energy.0 = START_ENERGY;
+        energy.0 = if desync { rng.range(0.4, 1.1) * START_ENERGY } else { START_ENERGY };
         fit.0 = 0.0;
         head.0 = rng.range(-std::f32::consts::PI, std::f32::consts::PI);
         alive.0 = true;

@@ -18,7 +18,7 @@ pub const FOOD_Y: f32 = 0.4;
 
 // --- day/night + light ---
 pub const DAY_TICKS: u32 = 2400; // ticks per full day-night cycle (40s at 60Hz render: slow, watchable sunrise->sunset)
-pub const LIGHT_COST: f32 = 2.2; // energy/sec per unit mismatch between local light and a creature's light_pref
+pub const LIGHT_COST: f32 = 1.2; // energy/sec per unit mismatch between local light and a creature's light_pref
 
 // --- fatigue/stress (rest instinct) ---
 // Exertion accrues fatigue, rest sheds it. Trade-off teeth: fatigue burns stress energy AND saps
@@ -31,16 +31,21 @@ pub const STRESS_COST: f32 = 1.6;   // energy/sec at full fatigue (chronic-exert
 pub const FATIGUE_DRAG: f32 = 0.6;  // fraction of thrust output lost at full fatigue (tired = sluggish)
 
 // --- continuous reproduction (default-off, --continuous) ---
-pub const REPRO_THRESHOLD: f32 = 22.0; // energy to be eligible (near the sustained-forager equilibrium ~18)
-pub const REPRO_COST: f32 = 10.0; // energy the parent spends per child (>BIRTH_ENERGY: birth dissipates some)
-pub const BIRTH_ENERGY: f32 = 8.0; // offspring's starting energy
-pub const P_REPRO_CREATURE: f32 = 0.02; // per-tick reproduction chance while eligible (gentle: damps overshoot)
+// Continuous breeding must require GENUINELY EARNED surplus, else the warmup->continuous handoff (all
+// creatures at START_ENERGY 30) triggers a synchronized birth burst -> boom-bust extinction. Threshold
+// ABOVE start energy means no one breeds at the handoff; each must forage up to it -> staggered births.
+pub const REPRO_THRESHOLD: f32 = 42.0; // energy to be eligible (well above START_ENERGY 30 -> earned surplus, staggered)
+pub const REPRO_COST: f32 = 22.0; // energy the parent spends per child (>BIRTH_ENERGY: birth dissipates some)
+pub const BIRTH_ENERGY: f32 = 16.0; // offspring's starting energy (survival buffer to establish + forage)
+pub const P_REPRO_CREATURE: f32 = 0.01; // per-tick reproduction chance while eligible (gentle: damps overshoot)
+pub const REPRO_MIN_AGE: u32 = 180; // min ticks of life before breeding (newborns establish first; paces waves)
 pub const CREATURE_CAP: usize = 130; // population ceiling (kept below grazing pressure that crashes plants)
 pub const WARMUP_GENS: u32 = 12; // generational warm-up before continuous birth/death kicks in
+pub const CONT_LOG_TICKS: u32 = 600; // continuous-mode stats log interval (fine enough to watch a crash unfold)
 
 // --- creature metabolism + movement ---
 pub const START_ENERGY: f32 = 30.0;
-pub const BASAL_COST: f32 = 1.4; // energy/sec just to live (low -> resting is genuinely valuable)
+pub const BASAL_COST: f32 = 0.8; // energy/sec just to live (lowered: a fed creature lives long enough to reproduce repeatedly -> continuous population persists instead of dying before R>=1)
 pub const MOVE_COST: f32 = 6.0; // movement cost scales with thrust^2 (sprinting dear, gentle motion cheap)
 pub const MOVE_SPEED: f32 = 9.0; // units/sec at full thrust
 pub const TURN_SPEED: f32 = 3.0; // rad/sec at full turn
@@ -69,10 +74,11 @@ pub const SWIM_LAND_COST: f32 = 5.0;   // energy/sec penalty at full swim on ful
 // --- eating / arms race / predation (see 13, M5) ---
 pub const BITE_K: f32 = 8.0; // eat success = sigmoid(BITE_K*(bite - defense))
 pub const BITE_COST: f32 = 1.5; // energy/sec maintenance cost of bite strength
-pub const EAT_GAIN: f32 = 7.0; // energy per (mass * nutrient) consumed
+pub const EAT_GAIN: f32 = 10.0; // energy per (mass * nutrient) consumed (raised: good foragers net-positive -> can reach the breed threshold + live long enough to reproduce, needed for continuous stability)
 pub const MEAT_BONUS: f32 = 1.6; // meat (carrion) is richer + longer-lasting than plant food
 pub const ATTACK_RADIUS: f32 = 1.6; // must be adjacent to attack
 pub const PREDATION_GAIN: f32 = 22.0; // energy a predator gains from a kill
+pub const PREDATION_HUNGER: f32 = 20.0; // only creatures below this energy hunt (fed crowds don't cannibalize)
 pub const SEED_VIA_GUT: f32 = 0.5; // max chance (x quality) an eaten plant disperses an offspring (13)
 pub const PLANT_START_MASS: f32 = 0.6;
 pub const PLANT_MIN_MASS: f32 = 0.15; // below this a grazed plant is fully consumed (carrot eaten whole)
