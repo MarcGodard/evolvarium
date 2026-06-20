@@ -47,6 +47,8 @@ fn main() {
     let mut app = App::new();
     app.insert_resource(rng::Rng::seed(seed));
     app.insert_resource(sim::Soil::new()); // dynamic soil-fertility grid (M5 nutrient loop)
+    app.insert_resource(sim::GroundWater::new()); // dynamic rain-fed ground-water grid (rain cycle)
+    app.init_resource::<sim::Weather>(); // current rainfall intensity (storms onset + decay)
     app.init_resource::<sim::TreeBites>(); // per-tick fruit-tree grazing accumulator
     app.insert_resource(sim::GenState {
         generation: 0,
@@ -70,7 +72,7 @@ fn main() {
             .add_systems(Startup, sim::spawn_world_headless)
             .add_systems(
                 Update,
-                (sim::live_step, sim::predation_step, sim::plant_step, sim::rot_step, sim::generation_step).chain(),
+                (sim::weather_step, sim::live_step, sim::predation_step, sim::plant_step, sim::rot_step, sim::generation_step).chain(),
             );
     } else {
         // Real-time visuals: step in FixedUpdate at the sim rate so sim-time = wall-time.
@@ -81,7 +83,7 @@ fn main() {
             .add_systems(Startup, (setup_scene, sim::spawn_world_render))
             .add_systems(
                 FixedUpdate,
-                (sim::live_step, sim::predation_step, sim::plant_step, sim::rot_step, sim::generation_step).chain(),
+                (sim::weather_step, sim::live_step, sim::predation_step, sim::plant_step, sim::rot_step, sim::generation_step).chain(),
             );
     }
 

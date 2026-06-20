@@ -100,6 +100,16 @@ const MOISTURE_TOLERANCE: f32 = 0.3; // mismatch under this is harmless
 const MOISTURE_KILL: f32 = 0.012; // per-tick death scale for mismatch beyond tolerance
 const HABITAT_KILL: f32 = 0.03; // per-tick death scale in poor sites (deep water / arid desert)
 const SEASON_FREQ: f32 = 0.4; // seasonal wet/dry oscillation speed (radians per generation)
+// Dynamic ground water (rain cycle): a wetness layer on TOP of the static terrain moisture. The sun
+// evaporates it (faster at noon), storms refill it. Rocky cells shed runoff (no gain); grassy cells
+// soak it up -> after a heavy rain, low-lying grassland turns wet and favors wet-liking plants, which
+// then dry out and get stressed during the next drought. Drives temporal selection on plant `wet`.
+const P_STORM: f32 = 0.0008; // per-tick chance a downpour begins (~1 storm / 1250 ticks)
+const RAIN_RATE: f32 = 0.8;  // ground-water added/sec at full rain on a fully-absorbing (grassy) cell
+const RAIN_DECAY: f32 = 0.2; // rain intensity shed/sec (a storm fades over ~5s)
+const EVAP: f32 = 0.06;      // ground-water evaporated/sec at noon (scaled by sunlight, x current water)
+const WET_GAIN: f32 = 0.45;  // how much saturated ground water adds to a plant's effective local moisture
+const WET_GROWTH: f32 = 0.3; // growth-rate boost from watered ground (rain visibly greens the land)
 // Defense also taxes REPRODUCTION, not just growth (tuning): at carrying capacity, growth cost is
 // toothless (plants stay capped anyway), so armored plants pegged defense ~free. Penalizing their
 // repro lets cheaper plants win the cap-slot competition -> defense settles at an interior value.
@@ -200,6 +210,70 @@ impl Soil {
 // and regrow; a tree only dies when grazed below TREE_MIN_MASS (over-eaten).
 #[derive(Resource, Default)]
 pub struct TreeBites(pub HashMap<Entity, f32>);
+
+// Current rainfall intensity 0..1 (0 dry, 1 heavy downpour). Storms onset stochastically + decay.
+#[derive(Resource, Default)]
+pub struct Weather {
+    pub rain: f32,
+}
+
+// Dynamic ground-water grid (rain cycle): per-cell wetness 0..1 layered over static terrain moisture.
+// Sun evaporates it, rain refills it (rocky cells shed runoff). Coarse grid so wetness is spatially local.
+#[derive(Resource)]
+pub struct GroundWater {
+    pub cell: Vec<f32>,
+}
+
+// World coord of a grid cell's center (inverse of Soil::index): lets weather sample terrain per cell.
+fn cell_center(c: usize) -> (f32, f32) {
+    let (cx, cz) = (c % SOIL_RES, c / SOIL_RES);
+    let to_world = |k: usize| ((k as f32 + 0.5) / SOIL_RES as f32) * 2.0 * WORLD_HALF - WORLD_HALF;
+    (to_world(cx), to_world(cz))
+}
+
+impl GroundWater {
+    pub fn new() -> Self {
+        GroundWater { cell: vec![0.0; SOIL_RES * SOIL_RES] }
+    }
+    fn index(x: f32, z: f32) -> usize {
+        let to_cell = |w: f32| {
+            (((w + WORLD_HALF) / (2.0 * WORLD_HALF)) * SOIL_RES as f32).clamp(0.0, (SOIL_RES - 1) as f32) as usize
+        };
+        to_cell(z) * SOIL_RES + to_cell(x)
+    }
+    pub fn get(&self, x: f32, z: f32) -> f32 {
+        self.cell[Self::index(x, z)]
+    }
+    pub fn avg(&self) -> f32 {
+        self.cell.iter().sum::<f32>() / self.cell.len() as f32
+    }
+}
+
+// --- weather (rain cycle): advance rainfall + update the ground-water grid (sun dries, rain refills) ---
+pub fn weather_step(
+    gen: Res<GenState>,
+    mut rng: ResMut<Rng>,
+    mut weather: ResMut<Weather>,
+    mut gw: ResMut<GroundWater>,
+) {
+    let dt = DT;
+    let light = daylight(gen.tick);
+    // storm onset: occasionally a downpour begins (random peak intensity -> some storms are heavy);
+    // rain decays between storms so the land swings wet -> dry over time.
+    if rng.f32() < P_STORM {
+        weather.rain = (weather.rain + rng.range(0.4, 1.0)).min(1.0);
+    }
+    weather.rain = (weather.rain - RAIN_DECAY * dt).max(0.0);
+    let rain = weather.rain;
+    for c in 0..gw.cell.len() {
+        let (cx, cz) = cell_center(c);
+        let absorb = 1.0 - crate::terrain::rockiness(cx, cz); // rocky sheds runoff, grassy soaks it up
+        let w = gw.cell[c];
+        let add = rain * absorb * RAIN_RATE * dt;
+        let evap = EVAP * (0.2 + 0.8 * light) * w * dt; // sun dries the ground; fastest at noon
+        gw.cell[c] = (w + add - evap).clamp(0.0, 1.0);
+    }
+}
 
 fn rand_pos(rng: &mut Rng, y: f32) -> Vec3 {
     let x = rng.range(-WORLD_HALF, WORLD_HALF);
@@ -411,6 +485,7 @@ pub fn plant_step(
     mut rng: ResMut<Rng>,
     gen: Res<GenState>,
     mut soil: ResMut<Soil>,
+    gw: Res<GroundWater>,
     mut tree_bites: ResMut<TreeBites>,
     mut q: Query<(Entity, &mut PlantState, &PlantGenome, &Transform, Option<&Tree>), Without<Rot>>, // not carrion
 ) {
@@ -427,7 +502,9 @@ pub fn plant_step(
     for (e, mut st, g, tf, tree) in &mut q {
         let (px, pz) = (tf.translation.x, tf.translation.z);
         let fert = soil.get(px, pz);
-        let boost = 1.0 + FERT_GROWTH * (fert / FERT_CAP).min(1.0);
+        let water = gw.get(px, pz); // dynamic rain-fed ground water at this spot
+        // fertility AND rain-watered ground both speed growth (rain visibly greens the land)
+        let boost = (1.0 + FERT_GROWTH * (fert / FERT_CAP).min(1.0)) * (1.0 + WET_GROWTH * water);
         // light factor: growth peaks when daylight matches this plant's light_pref (sun vs shade species)
         let lf = 0.35 + 0.65 * (1.0 - (light - g.light_pref).abs());
         if let Some(tree) = tree {
@@ -472,8 +549,10 @@ pub fn plant_step(
                 continue;
             }
         }
-        // mortality from moisture mismatch OR a poor site (deep water / desert)
-        let m = crate::terrain::moisture(px, pz, season);
+        // mortality from moisture mismatch OR a poor site (deep water / desert). Effective moisture =
+        // static terrain moisture + rain-fed ground water -> wet-liking plants thrive after a downpour,
+        // get stressed in drought (temporal selection on `wet`).
+        let m = (crate::terrain::moisture(px, pz, season) + WET_GAIN * water).clamp(0.0, 1.0);
         let stress = (m - g.wet).abs();
         let hab = crate::terrain::plant_habitability(px, pz, season); // 0 in water/desert, 1 on good land
         let p_mort =
@@ -925,6 +1004,7 @@ pub fn generation_step(
     >,
     pq: Query<(&PlantGenome, &PlantState), Without<Rot>>, // living plants only (carrion excluded from stats/save)
     soil: Res<Soil>,
+    gw: Res<GroundWater>,
     mut exit: MessageWriter<AppExit>,
 ) {
     gen.tick = gen.tick.wrapping_add(1); // global clock: drives season (plant_step) + continuous timing
@@ -1040,9 +1120,9 @@ pub fn generation_step(
     let avg_wet: f32 = pq.iter().map(|(g, _)| g.wet).sum::<f32>() / plant_n as f32;
     if gen.diet {
         let avg_rig: f32 = scored.iter().map(|(_, g)| g.rigidity).sum::<f32>() / n as f32;
-        info!("gen {:>3} | nutri {:>6.2} | sens {:.1} r{:.0} | rig {:.2} | bite {:.2} vs def {:.2} | light {:.2} | plant-nut {:.2} qual {:.2} wet {:.2} | roam {:.2} elev {:.1} | plants {} soil {:.2}", gen.generation, avg, avg_sensors, avg_range, avg_rig, avg_bite, avg_def, avg_light, avg_nut, avg_qual, avg_wet, avg_roam, avg_elev, plant_n, soil.avg());
+        info!("gen {:>3} | nutri {:>6.2} | sens {:.1} r{:.0} | rig {:.2} | bite {:.2} vs def {:.2} | light {:.2} | plant-nut {:.2} qual {:.2} wet {:.2} | roam {:.2} elev {:.1} | plants {} soil {:.2} gw {:.2}", gen.generation, avg, avg_sensors, avg_range, avg_rig, avg_bite, avg_def, avg_light, avg_nut, avg_qual, avg_wet, avg_roam, avg_elev, plant_n, soil.avg(), gw.avg());
     } else {
-        info!("gen {:>3} | food {:>6.2} | sens {:.1} r{:.0} | bite {:.2} vs def {:.2} | plant-nut {:.2} qual {:.2} wet {:.2} | roam {:.2} elev {:.1} | plants {} soil {:.2}", gen.generation, avg, avg_sensors, avg_range, avg_bite, avg_def, avg_nut, avg_qual, avg_wet, avg_roam, avg_elev, plant_n, soil.avg());
+        info!("gen {:>3} | food {:>6.2} | sens {:.1} r{:.0} | bite {:.2} vs def {:.2} | plant-nut {:.2} qual {:.2} wet {:.2} | roam {:.2} elev {:.1} | plants {} soil {:.2} gw {:.2}", gen.generation, avg, avg_sensors, avg_range, avg_bite, avg_def, avg_nut, avg_qual, avg_wet, avg_roam, avg_elev, plant_n, soil.avg(), gw.avg());
     }
 
     // elite pool (clone+mutate, asexual)
