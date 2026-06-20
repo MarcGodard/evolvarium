@@ -16,7 +16,7 @@ pub const SIG_PER_SENSOR: usize = 2; // each sensor reports [inv-dist, food type
 pub const GLOBAL_INPUTS: usize = 2; // [energy, bias]
 pub const CONE_HALF: f32 = 0.7; // sensor field-of-view half-angle (rad)
 const RANGE_MIN: f32 = 4.0;
-const RANGE_MAX: f32 = 14.0;
+const RANGE_MAX: f32 = 48.0; // long-range vision is possible (big world); its energy cost is the trade-off (see sim SENSE_COST)
 
 // One directional food-eye. angle = offset from heading; range = how far it sees.
 #[derive(Clone, Copy, Serialize, Deserialize)]
@@ -103,7 +103,7 @@ impl Genome {
                 s.angle = wrap_pi(s.angle + rng.normal() * 0.4);
             }
             if rng.f32() < rate {
-                s.range = (s.range + rng.normal() * 1.5).clamp(RANGE_MIN, RANGE_MAX);
+                s.range = (s.range + rng.normal() * 3.5).clamp(RANGE_MIN, RANGE_MAX);
             }
         }
         // diet genes

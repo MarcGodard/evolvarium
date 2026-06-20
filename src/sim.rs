@@ -38,6 +38,7 @@ const TURN_SPEED: f32 = 3.0; // rad/sec at full turn
 const CLIMB_COST: f32 = 1.2;
 const DESCEND_REFUND: f32 = 0.4;
 const ROCK_MOVE_COST: f32 = 9.0; // extra energy/sec moving over rocky highland (hard to cross)
+const SENSE_COST: f32 = 0.012; // energy/sec per unit of total sensor range (long-range vision isn't free)
 const EAT_RADIUS: f32 = 1.1;
 const ENERGY_MAX: f32 = 60.0; // energy ceiling; eating past it harms (overeating trade-off, see 12)
 const OVEREAT_G: f32 = 0.2; // growth-load gained per unit of energy eaten while already full
@@ -640,10 +641,16 @@ pub fn live_step(
         ct.translation = np;
         ct.rotation = Quat::from_rotation_y(head.0);
 
-        // metabolism: basal + movement (convex in speed) + bite upkeep + rocky-terrain crossing cost
+        // metabolism: basal + movement (convex in speed) + bite upkeep + rocky crossing + vision upkeep.
+        // Longer/more sensors see farther but cost energy (SENSE_COST x total range) -> range is a trade-off.
         let rock = crate::terrain::rockiness(np.x, np.z);
-        energy.0 -=
-            (BASAL_COST + MOVE_COST * thrust * thrust + BITE_COST * genome.bite + ROCK_MOVE_COST * rock * thrust.abs()) * dt;
+        let sense_range: f32 = genome.sensors.iter().map(|s| s.range).sum();
+        energy.0 -= (BASAL_COST
+            + MOVE_COST * thrust * thrust
+            + BITE_COST * genome.bite
+            + ROCK_MOVE_COST * rock * thrust.abs()
+            + SENSE_COST * sense_range)
+            * dt;
 
         // eat nearest plant on contact, IF bite beats its defense (arms race, see 13)
         let mut eat_reward = 0.0;
@@ -916,6 +923,11 @@ pub fn generation_step(
     let n = scored.len().max(1);
     let avg: f32 = scored.iter().map(|(f, _)| f).sum::<f32>() / n as f32;
     let avg_sensors: f32 = scored.iter().map(|(_, g)| g.n_sensors() as f32).sum::<f32>() / n as f32;
+    let avg_range: f32 = scored
+        .iter()
+        .map(|(_, g)| g.sensors.iter().map(|s| s.range).sum::<f32>() / g.sensors.len().max(1) as f32)
+        .sum::<f32>()
+        / n as f32;
     let avg_bite: f32 = scored.iter().map(|(_, g)| g.bite).sum::<f32>() / n as f32;
     // plant (food) co-evolution stats: arms race = bite vs defense
     let plant_n = pq.iter().len().max(1);
@@ -925,9 +937,9 @@ pub fn generation_step(
     let avg_wet: f32 = pq.iter().map(|(g, _)| g.wet).sum::<f32>() / plant_n as f32;
     if gen.diet {
         let avg_rig: f32 = scored.iter().map(|(_, g)| g.rigidity).sum::<f32>() / n as f32;
-        info!("gen {:>3} | nutri {:>6.2} | sens {:.1} | rig {:.2} | bite {:.2} vs def {:.2} | plant-nut {:.2} qual {:.2} wet {:.2} | roam {:.2} elev {:.1} | plants {} soil {:.2}", gen.generation, avg, avg_sensors, avg_rig, avg_bite, avg_def, avg_nut, avg_qual, avg_wet, avg_roam, avg_elev, plant_n, soil.avg());
+        info!("gen {:>3} | nutri {:>6.2} | sens {:.1} r{:.0} | rig {:.2} | bite {:.2} vs def {:.2} | plant-nut {:.2} qual {:.2} wet {:.2} | roam {:.2} elev {:.1} | plants {} soil {:.2}", gen.generation, avg, avg_sensors, avg_range, avg_rig, avg_bite, avg_def, avg_nut, avg_qual, avg_wet, avg_roam, avg_elev, plant_n, soil.avg());
     } else {
-        info!("gen {:>3} | food {:>6.2} | sens {:.1} | bite {:.2} vs def {:.2} | plant-nut {:.2} qual {:.2} wet {:.2} | roam {:.2} elev {:.1} | plants {} soil {:.2}", gen.generation, avg, avg_sensors, avg_bite, avg_def, avg_nut, avg_qual, avg_wet, avg_roam, avg_elev, plant_n, soil.avg());
+        info!("gen {:>3} | food {:>6.2} | sens {:.1} r{:.0} | bite {:.2} vs def {:.2} | plant-nut {:.2} qual {:.2} wet {:.2} | roam {:.2} elev {:.1} | plants {} soil {:.2}", gen.generation, avg, avg_sensors, avg_range, avg_bite, avg_def, avg_nut, avg_qual, avg_wet, avg_roam, avg_elev, plant_n, soil.avg());
     }
 
     // elite pool (clone+mutate, asexual)
