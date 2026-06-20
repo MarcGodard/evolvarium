@@ -69,7 +69,7 @@ fn main() {
             .add_systems(Startup, sim::spawn_world_headless)
             .add_systems(
                 Update,
-                (sim::live_step, sim::plant_step, sim::rot_step, sim::generation_step).chain(),
+                (sim::live_step, sim::predation_step, sim::plant_step, sim::rot_step, sim::generation_step).chain(),
             );
     } else {
         // Real-time visuals: step in FixedUpdate at the sim rate so sim-time = wall-time.
@@ -80,7 +80,7 @@ fn main() {
             .add_systems(Startup, (setup_scene, sim::spawn_world_render))
             .add_systems(
                 FixedUpdate,
-                (sim::live_step, sim::plant_step, sim::rot_step, sim::generation_step).chain(),
+                (sim::live_step, sim::predation_step, sim::plant_step, sim::rot_step, sim::generation_step).chain(),
             );
     }
 

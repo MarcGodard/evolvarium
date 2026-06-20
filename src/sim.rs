@@ -1,7 +1,7 @@
 // M1 foraging sim: creatures sense nearest food, a tiny NN drives thrust+turn, they eat,
 // burn energy, starve; a generational GA selects by food eaten. Proof-of-life milestone (08).
 use bevy::prelude::*;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::components::{Alive, Brain, Creature, DietState, Energy, Fitness, Food, Heading, Locomotion, Rot};
 use crate::genome::{forward, learn, Genome, CONE_HALF, GLOBAL_INPUTS, NFOOD, SIG_PER_SENSOR};
@@ -47,6 +47,10 @@ const BITE_K: f32 = 8.0;
 const BITE_COST: f32 = 1.5; // energy/sec maintenance cost of bite strength
 const EAT_GAIN: f32 = 7.0; // energy per (mass * nutrient) consumed
 const MEAT_BONUS: f32 = 1.6; // meat (carrion) is richer + longer-lasting than plant food
+// Predation (M5): a creature attacks an adjacent creature; `bite` is the combat stat (attack AND
+// defense). A kill = top energy + fitness. Predators need high bite, whose upkeep (BITE_COST) is the cost.
+const ATTACK_RADIUS: f32 = 1.6; // must be adjacent to attack
+const PREDATION_GAIN: f32 = 22.0; // energy a predator gains from a kill
 const SEED_VIA_GUT: f32 = 0.5; // max chance (x quality) an eaten plant disperses an offspring (13)
 const PLANT_START_MASS: f32 = 0.6;
 
@@ -170,6 +174,26 @@ fn rand_pos(rng: &mut Rng, y: f32) -> Vec3 {
 
 fn diet_state(g: &Genome) -> DietState {
     DietState { expr: g.expr0, g: 0.0, age: 0 }
+}
+
+// Spawn carrion (meat) at a spot: a Food entity with the Rot clock. Used by death + predation kills.
+fn spawn_carrion(commands: &mut Commands, pos: Vec3, mass: f32) {
+    let p = Vec3::new(pos.x, FOOD_Y + crate::terrain::height(pos.x, pos.z), pos.z);
+    commands.spawn((
+        Food,
+        PlantState { mass, age: 0 },
+        PlantGenome {
+            kind: CARRION_KIND,
+            nutrient: CARRION_NUTRIENT,
+            defense: 0.0,    // meat has no bite-defense: easy to scavenge while fresh
+            quality: 0.0,    // unused for carrion (separate eat branch); never disperses
+            wet: 0.5,        // unused for carrion (excluded from moisture mortality by Without<Rot>)
+            spread: 0.0,
+            maturity: 999.0, // never reproduces via plant_step (also excluded by Without<Rot>)
+        },
+        Rot { age: 0 },
+        Transform::from_translation(p),
+    ));
 }
 
 // Spawn one creature (no render mesh; viz::add_creature_visuals gives it one in render mode).
@@ -372,6 +396,68 @@ pub fn plant_step(
     }
     for (g, pos) in births {
         spawn_plant(&mut commands, g, PLANT_START_MASS, pos);
+    }
+}
+
+// --- predation (M5): creatures attack + eat each other. bite = combat (attack + defense). Opportunistic
+// for now; NN-driven attack arrives with the creature-sensing batch. ---
+pub fn predation_step(
+    gen: Res<GenState>,
+    mut rng: ResMut<Rng>,
+    mut commands: Commands,
+    mut cq: Query<(Entity, &Transform, &mut Energy, &mut Fitness, &mut Alive, &Genome), With<Creature>>,
+) {
+    // snapshot living creatures: (entity, pos, bite)
+    let snap: Vec<(Entity, Vec3, f32)> = cq
+        .iter()
+        .filter(|(_, _, _, _, a, _)| a.0)
+        .map(|(e, t, _, _, _, g)| (e, t.translation, g.bite))
+        .collect();
+    if snap.len() < 2 {
+        return;
+    }
+    let mut killed: HashSet<Entity> = HashSet::new();
+    let mut gains: HashMap<Entity, f32> = HashMap::new();
+    let r2 = ATTACK_RADIUS * ATTACK_RADIUS;
+    for (ai, &(ae, apos, abite)) in snap.iter().enumerate() {
+        if killed.contains(&ae) {
+            continue; // a creature killed this tick doesn't also attack
+        }
+        let mut best: Option<(f32, usize)> = None;
+        for (bi, &(be, bpos, _)) in snap.iter().enumerate() {
+            if bi == ai || killed.contains(&be) {
+                continue;
+            }
+            let d2 = apos.distance_squared(bpos);
+            if d2 < r2 && best.map_or(true, |(bd, _)| d2 < bd) {
+                best = Some((d2, bi));
+            }
+        }
+        if let Some((_, bi)) = best {
+            let (be, _, bbite) = snap[bi];
+            // success = attacker bite vs prey bite (bite doubles as defense)
+            if rng.f32() < sigmoid(BITE_K * (abite - bbite)) {
+                killed.insert(be);
+                *gains.entry(ae).or_insert(0.0) += PREDATION_GAIN;
+            }
+        }
+    }
+    if killed.is_empty() {
+        return;
+    }
+    let continuous_live = gen.continuous && gen.generation >= WARMUP_GENS;
+    for (e, t, mut energy, mut fit, mut alive, _g) in &mut cq {
+        if let Some(g) = gains.get(&e) {
+            energy.0 = (energy.0 + g).min(ENERGY_MAX);
+            fit.0 += g * 0.3; // predation counts toward selection
+        }
+        if killed.contains(&e) {
+            alive.0 = false;
+            spawn_carrion(&mut commands, t.translation, CARRION_MASS * 0.5); // predator already ate some
+            if continuous_live {
+                commands.entity(e).despawn();
+            }
+        }
     }
 }
 
@@ -637,23 +723,7 @@ pub fn live_step(
         // died this tick (loop skips already-dead creatures at the top) -> drop carrion here, which
         // rots into poison (rot_step). Closes part of the nutrient loop: death feeds the food web (P3).
         if !alive.0 {
-            let cp = ct.translation;
-            let p = Vec3::new(cp.x, FOOD_Y + crate::terrain::height(cp.x, cp.z), cp.z);
-            commands.spawn((
-                Food,
-                PlantState { mass: CARRION_MASS, age: 0 },
-                PlantGenome {
-                    kind: CARRION_KIND,
-                    nutrient: CARRION_NUTRIENT,
-                    defense: 0.0,  // meat has no bite-defense: easy to scavenge while fresh
-                    quality: 0.0,  // unused for carrion (separate eat branch); never disperses
-                    wet: 0.5,      // unused for carrion (excluded from moisture mortality by Without<Rot>)
-                    spread: 0.0,
-                    maturity: 999.0, // never reproduces via plant_step (also excluded by Without<Rot>)
-                },
-                Rot { age: 0 },
-                Transform::from_translation(p),
-            ));
+            spawn_carrion(&mut commands, ct.translation, CARRION_MASS);
             // continuous (post-warmup): the corpse entity is gone (became carrion). Generational mode
             // and the warm-up keep it (Alive=false) to be recycled into the next generation.
             if live_continuous {

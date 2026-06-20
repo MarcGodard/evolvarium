@@ -7,7 +7,7 @@ use bevy::prelude::*;
 
 pub const HEIGHT_MAX: f32 = 12.0; // peak terrain elevation (world units)
 pub const WATER_LEVEL: f32 = 2.8; // y below which low basins flood (render water plane sits here)
-const ROCK_START: f32 = 0.6; // normalized height where rocky highland begins
+const ROCK_START: f32 = 0.48; // normalized height where rocky highland begins (lower = more rock visible)
 
 // Rockiness 0..1 at (x,z): 0 below ROCK_START, ramps to 1 at the peaks. Rocky = hard to cross + barely
 // any plants grow (see sim movement cost + plant_habitability).
@@ -25,8 +25,8 @@ fn terrain_color(h01: f32, moist: f32) -> [f32; 4] {
     let wet = [0.13, 0.44, 0.22]; // lush shoreline / wet valley
     let grass = [0.22, 0.64, 0.18]; // vivid grassland (clearly green)
     let sand = [0.86, 0.76, 0.48]; // desert
-    let rock = [0.38, 0.37, 0.36]; // dark rock (distinct from grass)
-    let peak = [0.88, 0.88, 0.92]; // bright bare peak
+    let rock = [0.50, 0.46, 0.40]; // warm grey rock (clearly distinct from green grass)
+    let peak = [0.82, 0.80, 0.78]; // pale bare peak
     // grass band: darker green near water, brighter grass higher (narrow blend = defined shoreline)
     let land = lerp3(wet, grass, ((h01 - 0.18) / 0.18).clamp(0.0, 1.0));
     let arid = ((0.42 - moist) / 0.12).clamp(0.0, 1.0); // sharp desert edge around moisture 0.42
