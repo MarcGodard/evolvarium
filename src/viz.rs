@@ -342,12 +342,16 @@ fn update_stats(
         );
     } else if let Ok((pg, st, rot, tree)) = foods.get(e) {
         if let Some(tree) = tree {
+            // creature height needed to feed = tree height - base margin - branch reach (branches hang fruit low)
+            let reach = (pg.height - crate::sim::TREE_REACH_MARGIN - pg.branches * crate::sim::BRANCH_REACH).max(0.0);
             text.0 = format!(
-                "TREE  {}\nmass     {:.1}\nnutrient {:.2}\n{}",
-                if tree.edible { "fruit (tall creatures eat)" } else { "evergreen (uneatable)" },
+                "TREE  {}\nheight   {:.2}\nbranches {:.2}\nmass     {:.1}\nnutrient {:.2}\n{}",
+                if tree.edible { "fruit (branches lower reach)" } else { "evergreen (uneatable)" },
+                pg.height,
+                pg.branches,
                 st.mass,
                 pg.nutrient,
-                if tree.edible { "reach: needs height >= 0.6" } else { "pure structure / refuge" },
+                if tree.edible { format!("reach: creature height >= {:.2}", reach) } else { "pure structure / refuge".into() },
             );
         } else if let Some(rot) = rot {
             let f = (rot.age as f32 / ROT_GONE as f32 * 100.0).min(100.0);

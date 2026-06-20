@@ -165,6 +165,7 @@ fn spawn_carrion(commands: &mut Commands, pos: Vec3, mass: f32) {
             height: 0.0,     // carrion lies on the ground
             light_pref: 0.5, // unused for carrion
             regrow: 0.0,     // unused for carrion (eaten whole)
+            branches: 0.0,   // unused for carrion
             spread: 0.0,
             maturity: 999.0, // never reproduces via plant_step (also excluded by Without<Rot>)
         },
@@ -193,18 +194,31 @@ fn spawn_creature(commands: &mut Commands, g: Genome, pos: Vec3, rng: &mut Rng) 
     ));
 }
 
-// Tree genome: near-uneatable (defense ~1) so only tall creatures reach it; rich; grows large + slow.
-fn tree_genome() -> PlantGenome {
-    PlantGenome { kind: 0, nutrient: TREE_NUTRIENT, defense: 0.99, quality: 0.2, wet: 0.5, height: 1.0, light_pref: 0.7, regrow: 0.0, spread: 7.0, maturity: TREE_MATURITY }
+// A fresh (founding) tree genome: rich, tall, slow, with some branches. defense ~1 is irrelevant to
+// trees (reach gates them, not bite); kind 0. From here trees evolve via PlantGenome::mutate_tree.
+fn tree_genome(rng: &mut Rng) -> PlantGenome {
+    PlantGenome {
+        kind: 0,
+        nutrient: rng.range(0.6, 1.0),
+        defense: 0.99,
+        quality: rng.range(0.1, 0.4),
+        wet: 0.5,
+        height: rng.range(TREE_HEIGHT_MIN, 1.0), // wide initial height (never taller than 1.0)
+        light_pref: rng.range(0.5, 0.9),
+        regrow: rng.range(0.0, 0.4),
+        branches: rng.range(0.0, 0.6),
+        spread: rng.range(5.0, 9.0),
+        maturity: TREE_MATURITY,
+    }
 }
 
-// Spawn one tree (long-lived plant + Tree marker). edible=true tall fruit tree, false=evergreen.
-fn spawn_tree(commands: &mut Commands, mass: f32, pos: Vec3, edible: bool) {
+// Spawn one tree (long-lived plant + Tree marker) from a genome. edible=true fruit tree, false=evergreen.
+fn spawn_tree(commands: &mut Commands, mass: f32, pos: Vec3, edible: bool, g: PlantGenome) {
     commands.spawn((
         Food,
         Tree { edible },
         PlantState { mass, age: 0 },
-        tree_genome(),
+        g,
         Transform::from_translation(pos),
     ));
 }
@@ -276,7 +290,9 @@ fn spawn_trees(commands: &mut Commands, rng: &mut Rng) {
             }
             p = rand_pos(rng, FOOD_Y);
         }
-        spawn_tree(commands, rng.range(3.0, 9.0), p, i % 2 == 0); // alternate fruit tree / evergreen
+        // alternate fruit tree / evergreen; each gets a fresh evolvable genome (evolves from here)
+        let g = tree_genome(rng);
+        spawn_tree(commands, rng.range(3.0, 9.0), p, i % 2 == 0, g);
     }
 }
 
@@ -362,7 +378,7 @@ pub fn plant_step(
     let tree_count = q.iter().filter(|(.., t)| t.is_some()).count();
     let tree_positions: Vec<Vec3> = q.iter().filter_map(|(_, _, _, tf, t)| t.map(|_| tf.translation)).collect();
     let mut births: Vec<(PlantGenome, Vec3)> = Vec::new();
-    let mut tree_births: Vec<(Vec3, bool)> = Vec::new(); // (pos, edible)
+    let mut tree_births: Vec<(Vec3, bool, PlantGenome)> = Vec::new(); // (pos, edible, child genome)
     let mut detritus: Vec<(PlantGenome, f32, Vec3)> = Vec::new(); // moisture-killed plants -> poison
     for (e, mut st, g, tf, tree) in &mut q {
         let (px, pz) = (tf.translation.x, tf.translation.z);
@@ -373,33 +389,40 @@ pub fn plant_step(
         // light factor: growth peaks when daylight matches this plant's light_pref (sun vs shade species)
         let lf = 0.35 + 0.65 * (1.0 - (light - g.light_pref).abs());
         if let Some(tree) = tree {
-            // apply this tick's grazing; a fruit tree grazed below TREE_MIN_MASS is over-eaten -> dies
-            if let Some(&bite) = tree_bites.0.get(&e) {
-                st.mass = (st.mass - bite).max(0.0);
+            // fed-on this tick? (key present even for harmless branch-feeders, who do 0 mass damage).
+            // Apply the recorded mass damage; a fruit tree grazed below TREE_MIN_MASS is over-eaten -> dies.
+            let grazed = tree_bites.0.contains_key(&e);
+            if grazed {
+                st.mass = (st.mass - tree_bites.0[&e]).max(0.0);
                 if st.mass < TREE_MIN_MASS {
                     commands.entity(e).despawn();
                     continue;
                 }
             }
-            // trees: moisture-immune (long-lived), grow slowly + large. Reproduction FOLLOWS GROUND
-            // FERTILITY (fertile soil seeds more trees) and SELF-LIMITS by local density (no over-cluster).
+            // trees: moisture-immune (long-lived), grow slowly + large. Two reproduction paths:
+            //  - ambient: fertility-weighted, density-limited wind-fall near the parent;
+            //  - dispersal-on-eat: a fruit tree that was grazed this tick may fling a seed FAR (animal-
+            //    carried). Being reachable+eaten thus pays in reproduction -> bounds how tall trees evolve.
             st.mass += g.growth_rate() * boost * lf * TREE_GROWTH_SCALE * DT; // trees grow slowly (long-lived)
             st.age += 1;
             let r2 = TREE_DENSITY_R * TREE_DENSITY_R;
             let local = tree_positions.iter().filter(|p| p.distance_squared(tf.translation) < r2).count();
             let fert_boost = 0.4 + 1.6 * (fert / FERT_CAP).min(1.0); // richer ground -> more new trees
-            if st.mass >= g.maturity
-                && tree_count + tree_births.len() < TREE_CAP
-                && local <= TREE_MAX_LOCAL
-                && rng.f32() < P_TREE_REPRO * fert_boost
-            {
-                let off = Vec3::new(rng.range(-g.spread, g.spread), 0.0, rng.range(-g.spread, g.spread));
+            let mature = st.mass >= g.maturity;
+            let ambient = mature && local <= TREE_MAX_LOCAL && rng.f32() < P_TREE_REPRO * fert_boost;
+            let disperse = mature && tree.edible && grazed && rng.f32() < P_TREE_EAT_DISPERSE; // seed carried off
+            if (ambient || disperse) && tree_count + tree_births.len() < TREE_CAP {
+                let spread = if disperse { g.spread * TREE_EAT_SPREAD_MULT } else { g.spread };
+                let off = Vec3::new(rng.range(-spread, spread), 0.0, rng.range(-spread, spread));
                 let mut pos = tf.translation + off;
                 pos.x = pos.x.clamp(-WORLD_HALF, WORLD_HALF);
                 pos.z = pos.z.clamp(-WORLD_HALF, WORLD_HALF);
                 pos.y = FOOD_Y + crate::terrain::height(pos.x, pos.z);
-                tree_births.push((pos, tree.edible));
-                st.mass *= PLANT_REPRO_FRAC;
+                // child inherits the parent's full tree genome, mutated (trees evolve like plants)
+                let mut child = g.clone();
+                child.mutate_tree(&mut rng);
+                tree_births.push((pos, tree.edible, child));
+                st.mass *= PLANT_REPRO_FRAC; // budding a seed costs the parent mass either way
             }
             continue;
         }
@@ -464,8 +487,8 @@ pub fn plant_step(
     for (g, pos) in births {
         spawn_plant(&mut commands, g, PLANT_START_MASS, pos);
     }
-    for (pos, edible) in tree_births {
-        spawn_tree(&mut commands, PLANT_START_MASS, pos, edible);
+    for (pos, edible, g) in tree_births {
+        spawn_tree(&mut commands, PLANT_START_MASS, pos, edible, g);
     }
     tree_bites.0.clear(); // consumed this tick
 }
@@ -683,10 +706,13 @@ pub fn live_step(
             let rot_age = foods[i].4;
             let tree = foods[i].5; // None=plant/carrion, Some(true)=fruit tree, Some(false)=evergreen
             if np.distance(fp) < EAT_RADIUS {
-                // trees: only a TALL creature (sensors >= TREE_REACH) reaches an EDIBLE tree; evergreens
-                // (edible=false) are never eatable. Plants/carrion: bite vs defense as usual.
+                // trees: a creature reaches an EDIBLE tree if its height + TREE_REACH_MARGIN, EXTENDED by
+                // the tree's branches (BRANCH_REACH), >= the tree's height. So a tall bare tree feeds only
+                // tall creatures, but a branchy one hangs fruit low enough for short creatures too.
+                // Evergreens never eatable. Plants/carrion: bite vs defense as usual.
+                let tree_reach = genome.height + TREE_REACH_MARGIN + pg.branches * BRANCH_REACH;
                 let success = match tree {
-                    Some(edible) => edible && genome.height >= TREE_REACH_H, // tall creature reaches fruit tree
+                    Some(edible) => edible && tree_reach >= pg.height,
                     // plant: creature must be tall enough to reach it (height defense) AND bite its defense
                     None => {
                         genome.height + 0.15 >= pg.height
@@ -695,14 +721,20 @@ pub fn live_step(
                 };
                 if success {
                     if let Some(true) = tree {
-                        // FRUIT TREE: strip a chunk of foliage; the tree persists + regrows and only dies
-                        // if grazed below TREE_MIN_MASS (over-eaten). Rich reward for the reach.
+                        // FRUIT TREE: the tree persists + regrows; dies only if grazed below TREE_MIN_MASS.
+                        // Mass dilutes nutrition (TREE_MASS_NUTRI): a bulkier tree gives less energy/bite.
+                        // A creature too SHORT to reach without branches (reaching only via the low branches)
+                        // feeds HARMLESSLY -> 0 mass damage; a creature tall enough to reach the crown strips
+                        // mass and can over-graze. Either way the feeding is recorded (triggers dispersal).
                         let bite_mass = TREE_BITE_MASS.min(mass);
-                        let base = bite_mass * pg.nutrient * (0.5 + pg.quality);
+                        let mass_nutri = 1.0 - TREE_MASS_NUTRI * (mass / TREE_MATURITY).min(1.0);
+                        let base = bite_mass * pg.nutrient * mass_nutri * (0.5 + pg.quality);
                         let eff = if gen.diet { diet.expr[pg.kind as usize] } else { 1.0 };
                         energy.0 += EAT_GAIN * base * eff;
                         fit.0 += base * eff;
-                        *tree_bites.0.entry(e).or_insert(0.0) += bite_mass;
+                        let short = genome.height + TREE_REACH_MARGIN < pg.height; // only reached via branches
+                        let damage = if short { 0.0 } else { bite_mass }; // branch-feeders don't harm the tree
+                        *tree_bites.0.entry(e).or_insert(0.0) += damage;
                         eat_reward = R_EAT;
                     } else if let Some(age) = rot_age {
                         // CARRION / MEAT (P3): eating another creature = TOP nutrition, near-zero toxicity
@@ -868,6 +900,7 @@ pub fn generation_step(
         With<Creature>,
     >,
     pq: Query<(&PlantGenome, &PlantState), Without<Rot>>, // living plants only (carrion excluded from stats/save)
+    tq: Query<&PlantGenome, With<Tree>>, // trees only, for the evolvable-height stat
     soil: Res<Soil>,
     gw: Res<GroundWater>,
     mut exit: MessageWriter<AppExit>,
@@ -977,6 +1010,9 @@ pub fn generation_step(
         / n as f32;
     let avg_bite: f32 = scored.iter().map(|(_, g)| g.bite).sum::<f32>() / n as f32;
     let avg_light: f32 = scored.iter().map(|(_, g)| g.light_pref).sum::<f32>() / n as f32; // niche: <0.5 nocturnal, >0.5 diurnal
+    let tree_n = tq.iter().len();
+    let avg_tree_h = if tree_n > 0 { tq.iter().map(|g| g.height).sum::<f32>() / tree_n as f32 } else { 0.0 }; // tree reach gene
+    let avg_tree_b = if tree_n > 0 { tq.iter().map(|g| g.branches).sum::<f32>() / tree_n as f32 } else { 0.0 }; // tree branches gene
     // plant (food) co-evolution stats: arms race = bite vs defense
     let plant_n = pq.iter().len().max(1);
     let avg_def: f32 = pq.iter().map(|(g, _)| g.defense).sum::<f32>() / plant_n as f32;
@@ -985,7 +1021,7 @@ pub fn generation_step(
     let avg_wet: f32 = pq.iter().map(|(g, _)| g.wet).sum::<f32>() / plant_n as f32;
     if gen.diet {
         let avg_rig: f32 = scored.iter().map(|(_, g)| g.rigidity).sum::<f32>() / n as f32;
-        info!("gen {:>3} | nutri {:>6.2} | sens {:.1} r{:.0} | rig {:.2} | bite {:.2} vs def {:.2} | light {:.2} | plant-nut {:.2} qual {:.2} wet {:.2} | roam {:.2} elev {:.1} | plants {} soil {:.2} gw {:.2}", gen.generation, avg, avg_sensors, avg_range, avg_rig, avg_bite, avg_def, avg_light, avg_nut, avg_qual, avg_wet, avg_roam, avg_elev, plant_n, soil.avg(), gw.avg());
+        info!("gen {:>3} | nutri {:>6.2} | sens {:.1} r{:.0} | rig {:.2} | bite {:.2} vs def {:.2} | light {:.2} | plant-nut {:.2} qual {:.2} wet {:.2} | roam {:.2} elev {:.1} | plants {} soil {:.2} gw {:.2} | trees {} h{:.2} b{:.2}", gen.generation, avg, avg_sensors, avg_range, avg_rig, avg_bite, avg_def, avg_light, avg_nut, avg_qual, avg_wet, avg_roam, avg_elev, plant_n, soil.avg(), gw.avg(), tree_n, avg_tree_h, avg_tree_b);
     } else {
         info!("gen {:>3} | food {:>6.2} | sens {:.1} r{:.0} | bite {:.2} vs def {:.2} | plant-nut {:.2} qual {:.2} wet {:.2} | roam {:.2} elev {:.1} | plants {} soil {:.2} gw {:.2}", gen.generation, avg, avg_sensors, avg_range, avg_bite, avg_def, avg_nut, avg_qual, avg_wet, avg_roam, avg_elev, plant_n, soil.avg(), gw.avg());
     }

@@ -69,8 +69,6 @@ pub const PLANT_MIN_MASS: f32 = 0.15; // below this a grazed plant is fully cons
 // --- trees: long-lived, near-uneatable plants ---
 pub const N_TREES: usize = 40; // initial trees
 pub const TREE_CAP: usize = 70; // max trees
-pub const TREE_REACH_H: f32 = 0.6; // creature height needed to reach + eat fruit-tree food
-pub const TREE_NUTRIENT: f32 = 0.9; // trees are rich food (worth the reach)
 pub const TREE_MATURITY: f32 = 14.0; // trees grow large before reproducing
 pub const P_TREE_REPRO: f32 = 0.004; // slow reproduction (long-lived, sparse)
 pub const TREE_DENSITY_R: f32 = 18.0; // trees self-limit clustering within this radius
@@ -78,6 +76,19 @@ pub const TREE_MAX_LOCAL: usize = 4; // max trees within TREE_DENSITY_R before a
 pub const TREE_BITE_MASS: f32 = 2.5; // mass a creature strips per feeding (tree survives + regrows)
 pub const TREE_MIN_MASS: f32 = 1.0; // below this a fruit tree is over-eaten and dies
 pub const TREE_GROWTH_SCALE: f32 = 0.4; // trees grow slowly: scales their growth rate down (long-lived, gradual)
+// Fruit-tree life-history (evolvable height + the trade-offs that bound it). Tree height is a gene that
+// drifts over generations within [TREE_HEIGHT_MIN, 1.0] (wide range, never taller than today's max).
+// Three pressures shape it: (1) reach -- a creature reaches a fruit tree only if its height +
+// TREE_REACH_MARGIN >= the tree's height, so taller trees feed fewer creatures; (2) dispersal-on-eat --
+// being eaten spreads the tree's seeds FARTHER (animal-carried), so a reachable tree out-reproduces an
+// unreachable one; (3) mass-nutrition cost -- a bulkier tree dilutes its fruit (less nutrient/bite). Net:
+// growing too tall trades away the dispersal benefit, so height settles at an interior optimum.
+pub const TREE_HEIGHT_MIN: f32 = 0.4; // shortest a freshly-seeded tree starts (then evolves freely 0..1)
+pub const TREE_REACH_MARGIN: f32 = 0.4; // creature reaches tree if creature.height + this (+branches) >= tree.height
+pub const BRANCH_REACH: f32 = 0.7; // full branches extend a tree's reachable-from height down by this much
+pub const TREE_MASS_NUTRI: f32 = 0.5; // at full maturity a tree's fruit is (1-this)x as nutritious (mass dilutes nutrition)
+pub const P_TREE_EAT_DISPERSE: f32 = 0.03; // per-grazed-tick chance an eaten fruit tree disperses a seed (animal-carried)
+pub const TREE_EAT_SPREAD_MULT: f32 = 2.5; // animal-carried seeds travel this much farther than wind-fall
 
 // --- rot chain (P3): dead creature -> carrion -> poison -> gone ---
 pub const CARRION_KIND: u8 = 0; // meat = food type 0 (couples to diet expr only via sensing, not digestion)
