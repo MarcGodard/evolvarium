@@ -73,12 +73,12 @@ pub const SWIM_SPEED: f32 = 0.8;       // speed bonus fraction at full swim in w
 pub const SWIM_LAND_COST: f32 = 5.0;   // energy/sec penalty at full swim on fully-dry land (clumsy on land)
 
 // --- eating / arms race / predation (see 13, M5) ---
-pub const BITE_K: f32 = 8.0; // eat success = sigmoid(BITE_K*(bite - defense))
-pub const BITE_COST: f32 = 0.7; // energy/sec maintenance cost of bite strength
+pub const BITE_K: f32 = 4.0; // eat/combat decisiveness = sigmoid(BITE_K*(bite - defense)). Lowered: at 8 a tiny bite edge was near-certain win -> a runaway combat arms race (bite -> 0.8) that crashed productivity. Flatter = bite advantage matters less -> race doesn't escalate.
+pub const BITE_COST: f32 = 2.2; // energy/sec upkeep of bite strength, applied QUADRATICALLY (BITE_COST*bite^2): cheap at low bite (foragers ~0.1/sec) but crippling at high bite -> bounds the combat arms race that was running bite away (0.25->0.65) and slowly crashing the ecosystem (evolutionary suicide). Mirrors the plant-defense quadratic.
 pub const EAT_GAIN: f32 = 14.0; // energy per (mass * nutrient) consumed (raised: competent foragers clearly net-positive -> sustain + reproduce, needed for continuous stability)
 pub const MEAT_BONUS: f32 = 1.6; // meat (carrion) is richer + longer-lasting than plant food
 pub const ATTACK_RADIUS: f32 = 1.6; // must be adjacent to attack
-pub const PREDATION_GAIN: f32 = 22.0; // energy a predator gains from a kill
+pub const PREDATION_GAIN: f32 = 9.0; // energy a predator gains from a kill. Lowered: at 22 cannibalism was so rewarding it drove the bite arms race + drained the population; predation still happens but isn't the dominant selective force (herd/height/fleeing are now viable defenses).
 pub const PREDATION_HUNGER: f32 = 20.0; // only creatures below this energy hunt (fed crowds don't cannibalize)
 // Kin-based social need (herd instinct). Being near genetically-SIMILAR creatures (kin) satisfies a
 // social creature + protects it from predators (herd vigilance); ISOLATION drains energy (loneliness).

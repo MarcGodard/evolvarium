@@ -737,7 +737,8 @@ pub fn live_step(
         energy.0 -= (BASAL_COST
             + SIZE_BASAL * genome.size // bigger body costs more just to maintain
             + MOVE_COST * (1.0 + SIZE_MOVE * genome.size) * thrust * thrust // more mass to push
-            + BITE_COST * genome.bite
+            + BITE_COST * genome.bite * genome.bite // quadratic: bounds the combat arms race
+
             + ROCK_MOVE_COST * rock * thrust.abs()
             + SENSE_COST * sense_range
             + HEIGHT_COST * genome.height
