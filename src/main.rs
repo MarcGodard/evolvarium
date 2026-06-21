@@ -160,4 +160,38 @@ fn setup_scene(
         Transform::from_translation(sphere::moon_pos(0)),
         viz::Moon,
     ));
+    // visible sun disc: a bright emissive sphere far out along the sun direction (moved each frame). Sized
+    // so its on-sky size ~matches the moon (the real Earth coincidence). Just the light source made visible.
+    commands.spawn((
+        Mesh3d(meshes.add(Sphere::new(sphere::SUN_R).mesh().ico(3).unwrap())),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::srgb(1.0, 0.95, 0.65),
+            emissive: LinearRgba::rgb(9.0, 8.0, 4.0),
+            unlit: true,
+            ..default()
+        })),
+        Transform::from_translation(sphere::sun_dir(0) * sphere::SUN_DIST),
+        viz::SunDisc,
+    ));
+    // starfield: evenly-spread points on a far shell (deterministic Fibonacci sphere), shared emissive mesh.
+    let star_mesh = meshes.add(Sphere::new(9.0).mesh().ico(1).unwrap());
+    let star_mat = materials.add(StandardMaterial {
+        base_color: Color::WHITE,
+        emissive: LinearRgba::rgb(2.0, 2.0, 2.3),
+        unlit: true,
+        ..default()
+    });
+    let n_stars = 700usize;
+    let golden = std::f32::consts::PI * (3.0 - 5.0_f32.sqrt());
+    for i in 0..n_stars {
+        let y = 1.0 - (i as f32 + 0.5) / n_stars as f32 * 2.0;
+        let r = (1.0 - y * y).max(0.0).sqrt();
+        let theta = golden * i as f32;
+        let dir = Vec3::new(theta.cos() * r, y, theta.sin() * r);
+        commands.spawn((
+            Mesh3d(star_mesh.clone()),
+            MeshMaterial3d(star_mat.clone()),
+            Transform::from_translation(dir * 7000.0),
+        ));
+    }
 }

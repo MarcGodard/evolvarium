@@ -34,6 +34,8 @@ fn spawn_camera(mut commands: Commands) {
     commands.spawn((
         Camera3d::default(),
         Transform::default(),
+        // far clip pushed out so the distant sun + starfield render (they sit thousands of units away)
+        Projection::from(PerspectiveProjection { far: 12000.0, ..default() }),
         // soft ambient (per-camera in 0.18) so the planet's night side is not pitch black
         AmbientLight { brightness: 220.0, ..default() },
         OrbitCam { yaw: lon, pitch: lat.clamp(-1.3, 1.3), dist: 230.0 },

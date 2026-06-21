@@ -16,6 +16,8 @@ use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 pub struct SunLight;
 #[derive(Component)]
 pub struct Moon;
+#[derive(Component)]
+pub struct SunDisc; // the visible glowing sun (follows the light direction)
 
 pub struct VizPlugin;
 
@@ -153,13 +155,17 @@ fn size_plants(mut q: Query<(&PlantState, &PlantGenome, &mut Transform, Option<&
 // shades via surface normals, so illuminance stays constant; ambient (set in setup) lifts the night side.
 fn day_night_lighting(
     gen: Res<GenState>,
-    mut suns: Query<&mut Transform, (With<SunLight>, Without<Moon>)>,
-    mut moons: Query<&mut Transform, (With<Moon>, Without<SunLight>)>,
+    mut suns: Query<&mut Transform, (With<SunLight>, Without<Moon>, Without<SunDisc>)>,
+    mut moons: Query<&mut Transform, (With<Moon>, Without<SunLight>, Without<SunDisc>)>,
+    mut discs: Query<&mut Transform, (With<SunDisc>, Without<SunLight>, Without<Moon>)>,
 ) {
     let sd = crate::sphere::sun_dir(gen.tick);
     for mut tf in &mut suns {
         // place the light source out along the sun direction, aimed at the planet center
         *tf = Transform::from_translation(sd * (crate::sphere::PLANET_R * 4.0)).looking_at(Vec3::ZERO, Vec3::Y);
+    }
+    for mut tf in &mut discs {
+        tf.translation = sd * crate::sphere::SUN_DIST; // the visible sun rides the same direction, far out
     }
     let mp = crate::sphere::moon_pos(gen.tick);
     for mut tf in &mut moons {
