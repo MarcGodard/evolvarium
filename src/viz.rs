@@ -433,11 +433,26 @@ fn spawn_world_stats_ui(mut commands: Commands) {
     ));
 }
 
+// A unicode sparkline of a history series, scaled 0..max.
+fn sparkline(hist: &[u16], max: f32) -> String {
+    const B: [char; 8] = ['\u{2581}', '\u{2582}', '\u{2583}', '\u{2584}', '\u{2585}', '\u{2586}', '\u{2587}', '\u{2588}'];
+    hist.iter()
+        .map(|&v| {
+            let i = ((v as f32 / max.max(1.0)) * 7.0).round().clamp(0.0, 7.0) as usize;
+            B[i]
+        })
+        .collect()
+}
+
 // Recompute the world dashboard each frame from the living population (cheap aggregate over creatures).
+// Keeps a rolling population history (sampled ~1x/sec) and renders it as a sparkline -> a lightweight
+// "population over time" chart (M7) right in the HUD.
 fn update_world_stats(
     gen: Res<GenState>,
     creatures: Query<(&Genome, &Alive), With<Creature>>,
     mut text: Query<&mut Text, With<WorldStatsText>>,
+    mut hist: Local<Vec<u16>>,
+    mut frame: Local<u32>,
 ) {
     let Ok(mut t) = text.single_mut() else { return };
     let (mut n, mut temp, mut lng, mut met, mut par) = (0u32, 0.0f32, 0.0f32, 0.0f32, 0.0f32);
@@ -457,8 +472,17 @@ fn update_world_stats(
     }
     let nf = n.max(1) as f32;
     let day = gen.tick / crate::sphere::DAY_TICKS;
+    // sample population ~once a second into a rolling history (~48 samples) for the trend sparkline
+    *frame += 1;
+    if *frame % 60 == 0 {
+        hist.push(n as u16);
+        if hist.len() > 48 {
+            hist.remove(0);
+        }
+    }
+    let trend = sparkline(&hist, crate::sim::CREATURE_CAP as f32);
     t.0 = format!(
-        "WORLD\npop        {n}\nday        {day}\ntemp avg   {:.2}  (cold {cold} / warm {warm})\nlongevity  {:.2}\nmetab      {:.2}\nr/K        {:.2}\nhabitat    aquatic {aq} / land {land}\nspecialists {spec}",
+        "WORLD\npop        {n}\nday        {day}\ntrend      {trend}\ntemp avg   {:.2}  (cold {cold} / warm {warm})\nlongevity  {:.2}\nmetab      {:.2}\nr/K        {:.2}\nhabitat    aquatic {aq} / land {land}\nspecialists {spec}",
         temp / nf, lng / nf, met / nf, par / nf
     );
 }
