@@ -96,6 +96,15 @@ fn cell_center(c: usize) -> (f32, f32) {
     (to_world(cx), to_world(cz))
 }
 
+// Food spatial grid (perf): bin foods into FGRID^2 cells so a creature scans only nearby cells instead
+// of all ~1900 foods. NEAR_QUERY is the min query radius so the global-nearest is always found (plants
+// are dense -> nearest is within a few units, well inside this).
+const FGRID: usize = 20;
+const NEAR_QUERY: f32 = 24.0;
+fn fcell(w: f32) -> usize {
+    (((w + WORLD_HALF) / (2.0 * WORLD_HALF)) * FGRID as f32).clamp(0.0, (FGRID - 1) as f32) as usize
+}
+
 impl GroundWater {
     pub fn new() -> Self {
         GroundWater { cell: vec![0.0; SOIL_RES * SOIL_RES] }
@@ -738,6 +747,11 @@ pub fn live_step(
         .filter(|(_, _, _, _, _, a, _, _, _, _)| a.0)
         .map(|(e, t, _, _, _, _, g, _, _, _)| (e, t.translation, signature(g)))
         .collect();
+    // bin food indices into the spatial grid (built once per tick)
+    let mut fgrid: Vec<Vec<u32>> = vec![Vec::new(); FGRID * FGRID];
+    for (i, f) in foods.iter().enumerate() {
+        fgrid[fcell(f.1.z) * FGRID + fcell(f.1.x)].push(i as u32);
+    }
 
     for (entity, mut ct, mut energy, mut fit, mut head, mut alive, genome, mut brain, mut diet, mut loco) in &mut cq {
         if !alive.0 {
@@ -748,33 +762,43 @@ pub fn live_step(
         }
         let pos = ct.translation;
 
-        // SINGLE pass over foods (perf): compute the global nearest (for approach/eat) AND each evolvable
-        // sensor's nearest-food-in-cone together, so atan2 runs once per in-range food instead of once per
-        // food per sensor. Bit-identical to the old separate passes (same ascending-index order +
-        // strict-< tie-breaking; nearest scans all foods, sensors only those within range).
+        // SINGLE grid-bounded pass over nearby foods (perf): scan only the food-grid cells within the
+        // query radius (>= max sensor range, so every sensable food is covered; >= NEAR_QUERY so the
+        // global-nearest is found given dense plants). Computes the global nearest (approach/eat) AND each
+        // sensor's nearest-food-in-cone together, atan2 once per in-range food. Not bit-identical (cell
+        // iteration order differs), but far fewer foods touched -> big speedup at scale.
         let n_s = genome.sensors.len();
         let max_range = genome.sensors.iter().map(|s| s.range).fold(0.0f32, f32::max);
         let mut best: Option<(usize, f32)> = None;
         let mut sd = vec![f32::INFINITY; n_s]; // nearest dist per sensor
         let mut skind = vec![0u8; n_s]; // food kind that nearest sensor-food is
-        for (i, f) in foods.iter().enumerate() {
-            if eaten.contains(&f.0) {
-                continue;
-            }
-            let to = f.1 - pos;
-            let d2 = to.length_squared();
-            if best.map_or(true, |(_, bd2)| d2 < bd2) {
-                best = Some((i, d2)); // global nearest considers ALL foods
-            }
-            let dist = d2.sqrt();
-            if dist > max_range {
-                continue; // no sensor can see it -> skip the atan2 + cone tests
-            }
-            let bearing = wrap_angle(to.x.atan2(to.z) - head.0);
-            for (si, s) in genome.sensors.iter().enumerate() {
-                if dist <= s.range && dist < sd[si] && wrap_angle(bearing - s.angle).abs() <= CONE_HALF {
-                    sd[si] = dist;
-                    skind[si] = f.2.kind;
+        let r = max_range.max(NEAR_QUERY);
+        let (cx0, cx1) = (fcell(pos.x - r), fcell(pos.x + r));
+        let (cz0, cz1) = (fcell(pos.z - r), fcell(pos.z + r));
+        for cz in cz0..=cz1 {
+            for cx in cx0..=cx1 {
+                for &fi in &fgrid[cz * FGRID + cx] {
+                    let i = fi as usize;
+                    let f = &foods[i];
+                    if eaten.contains(&f.0) {
+                        continue;
+                    }
+                    let to = f.1 - pos;
+                    let d2 = to.length_squared();
+                    if best.map_or(true, |(_, bd2)| d2 < bd2) {
+                        best = Some((i, d2));
+                    }
+                    let dist = d2.sqrt();
+                    if dist > max_range {
+                        continue; // out of every sensor's range -> skip the atan2 + cone tests
+                    }
+                    let bearing = wrap_angle(to.x.atan2(to.z) - head.0);
+                    for (si, s) in genome.sensors.iter().enumerate() {
+                        if dist <= s.range && dist < sd[si] && wrap_angle(bearing - s.angle).abs() <= CONE_HALF {
+                            sd[si] = dist;
+                            skind[si] = f.2.kind;
+                        }
+                    }
                 }
             }
         }
