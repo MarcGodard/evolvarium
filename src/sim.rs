@@ -36,6 +36,7 @@ pub struct GenState {
     pub diverse: bool,        // --diverse: hand-seed niche-adapted creatures across the globe (multi-niche showcase)
     pub mating: bool,         // --mating: offspring = crossover of two nearby genetically-similar parents (assortative -> speciation); else single-parent budding
     pub garden: bool,         // --garden: seed a botanical SHOWCASE (one of every plant species in a grid at the homeland, + a fruit tree, evergreen, vine tree) instead of the normal random world. For inspecting the flora.
+    pub plant_lib: Option<String>, // path to a tuned plant seed-bank (tuning harness); when present, the planet is seeded biome-matched FROM it (else archetypes). None = --no-plant-lib (today's archetype seeding).
 }
 
 impl GenState {
@@ -428,7 +429,7 @@ fn plant_spawn_pos(rng: &mut Rng, homeland: bool, offset: f32) -> Vec3 {
 // for the niche; the brain is kept from a competent base genome so they actually forage + survive. ---
 
 // A LAND position matching a niche: low (wet/coastal) vs high ground, near a target |latitude|.
-fn niche_pos(rng: &mut Rng, low_elev: bool, target_lat: f32, offset: f32) -> Vec3 {
+pub(crate) fn niche_pos(rng: &mut Rng, low_elev: bool, target_lat: f32, offset: f32) -> Vec3 {
     for _ in 0..50 {
         let d = crate::sphere::random_dir_in_cap(rng, Vec3::Y, std::f32::consts::PI);
         if crate::sphere::is_ocean(d) {
@@ -447,7 +448,7 @@ fn niche_pos(rng: &mut Rng, low_elev: bool, target_lat: f32, offset: f32) -> Vec
 // A SHALLOW-WATER position for the swimmer niche: in the sea but ABOVE the barren abyss, where aquatic flora
 // grows -> swimmers spawn on their food. (niche_pos placed them on dry land, where swim costs SWIM_LAND_COST
 // and they starved -> aquatic always died out.)
-fn niche_water_pos(rng: &mut Rng, target_lat: f32, offset: f32) -> Vec3 {
+pub(crate) fn niche_water_pos(rng: &mut Rng, target_lat: f32, offset: f32) -> Vec3 {
     for _ in 0..120 {
         let d = crate::sphere::random_dir_in_cap(rng, Vec3::Y, std::f32::consts::PI);
         let e = crate::sphere::elevation01(d);
@@ -552,7 +553,7 @@ fn spawn_carrion(commands: &mut Commands, pos: Vec3, mass: f32) {
 
 // Spawn one creature (no render mesh; viz::add_creature_visuals gives it one in render mode).
 // Used for continuous-mode offspring; fresh brain from the genome's priors, learns over its own life.
-fn spawn_creature(commands: &mut Commands, g: Genome, pos: Vec3, rng: &mut Rng, birth_energy: f32) {
+pub(crate) fn spawn_creature(commands: &mut Commands, g: Genome, pos: Vec3, rng: &mut Rng, birth_energy: f32) {
     let h = rng.range(-std::f32::consts::PI, std::f32::consts::PI);
     let brain = Brain { net: g.net.clone(), prev_dist: f32::INFINITY };
     let diet = diet_state(&g);
@@ -648,7 +649,7 @@ pub fn seed_planet(commands: &mut Commands, rng: &mut Rng, parents: &[Genome], _
 
 // A fresh (founding) tree genome: rich, tall, slow, with some branches. defense ~1 is irrelevant to
 // trees (reach gates them, not bite); kind 0. From here trees evolve via PlantGenome::mutate_tree.
-fn tree_genome(rng: &mut Rng) -> PlantGenome {
+pub(crate) fn tree_genome(rng: &mut Rng) -> PlantGenome {
     PlantGenome {
         kind: 0,
         nutrient: rng.range(0.6, 1.0),
@@ -689,7 +690,7 @@ fn tree_genome(rng: &mut Rng) -> PlantGenome {
 }
 
 // Spawn one tree (long-lived plant + Tree marker) from a genome. edible=true fruit tree, false=evergreen.
-fn spawn_tree(commands: &mut Commands, mass: f32, pos: Vec3, edible: bool, g: PlantGenome) {
+pub(crate) fn spawn_tree(commands: &mut Commands, mass: f32, pos: Vec3, edible: bool, g: PlantGenome) {
     commands.spawn((
         Food,
         Tree { edible },
@@ -703,7 +704,7 @@ fn spawn_tree(commands: &mut Commands, mass: f32, pos: Vec3, edible: bool, g: Pl
 // deep kelp (needs less sun) vs shallow lily/eelgrass/algae; land by temperature + moisture -> cold
 // alpine/moss, arid cactus/tumbleweed/thistle, wet reed/fern, else a mixed meadow. The species then
 // evolves from here. Replaces uniform-random plants so the world reads as real biomes.
-fn plant_for_site(rng: &mut Rng, d: Vec3) -> PlantGenome {
+pub(crate) fn plant_for_site(rng: &mut Rng, d: Vec3) -> PlantGenome {
     use crate::plant::Archetype as A;
     let pick = |rng: &mut Rng, opts: &[A]| opts[(rng.f32() * opts.len() as f32) as usize % opts.len()];
     if crate::sphere::is_ocean(d) {
@@ -730,6 +731,30 @@ fn plant_for_site(rng: &mut Rng, d: Vec3) -> PlantGenome {
         pick(rng, &[A::Clover, A::Wildflower, A::BerryBush, A::Nightshade, A::Fern]) // mixed meadow
     };
     PlantGenome::archetype(rng, a)
+}
+
+// Library-backed site seeding (tuning harness): when a tuned plant library is loaded, draw a biome-matched
+// EVOLVED genome from it (mutated a touch for variety); else fall back to the archetype for the site so no
+// biome ever goes bare. `lib` is None when no library file exists or --no-plant-lib was passed.
+fn site_plant(rng: &mut Rng, lib: Option<&crate::persist::PlantLibrary>, d: Vec3) -> PlantGenome {
+    if let Some(l) = lib {
+        if let Some(mut g) = l.pick_for_site(rng, d, false) {
+            g.mutate(rng);
+            return g;
+        }
+    }
+    plant_for_site(rng, d)
+}
+
+// Same, for trees (Tree marker). Draws a tuned tree genome biome-matched; else a fresh founding tree genome.
+fn site_tree(rng: &mut Rng, lib: Option<&crate::persist::PlantLibrary>, d: Vec3) -> PlantGenome {
+    if let Some(l) = lib {
+        if let Some(mut g) = l.pick_for_site(rng, d, true) {
+            g.mutate_tree(rng);
+            return g;
+        }
+    }
+    tree_genome(rng)
 }
 
 // Botanical SHOWCASE (--garden): one of every plant species laid out in a tidy grid at the homeland, plus a
@@ -769,7 +794,7 @@ fn seed_garden(commands: &mut Commands, rng: &mut Rng) {
 }
 
 // Spawn one plant (living food). No render mesh; add_plant_visuals (render mode) gives it one.
-fn spawn_plant(commands: &mut Commands, g: PlantGenome, mass: f32, pos: Vec3) {
+pub(crate) fn spawn_plant(commands: &mut Commands, g: PlantGenome, mass: f32, pos: Vec3) {
     commands.spawn((
         Food,
         PlantState { mass, age: 0 },
@@ -866,6 +891,8 @@ pub fn spawn_world_headless(mut commands: Commands, mut rng: ResMut<Rng>, mut ge
         // showcase: one of every species in a grid at the homeland (+ a few trees) instead of a random world
         seed_garden(&mut commands, &mut rng);
     } else {
+        // tuned plant seed-bank (tuning harness): when present, seed the planet biome-matched FROM it.
+        let lib = gen.plant_lib.as_deref().and_then(crate::persist::load_plant_library);
         let food_pos = |rng: &mut Rng| plant_spawn_pos(rng, !gen.diverse, FOOD_Y); // land + shallow water (aquatic flora)
         match &snap {
             Some(s) if !s.plants.is_empty() => {
@@ -873,19 +900,19 @@ pub fn spawn_world_headless(mut commands: Commands, mut rng: ResMut<Rng>, mut ge
                     let p = food_pos(&mut rng);
                     // regenerate every loaded plant as fresh biome-matched flora (we do not carry legacy plants
                     // forward); sp.mass is kept so the food web reloads grown, not all seedlings.
-                    let g = plant_for_site(&mut rng, p.normalize_or_zero());
+                    let g = site_plant(&mut rng, lib.as_ref(), p.normalize_or_zero());
                     spawn_plant(&mut commands, g, sp.mass, p);
                 }
             }
             _ => {
                 for _ in 0..FOOD {
                     let p = food_pos(&mut rng);
-                    let pg = plant_for_site(&mut rng, p.normalize_or_zero()); // species by biome
+                    let pg = site_plant(&mut rng, lib.as_ref(), p.normalize_or_zero()); // tuned-library or biome archetype
                     spawn_plant(&mut commands, pg, rng.range(0.3, 1.4) * PLANT_START_MASS, p); // varied mass desyncs the food supply
                 }
             }
         }
-        spawn_trees(&mut commands, &mut rng, gen.diverse);
+        spawn_trees(&mut commands, &mut rng, gen.diverse, lib.as_ref());
     }
     // start the turf half-full; grass_step tops it up to GRASS_CAP from here. (Skip in --garden: a clean
     // showcase ground without the tall turf hiding the specimen plants.)
@@ -899,7 +926,7 @@ pub fn spawn_world_headless(mut commands: Commands, mut rng: ResMut<Rng>, mut ge
 // Scatter the initial trees (half tall fruit trees, half uneatable evergreens) on habitable land. Always
 // WHOLE-PLANET now: trees seed worldwide (then ambient reproduction fills toward TREE_CAP globally), so the
 // planet -- not just the homeland -- grows forests. (`_global` kept for the call sites.)
-fn spawn_trees(commands: &mut Commands, rng: &mut Rng, _global: bool) {
+fn spawn_trees(commands: &mut Commands, rng: &mut Rng, _global: bool, lib: Option<&crate::persist::PlantLibrary>) {
     let tree_pos = |rng: &mut Rng| rand_pos(rng, FOOD_Y);
     for i in 0..N_TREES {
         let mut p = tree_pos(rng);
@@ -909,8 +936,8 @@ fn spawn_trees(commands: &mut Commands, rng: &mut Rng, _global: bool) {
             }
             p = tree_pos(rng);
         }
-        // alternate fruit tree / evergreen; each gets a fresh evolvable genome (evolves from here)
-        let g = tree_genome(rng);
+        // alternate fruit tree / evergreen; tuned-library tree genome if available, else a fresh founding one
+        let g = site_tree(rng, lib, p.normalize_or_zero());
         spawn_tree(commands, rng.range(3.0, 9.0), p, i % 2 == 0, g);
     }
 }
@@ -1075,6 +1102,8 @@ pub fn spawn_world_render(
         // showcase: one of every species in a grid at the homeland (+ a few trees) instead of a random world
         seed_garden(&mut commands, &mut rng);
     } else {
+        // tuned plant seed-bank (tuning harness): when present, seed the planet biome-matched FROM it.
+        let lib = gen.plant_lib.as_deref().and_then(crate::persist::load_plant_library);
         let food_pos = |rng: &mut Rng| plant_spawn_pos(rng, !gen.diverse, FOOD_Y); // land + shallow water (aquatic flora)
         match &snap {
             Some(s) if !s.plants.is_empty() => {
@@ -1082,19 +1111,19 @@ pub fn spawn_world_render(
                     let p = food_pos(&mut rng);
                     // regenerate every loaded plant as fresh biome-matched flora (we do not carry legacy plants
                     // forward); sp.mass is kept so the food web reloads grown, not all seedlings.
-                    let g = plant_for_site(&mut rng, p.normalize_or_zero());
+                    let g = site_plant(&mut rng, lib.as_ref(), p.normalize_or_zero());
                     spawn_plant(&mut commands, g, sp.mass, p);
                 }
             }
             _ => {
                 for _ in 0..FOOD {
                     let p = food_pos(&mut rng);
-                    let pg = plant_for_site(&mut rng, p.normalize_or_zero()); // species by biome
+                    let pg = site_plant(&mut rng, lib.as_ref(), p.normalize_or_zero()); // tuned-library or biome archetype
                     spawn_plant(&mut commands, pg, rng.range(0.3, 1.4) * PLANT_START_MASS, p); // varied mass desyncs the food supply
                 }
             }
         }
-        spawn_trees(&mut commands, &mut rng, gen.diverse);
+        spawn_trees(&mut commands, &mut rng, gen.diverse, lib.as_ref());
     }
     // start the turf half-full; grass_step tops it up to GRASS_CAP from here. (Skip in --garden: a clean
     // showcase ground without the tall turf hiding the specimen plants.)
@@ -1178,9 +1207,14 @@ pub fn plant_step(
     fire: Res<Fire>,
     mut tree_bites: ResMut<TreeBites>,
     mut bank: ResMut<SeedBank>,
+    // scenario tuning harness: present ONLY under --scenario. Its presence disables the reseed floor (so an
+    // isolated cohort isn't flooded) + counts births/deaths-by-cause. Absent in normal/headless runs (free).
+    mut stats: Option<ResMut<crate::scenario::ScenarioStats>>,
     mut q: Query<(Entity, &mut PlantState, &PlantGenome, &Transform, Option<&Tree>), (Without<Rot>, Without<Grass>)>, // not carrion, not grass (grass_step owns grass)
 ) {
     soil.decay(); // fertility leaches / is taken up over time
+    // scenario mode: no PLANT_MIN reseed (the cohort IS the only plants); normal mode keeps the floor.
+    let reseed_floor = if stats.is_some() { 0 } else { PLANT_MIN };
     // season drifts on the global tick clock (advances in both modes; generation is frozen in continuous)
     let season = (gen.tick as f32 / GEN_TICKS as f32 * SEASON_FREQ).sin(); // -1 dry .. +1 wet
     let mut plant_count = q.iter().filter(|(.., t)| t.is_none()).count();
@@ -1206,6 +1240,9 @@ pub fn plant_step(
                 child.mutate(&mut rng);
                 births.push((child, disperse_pos(&mut rng, ppos, g.spread, FOOD_Y)));
             }
+            if let Some(s) = stats.as_deref_mut() {
+                s.death("fire");
+            }
             commands.entity(e).despawn();
             if tree.is_none() {
                 plant_count = plant_count.saturating_sub(1);
@@ -1225,6 +1262,9 @@ pub fn plant_step(
             // trees are land-only: a tree standing in water drowns fast (no kelp/mangrove forests). Clears
             // coastal seeds that landed in the sea + any tree left underwater by a rising sea level.
             if crate::sphere::is_ocean(pdir) && rng.f32() < DROWN_TREE {
+                if let Some(s) = stats.as_deref_mut() {
+                    s.death("drown");
+                }
                 commands.entity(e).despawn();
                 continue;
             }
@@ -1234,6 +1274,9 @@ pub fn plant_step(
             if grazed {
                 st.mass = (st.mass - tree_bites.0[&e]).max(0.0);
                 if st.mass < TREE_MIN_MASS {
+                    if let Some(s) = stats.as_deref_mut() {
+                        s.death("eaten");
+                    }
                     commands.entity(e).despawn();
                     continue;
                 }
@@ -1243,6 +1286,9 @@ pub fn plant_step(
             // tree dies back -> no forests on the frozen pole or in the desert heat; near its band it's spared.
             let tmiss = (crate::sphere::base_temperature(pdir) - g.temp_pref).abs();
             if rng.f32() < TREE_TEMP_KILL * (tmiss - TREE_TEMP_TOL).max(0.0) {
+                if let Some(s) = stats.as_deref_mut() {
+                    s.death("temp");
+                }
                 commands.entity(e).despawn();
                 continue;
             }
@@ -1287,6 +1333,9 @@ pub fn plant_step(
         if let Some(&bite) = tree_bites.0.get(&e) {
             st.mass = (st.mass - bite).max(0.0);
             if st.mass < PLANT_MIN_MASS {
+                if let Some(s) = stats.as_deref_mut() {
+                    s.death("eaten");
+                }
                 commands.entity(e).despawn();
                 soil.add(ppos, DEATH_FERT * 0.3); // a consumed plant returns some nutrients to the ground
                 plant_count = plant_count.saturating_sub(1);
@@ -1322,12 +1371,17 @@ pub fn plant_step(
         let temp = crate::sphere::base_temperature(pdir);
         let tmiss = (temp - g.temp_pref).abs();
         let temp_grow = TEMP_FLOOR + (1.0 - TEMP_FLOOR) * (1.0 - tmiss);
-        let p_mort = MOISTURE_KILL * (stress - MOISTURE_TOLERANCE).max(0.0)
-            + HABITAT_KILL * (0.3 - hab).max(0.0)
-            + drown
-            + desiccate
-            + TEMP_KILL * (tmiss - TEMP_TOL).max(0.0);
+        let m_moist = MOISTURE_KILL * (stress - MOISTURE_TOLERANCE).max(0.0);
+        let m_hab = HABITAT_KILL * (0.3 - hab).max(0.0);
+        let m_temp = TEMP_KILL * (tmiss - TEMP_TOL).max(0.0);
+        let p_mort = m_moist + m_hab + drown + desiccate + m_temp;
         if rng.f32() < p_mort {
+            // scenario tuning: attribute the death to its dominant cause (so the agent sees WHY a cohort dies).
+            if let Some(s) = stats.as_deref_mut() {
+                let causes = [("moisture", m_moist), ("habitat", m_hab), ("drown", drown), ("desiccate", desiccate), ("temp", m_temp)];
+                let cause = causes.iter().max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)).map(|c| c.0).unwrap_or("moisture");
+                s.death(cause);
+            }
             // allelopathic litter: a chemical-warfare plant leaves extra-toxic detritus (juglone-style leaf
             // litter) that suppresses competitors germinating on the same ground. Litter carries >= allelopathy.
             let mut litter = g.clone();
@@ -1467,10 +1521,16 @@ pub fn plant_step(
             Transform::from_translation(pos),
         ));
     }
-    // reseed floor: keep a minimal seed bank so creatures can't drive food fully extinct (biome-matched)
-    while plant_count + births.len() < PLANT_MIN {
+    // reseed floor: keep a minimal seed bank so creatures can't drive food fully extinct (biome-matched).
+    // Disabled in scenario mode (reseed_floor=0) so a tuned cohort stays isolated.
+    while plant_count + births.len() < reseed_floor {
         let pos = rand_pos(&mut rng, FOOD_Y);
         births.push((plant_for_site(&mut rng, pos.normalize_or_zero()), pos));
+    }
+    // scenario tuning: count this tick's cohort offspring (reseed floor is off in scenario, so births +
+    // tree_births are all real reproduction) -> drives the R (births/deaths) reproductive-success metric.
+    if let Some(s) = stats.as_deref_mut() {
+        s.births += (births.len() + tree_births.len()) as u32;
     }
     for (g, pos) in births {
         // heavy (well-provisioned) seeds establish as BIGGER, hardier seedlings (head start); light seeds

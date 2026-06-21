@@ -18,6 +18,7 @@ mod persist;
 mod capture;
 mod plant;
 mod rng;
+mod scenario;
 mod sim;
 mod snapshot;
 mod sphere;
@@ -91,6 +92,28 @@ fn main() {
     if diverse && load.is_none() && std::path::Path::new(DEFAULT_SEED).exists() {
         load = Some(DEFAULT_SEED.to_string());
     }
+    // --scenario=PATH / --out=PATH: tuning-harness mini-world runner (Layer 1). Runs one isolated cohort in a
+    // controlled environment band, headless, then writes the result JSON + exits. See scenario.rs.
+    let scenario_path = args.iter().find_map(|a| a.strip_prefix("--scenario=").map(String::from));
+    let out_path = args.iter().find_map(|a| a.strip_prefix("--out=").map(String::from)).unwrap_or_else(|| "result.json".into());
+    // Plant seed-bank library: a normal run seeds the planet biome-matched FROM it when the file exists.
+    // --plant-lib=PATH overrides the default path; --no-plant-lib forces today's archetype seeding.
+    const DEFAULT_PLANT_LIB: &str = "plant-library.json";
+    let plant_lib = if args.iter().any(|a| a == "--no-plant-lib") {
+        None
+    } else {
+        Some(args.iter().find_map(|a| a.strip_prefix("--plant-lib=").map(String::from)).unwrap_or_else(|| DEFAULT_PLANT_LIB.into()))
+    };
+    let seed_given = args.iter().any(|a| a.starts_with("--seed="));
+    // --merge=result.json --niche=NAME: fold a scenario result's best genomes into the plant library, then
+    // exit (no sim). The tuning-harness synthesize stage calls this per tuned cohort. --lib-cap caps per-niche.
+    if let Some(rp) = args.iter().find_map(|a| a.strip_prefix("--merge=").map(String::from)) {
+        let niche = args.iter().find_map(|a| a.strip_prefix("--niche=").map(String::from)).unwrap_or_else(|| "default".into());
+        let cap = args.iter().find_map(|a| a.strip_prefix("--lib-cap=").and_then(|s| s.parse::<usize>().ok())).unwrap_or(8);
+        let lib_path = plant_lib.clone().unwrap_or_else(|| DEFAULT_PLANT_LIB.into());
+        scenario::merge_result_into_library(&rp, &niche, &lib_path, cap);
+        return;
+    }
 
     let mut app = App::new();
     // crisp directional shadows (default 2048 is soft at planet scale)
@@ -122,9 +145,51 @@ fn main() {
         // --garden: seed a botanical showcase (one of every species in a grid at the homeland) for
         // inspecting the flora. Pair with --capture or just `cargo run -- --garden` to walk the garden.
         garden: args.iter().any(|a| a == "--garden"),
+        plant_lib: plant_lib.clone(),
     });
 
     app.insert_resource(snapshot::ShotCfg { enabled: shots, at_tick: shot_tick, prefix: shot_prefix });
+
+    // --scenario: tuning-harness branch. Parse the scenario JSON, override the RNG seed + GenState for an
+    // isolated controlled mini-world, seed ONLY the cohort, run the minimal plant chain, write result, exit.
+    if let Some(path) = scenario_path {
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("scenario read failed ({}): {}", path, e));
+        let scn: scenario::Scenario = serde_json::from_str(&text).unwrap_or_else(|e| panic!("scenario parse failed ({}): {}", path, e));
+        let scen_seed = if seed_given { seed } else { scn.seed };
+        let grazers = scn.world.grazers;
+        app.insert_resource(rng::Rng::seed(scen_seed));
+        // scenario GenState: headless clock, continuous OFF (so grazers don't reseed), no garden/library.
+        app.insert_resource(sim::GenState {
+            generation: 0,
+            ticks_left: sim::GEN_TICKS,
+            headless: true,
+            learn: true,
+            poison: false,
+            diet: true,
+            continuous: false,
+            tick: 0,
+            max_gens: 1,
+            save: None,
+            load: None,
+            diverse: false,
+            mating: false,
+            garden: false,
+            plant_lib: None,
+        });
+        app.insert_resource(scenario::ScenarioCfg { scenario: scn, out: out_path });
+        app.init_resource::<scenario::ScenarioStats>();
+        app.add_plugins(MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(Duration::ZERO)))
+            .add_plugins(bevy::log::LogPlugin::default())
+            .add_systems(Startup, scenario::spawn_scenario_world);
+        // grazers => include the creature systems (forage + predation) so they actually graze the cohort.
+        if grazers > 0 {
+            app.add_systems(Update, (sim::live_step, sim::predation_step, sim::plant_step, sim::rot_step, scenario::scenario_step).chain());
+        } else {
+            app.add_systems(Update, (sim::plant_step, sim::rot_step, scenario::scenario_step).chain());
+        }
+        app.run();
+        return;
+    }
 
     if headless {
         // No window/render. Spin flat-out; each Update = one constant-dt sim step (fast-forward).

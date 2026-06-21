@@ -78,11 +78,23 @@ live in `config.rs`; the live conversion plan is `SPHERE-PLAN.md`.
 
 ## Open
 
-### Agent tuning harness (planned, see clients/evolvarium/14-tuning-harness.md)
-- [ ] Layer 1 (engine): `--scenario=cohort.json --out=result.json` deterministic mini-world runner
-      (5-20 creatures from partial genome specs, JSON survival/age/energy-by-store/R/trait-drift out).
-- [ ] Layer 2 (Workflow): fan-out tuner agents per niche -> iterate runner -> seed bank + frictions file.
-      First job = friction F1 (dial the nutrient master-expression gradient to bite without crashing pop).
+### Agent tuning harness (see clients/evolvarium/14-tuning-harness.md)
+- [x] Layer 1 PLANT/TREE arm (engine): `--scenario=cohort.json --out=result.json` deterministic mini-world
+      runner (`scenario.rs`). Isolated cohort of 5-30 plants/trees in a controlled environment band
+      (lat_band, wetness, aquatic/rocky/fire/grazers, second_band for MIXED). Result JSON: survival,
+      peak/target, mean mass/age, births/deaths/R, deaths_by_cause, trait_drift, health_score, best_genomes.
+      GENE-AGNOSTIC: genome overrides + trait_drift go through serde generically, so a new PlantGenome gene
+      is tunable with zero harness edits. Reseed floor auto-disabled + death causes counted only in
+      scenario mode (normal runs pay nothing).
+- [x] Plant seed-bank library (`persist.rs`): `plant-library.json` of tuned genomes; `--merge=result.json
+      --niche=NAME` folds a run's winners in (accumulates across runs, dedupes, per-niche cap). A normal
+      `cargo run` seeds the planet biome-matched FROM it (archetype fallback where unmatched; `--no-plant-lib`
+      to disable). Forward-compatible (old libraries load after a gene is added).
+- [x] Layer 2 (Workflow): `tools/tune-plants.workflow.js` — one tuner agent per niche (core land, aquatic,
+      trees, mixed pairs) iterates the runner toward survival+growth, synthesize merges winners into the
+      library + smokes the seeded planet + logs frictions. Run on demand (opt-in).
+- [ ] Layer 1 CREATURE arm: `creature_cohort` is parsed-but-inert; wire reflex presets + creature
+      death-cause tallies + objectives (doc 14) when creatures are tackled. First job = friction F1.
 
 ### Genes (each: real trade-off, serde-default balance-neutral, verify headless before commit)
 - [ ] Reproductive r/K cluster (breed-threshold / offspring-investment / fecundity / age-at-maturity as
