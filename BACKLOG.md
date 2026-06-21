@@ -35,7 +35,30 @@ live in `config.rs`; the live conversion plan is `SPHERE-PLAN.md`.
       **wet now gates water survival** (drown mortality x submersion x (1-wet)): land flora drowns in the
       sea, aquatic flora (high wet) thrives -> wet splits land vs aquatic plants. Trees are land-only.
 
+### Metabolism overhaul (2026-06-21, a42d7aa)
+- [x] **Three energy stores** (`Energy{fast,sugar,fat}`): burn order fast->sugar->fat; fast leaks even at
+      rest (volatile, can't bank); fat mobilizes slow (`power()` caps thrust -> fat-only is sluggish) +
+      carries upkeep; sugar overflow converts to fat at a loss. New `adiposity` gene (lean/nimble vs
+      fatty/buffered). Plants give sugar; meat -> fat. Verified: pop stable, adiposity under selection.
+- [x] **Fruit + fermentation food web** (forageable `fast`): mature fruit trees drop fallen fruit; fruit +
+      dead-plant detritus ferment over the Rot clock (fresh->sugar, fermenting->fast/ethanol+toxin,
+      spoiled->toxic/gone). `Ferment{toxic}` marker splits plant matter from animal carrion. Fruit ferments
+      richly + low-tox, detritus scraps + high-tox. DEFERRED: viz fruit-on-crown + falling-fruit render.
+- [x] **10 nutrients + regulatory diet genome** ("10 genes feed 1"): `uptake[10]` genes feed a computed
+      `master_expression` (reserves vs uptake demand) that gates energy extraction; plants produce
+      `nutrients[10]`+`toxicity` (x soil fertility), growth pays for both; `DietState.reserves[10]` top up
+      on eat (x uptake) + deplete with use -> deficiency raises growth-load (soft). `UPTAKE_OVERHEAD` taxes
+      broad guts. NFOOD=4 kept as plant-FAMILY axis (sensing/color) only. Verified: pop 50-86, diet breadth
+      evolves 9.7->6.5. KNOWN-SOFT: master expr pegs ~0.99 (reserve gradient too gentle) -> friction F1
+      (`clients/evolvarium/tuning-frictions.md`) for the tuning harness.
+
 ## Open
+
+### Agent tuning harness (planned, see clients/evolvarium/14-tuning-harness.md)
+- [ ] Layer 1 (engine): `--scenario=cohort.json --out=result.json` deterministic mini-world runner
+      (5-20 creatures from partial genome specs, JSON survival/age/energy-by-store/R/trait-drift out).
+- [ ] Layer 2 (Workflow): fan-out tuner agents per niche -> iterate runner -> seed bank + frictions file.
+      First job = friction F1 (dial the nutrient master-expression gradient to bite without crashing pop).
 
 ### Genes (each: real trade-off, serde-default balance-neutral, verify headless before commit)
 - [ ] Reproductive r/K cluster (breed-threshold / offspring-investment / fecundity / age-at-maturity as
