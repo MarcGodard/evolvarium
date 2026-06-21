@@ -73,21 +73,21 @@ pub const SWIM_SPEED: f32 = 0.8;       // speed bonus fraction at full swim in w
 pub const SWIM_LAND_COST: f32 = 5.0;   // energy/sec penalty at full swim on fully-dry land (clumsy on land)
 
 // --- eating / arms race / predation (see 13, M5) ---
-pub const BITE_K: f32 = 4.0; // eat/combat decisiveness = sigmoid(BITE_K*(bite - defense)). Lowered: at 8 a tiny bite edge was near-certain win -> a runaway combat arms race (bite -> 0.8) that crashed productivity. Flatter = bite advantage matters less -> race doesn't escalate.
-pub const BITE_COST: f32 = 2.2; // energy/sec upkeep of bite strength, applied QUADRATICALLY (BITE_COST*bite^2): cheap at low bite (foragers ~0.1/sec) but crippling at high bite -> bounds the combat arms race that was running bite away (0.25->0.65) and slowly crashing the ecosystem (evolutionary suicide). Mirrors the plant-defense quadratic.
+pub const BITE_K: f32 = 8.0; // eat/combat decisiveness = sigmoid(BITE_K*(bite - defense))
+pub const BITE_COST: f32 = 0.7; // energy/sec maintenance cost of bite strength (linear)
 pub const EAT_GAIN: f32 = 14.0; // energy per (mass * nutrient) consumed (raised: competent foragers clearly net-positive -> sustain + reproduce, needed for continuous stability)
 pub const MEAT_BONUS: f32 = 1.6; // meat (carrion) is richer + longer-lasting than plant food
 pub const ATTACK_RADIUS: f32 = 1.6; // must be adjacent to attack
-pub const PREDATION_GAIN: f32 = 9.0; // energy a predator gains from a kill. Lowered: at 22 cannibalism was so rewarding it drove the bite arms race + drained the population; predation still happens but isn't the dominant selective force (herd/height/fleeing are now viable defenses).
+pub const PREDATION_GAIN: f32 = 22.0; // energy a predator gains from a kill
 pub const PREDATION_HUNGER: f32 = 20.0; // only creatures below this energy hunt (fed crowds don't cannibalize)
 // Kin-based social need (herd instinct). Being near genetically-SIMILAR creatures (kin) satisfies a
 // social creature + protects it from predators (herd vigilance); ISOLATION drains energy (loneliness).
 // Trade-off: social creatures must stay with their kind (constrains roaming) but gain safety; asocial
 // loners roam free but a hunting loner finds no herd safety + (if social) starves of loneliness.
-pub const SOCIAL_RADIUS: f32 = 9.0; // distance within which kin count as company
+pub const SOCIAL_RADIUS: f32 = 13.0; // distance within which kin count as company (wide: easy to satisfy)
 pub const SOCIAL_SIM: f32 = 0.7; // max signature distance to count as KIN (smaller = stricter species)
-pub const SOCIAL_TARGET: f32 = 4.0; // kin nearby for full social satisfaction
-pub const SOCIAL_COST: f32 = 1.6; // energy/sec loneliness drain at full social gene + full isolation
+pub const SOCIAL_TARGET: f32 = 2.0; // just 2 kin nearby satisfies (avoids an Allee death-spiral at low density)
+pub const SOCIAL_COST: f32 = 0.6; // energy/sec loneliness drain at full social gene + full isolation (MILD: a flavor pressure + herd benefit, NOT a population killer -- a strong drain spirals a spread-out population to extinction)
 pub const SOCIAL_SAFETY: f32 = 0.7; // max predation-success reduction for prey surrounded by kin (herd safety)
 pub const SEED_VIA_GUT: f32 = 0.5; // max chance (x quality) an eaten plant disperses an offspring (13)
 pub const PLANT_START_MASS: f32 = 0.6;

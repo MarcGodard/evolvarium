@@ -737,8 +737,7 @@ pub fn live_step(
         energy.0 -= (BASAL_COST
             + SIZE_BASAL * genome.size // bigger body costs more just to maintain
             + MOVE_COST * (1.0 + SIZE_MOVE * genome.size) * thrust * thrust // more mass to push
-            + BITE_COST * genome.bite * genome.bite // quadratic: bounds the combat arms race
-
+            + BITE_COST * genome.bite
             + ROCK_MOVE_COST * rock * thrust.abs()
             + SENSE_COST * sense_range
             + HEIGHT_COST * genome.height
@@ -749,10 +748,14 @@ pub fn live_step(
         // fatigue dynamics: exertion (thrust) accrues debt; idling (low thrust) sheds it. Clamped 0..1.
         diet.fatigue = (diet.fatigue + (FATIGUE_GAIN * thrust - FATIGUE_REST * (1.0 - thrust)) * dt).clamp(0.0, 1.0);
         // social/kin need: a social creature isolated from genetic kin drains energy (loneliness). Being
-        // in a herd of kin removes the drain (and grants predation safety, see predation_step).
+        // in a herd of kin removes the drain (and grants predation safety, see predation_step). The drain
+        // is SCALED BY POPULATION DENSITY (pop/CREATURE_CAP): at a healthy density social creatures must
+        // herd, but when the population is sparse the pressure relaxes -> no Allee death-spiral (a constant
+        // loneliness drain on a spread-out population feeds back to extinction; this self-limits it).
         if genome.social > 0.0 {
             let kinf = kin_fraction(entity, np, &signature(genome), &cre_snap);
-            energy.0 -= SOCIAL_COST * genome.social * (1.0 - kinf) * dt;
+            let density = (pop as f32 / CREATURE_CAP as f32).min(1.0);
+            energy.0 -= SOCIAL_COST * genome.social * (1.0 - kinf) * density * dt;
         }
 
         // eat nearest plant on contact, IF bite beats its defense (arms race, see 13)
