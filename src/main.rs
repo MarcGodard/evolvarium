@@ -101,7 +101,7 @@ fn main() {
         // Real-time visuals: step in FixedUpdate at the sim rate so sim-time = wall-time.
         app.add_plugins(DefaultPlugins)
             .insert_resource(Time::<Fixed>::from_hz((1.0 / sim::DT) as f64))
-            .add_plugins(camera::FlyCameraPlugin)
+            .add_plugins(camera::OrbitCameraPlugin)
             .add_plugins(viz::VizPlugin)
             .add_systems(Startup, (setup_scene, sim::spawn_world_render))
             .add_systems(

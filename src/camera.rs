@@ -1,123 +1,102 @@
-// Free-fly camera. RIGHT-click to capture mouse + look; Esc to release. WASD move, Q/E down/up, Shift
-// faster. Left-click is left free for selecting creatures/plants (see viz::pick_on_click).
-// Render mode only. Lets you fly through the world and watch blobs (see 01).
+// Orbit camera for the planet. DRAG (hold right mouse) to rotate around the globe, SCROLL to zoom, WASD/QE
+// as a keyboard fallback. LEFT-click selects a creature/plant; F follows the selection. Render mode only.
 use crate::viz::Selected;
-use bevy::input::mouse::AccumulatedMouseMotion;
+use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
 use bevy::prelude::*;
-use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
-pub struct FlyCameraPlugin;
+pub struct OrbitCameraPlugin;
 
-impl Plugin for FlyCameraPlugin {
+impl Plugin for OrbitCameraPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, (spawn_camera, log_controls))
-            .add_systems(Update, (cursor_capture, look, movement, follow_camera));
+            .add_systems(Update, (orbit_drag, orbit_keys, zoom, apply_orbit, follow_camera).chain());
     }
 }
 
 fn log_controls() {
-    info!("camera: RIGHT-CLICK look | LEFT-CLICK select | F follow selected | ESC release | WASD move | Q/E down/up | Shift faster");
+    info!("camera: DRAG (right-mouse) orbit | SCROLL zoom | WASD/QE orbit+zoom | LEFT-CLICK select | F follow | ESC release");
 }
 
+// Orbit state: the camera sits on a sphere of radius `dist` around the planet center, aimed inward.
 #[derive(Component)]
-pub struct FlyCam {
-    pub speed: f32,
-    pub sensitivity: f32,
+pub struct OrbitCam {
     pub yaw: f32,
     pub pitch: f32,
+    pub dist: f32,
 }
 
-impl Default for FlyCam {
-    fn default() -> Self {
-        Self { speed: 45.0, sensitivity: 0.003, yaw: 0.0, pitch: 0.0 } // faster: the planet is ~80-unit radius
-    }
-}
+const MIN_DIST: f32 = 95.0; // just above the surface (planet radius ~80 + terrain)
+const MAX_DIST: f32 = 420.0;
 
 fn spawn_camera(mut commands: Commands) {
-    // start out in space looking at the planet (radius ~80) from over the homeland
-    let eye = crate::sim::homeland_center() * 230.0 + Vec3::Y * 40.0;
+    // start framed on the homeland (where the founding population lives)
+    let (lon, lat) = crate::sphere::dir_to_lonlat(crate::sim::homeland_center());
     commands.spawn((
         Camera3d::default(),
-        Transform::from_translation(eye).looking_at(Vec3::ZERO, Vec3::Y),
+        Transform::default(),
         // soft ambient (per-camera in 0.18) so the planet's night side is not pitch black
         AmbientLight { brightness: 220.0, ..default() },
-        FlyCam::default(),
+        OrbitCam { yaw: lon, pitch: lat.clamp(-1.3, 1.3), dist: 230.0 },
     ));
 }
 
-// Right-click to capture (lock + hide cursor); Esc to release. Left-click stays free for selection.
-// 0.18: CursorOptions is its own component on the window entity, not a Window field.
-fn cursor_capture(
+// Hold right mouse + move to orbit. No cursor lock (a globe orbit reads better as a drag).
+fn orbit_drag(
     buttons: Res<ButtonInput<MouseButton>>,
-    keys: Res<ButtonInput<KeyCode>>,
-    mut cursor: Query<&mut CursorOptions, With<PrimaryWindow>>,
-) {
-    let Ok(mut cursor) = cursor.single_mut() else { return };
-    if buttons.just_pressed(MouseButton::Right) {
-        cursor.grab_mode = CursorGrabMode::Locked;
-        cursor.visible = false;
-    }
-    if keys.just_pressed(KeyCode::Escape) {
-        cursor.grab_mode = CursorGrabMode::None;
-        cursor.visible = true;
-    }
-}
-
-// Mouse motion -> yaw/pitch. Only while cursor captured (locked).
-fn look(
     motion: Res<AccumulatedMouseMotion>,
-    cursor: Query<&CursorOptions, With<PrimaryWindow>>,
     selected: Res<Selected>,
-    mut q: Query<(&mut Transform, &mut FlyCam)>,
+    mut q: Query<&mut OrbitCam>,
 ) {
-    if selected.follow {
-        return; // follow_camera owns the camera while following
+    if selected.follow || !buttons.pressed(MouseButton::Right) {
+        return;
     }
-    let Ok(cursor) = cursor.single() else { return };
-    if cursor.grab_mode == CursorGrabMode::None {
-        return; // not captured: don't steal mouse
-    }
-    let Ok((mut t, mut cam)) = q.single_mut() else { return };
-    cam.yaw -= motion.delta.x * cam.sensitivity;
-    cam.pitch -= motion.delta.y * cam.sensitivity;
-    cam.pitch = cam.pitch.clamp(-1.54, 1.54); // ~+-88 deg, avoid flip
-    t.rotation = Quat::from_euler(EulerRot::YXZ, cam.yaw, cam.pitch, 0.0);
+    let Ok(mut cam) = q.single_mut() else { return };
+    cam.yaw -= motion.delta.x * 0.005;
+    cam.pitch = (cam.pitch + motion.delta.y * 0.005).clamp(-1.45, 1.45);
 }
 
-// WASD + Q/E fly, relative to facing. Shift to sprint.
-fn movement(
-    keys: Res<ButtonInput<KeyCode>>,
-    time: Res<Time>,
-    selected: Res<Selected>,
-    mut q: Query<(&mut Transform, &FlyCam)>,
-) {
+// Keyboard fallback: A/D orbit longitude, W/S zoom in/out, Q/E tilt latitude. Shift = faster.
+fn orbit_keys(keys: Res<ButtonInput<KeyCode>>, time: Res<Time>, selected: Res<Selected>, mut q: Query<&mut OrbitCam>) {
     if selected.follow {
-        return; // follow_camera owns the camera while following
+        return;
+    }
+    let Ok(mut cam) = q.single_mut() else { return };
+    let dt = time.delta_secs();
+    let boost = if keys.pressed(KeyCode::ShiftLeft) { 3.0 } else { 1.0 };
+    if keys.pressed(KeyCode::KeyA) { cam.yaw += 0.8 * dt * boost; }
+    if keys.pressed(KeyCode::KeyD) { cam.yaw -= 0.8 * dt * boost; }
+    if keys.pressed(KeyCode::KeyQ) { cam.pitch = (cam.pitch + 0.8 * dt * boost).clamp(-1.45, 1.45); }
+    if keys.pressed(KeyCode::KeyE) { cam.pitch = (cam.pitch - 0.8 * dt * boost).clamp(-1.45, 1.45); }
+    if keys.pressed(KeyCode::KeyW) { cam.dist = (cam.dist - 60.0 * dt * boost).clamp(MIN_DIST, MAX_DIST); }
+    if keys.pressed(KeyCode::KeyS) { cam.dist = (cam.dist + 60.0 * dt * boost).clamp(MIN_DIST, MAX_DIST); }
+}
+
+// Scroll wheel zooms in/out.
+fn zoom(scroll: Res<AccumulatedMouseScroll>, selected: Res<Selected>, mut q: Query<&mut OrbitCam>) {
+    if selected.follow || scroll.delta.y == 0.0 {
+        return;
+    }
+    let Ok(mut cam) = q.single_mut() else { return };
+    cam.dist = (cam.dist - scroll.delta.y * 12.0).clamp(MIN_DIST, MAX_DIST);
+}
+
+// Place the camera from (yaw, pitch, dist) around the planet center, looking inward.
+fn apply_orbit(selected: Res<Selected>, mut q: Query<(&mut Transform, &OrbitCam)>) {
+    if selected.follow {
+        return; // follow_camera owns the transform while following
     }
     let Ok((mut t, cam)) = q.single_mut() else { return };
-    let mut dir = Vec3::ZERO;
-    let fwd = *t.forward();
-    let right = *t.right();
-    if keys.pressed(KeyCode::KeyW) { dir += fwd; }
-    if keys.pressed(KeyCode::KeyS) { dir -= fwd; }
-    if keys.pressed(KeyCode::KeyD) { dir += right; }
-    if keys.pressed(KeyCode::KeyA) { dir -= right; }
-    if keys.pressed(KeyCode::KeyE) { dir += Vec3::Y; }
-    if keys.pressed(KeyCode::KeyQ) { dir -= Vec3::Y; }
-
-    if dir != Vec3::ZERO {
-        let boost = if keys.pressed(KeyCode::ShiftLeft) { 3.0 } else { 1.0 };
-        t.translation += dir.normalize() * cam.speed * boost * time.delta_secs();
-    }
+    let dir = Vec3::new(cam.pitch.cos() * cam.yaw.cos(), cam.pitch.sin(), cam.pitch.cos() * cam.yaw.sin());
+    t.translation = dir * cam.dist;
+    t.look_at(Vec3::ZERO, Vec3::Y);
 }
 
-// Follow the selected entity (toggle with F). Captures the current camera offset when engaged, then
-// keeps that offset while tracking the target each frame. Stops if the target dies/despawns.
+// Follow the selected entity (toggle with F): keep a fixed offset and track it. Stops if the target dies.
 fn follow_camera(
     keys: Res<ButtonInput<KeyCode>>,
     mut selected: ResMut<Selected>,
     targets: Query<&GlobalTransform>,
-    mut cam: Query<&mut Transform, With<FlyCam>>,
+    mut cam: Query<&mut Transform, With<OrbitCam>>,
 ) {
     let Ok(mut cam_tf) = cam.single_mut() else { return };
     if keys.just_pressed(KeyCode::KeyF) {
@@ -125,9 +104,9 @@ fn follow_camera(
             selected.follow = !selected.follow;
             if selected.follow {
                 if let Ok(t) = targets.get(e) {
-                    let off = cam_tf.translation - t.translation();
-                    // avoid a degenerate zero offset (camera sitting on the target)
-                    selected.follow_offset = if off.length() < 1.0 { Vec3::new(0.0, 6.0, 12.0) } else { off };
+                    // sit a little above + outside the target along its radial (a third-person planet view)
+                    let n = t.translation().normalize_or_zero();
+                    selected.follow_offset = n * 14.0 + Vec3::Y * 4.0;
                 }
             }
         }
