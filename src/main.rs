@@ -82,6 +82,9 @@ fn main() {
     let cap_off = args.iter().find_map(|a| a.strip_prefix("--cap-off=").and_then(|s| s.parse::<i64>().ok())).unwrap_or(0);
     let cap_pitch = args.iter().find_map(|a| a.strip_prefix("--cap-pitch=").and_then(|s| s.parse::<f32>().ok())).unwrap_or(-0.35);
     let cap_orbit = args.iter().any(|a| a == "--cap-orbit");
+    let cap_dist = args.iter().find_map(|a| a.strip_prefix("--cap-dist=").and_then(|s| s.parse::<f32>().ok())).unwrap_or(140.0);
+    // --cap-water: stand the capture camera submerged in a deep ocean (verify swim view + underwater tint).
+    let cap_water = args.iter().any(|a| a == "--cap-water");
     if diverse && load.is_none() && std::path::Path::new(DEFAULT_SEED).exists() {
         load = Some(DEFAULT_SEED.to_string());
     }
@@ -137,7 +140,7 @@ fn main() {
                 (sim::weather_step, sim::fire_step, sim::live_step, sim::predation_step, sim::plant_step, sim::rot_step, sim::generation_step).chain(),
             );
         if let Some(prefix) = capture {
-            app.insert_resource(capture::CaptureCfg { prefix, when: cap_when, yaw: cap_yaw, off: cap_off, pitch: cap_pitch, orbit: cap_orbit })
+            app.insert_resource(capture::CaptureCfg { prefix, when: cap_when, yaw: cap_yaw, off: cap_off, pitch: cap_pitch, orbit: cap_orbit, dist: cap_dist, underwater: cap_water })
                 .add_plugins(capture::CapturePlugin);
         }
     }
@@ -153,8 +156,9 @@ fn setup_scene(
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     // planet: elevation-displaced, biome-vertex-colored globe. White base_color lets vertex colors show.
-    // NotShadowCaster: the big smooth globe must not cast (in walk mode it would self-shadow); it still
-    // RECEIVES, so trees/creatures drop real shadows on the land.
+    // NotShadowCaster: the big smooth globe must NOT cast. A directional shadow map fit around a planet-
+    // scale caster collapses depth precision -> ground shadows vanish (and the smooth sphere self-shadows
+    // into a blackout). It still RECEIVES, so trees/creatures drop crisp real shadows on the land in walk.
     commands.spawn((
         Mesh3d(meshes.add(terrain::build_globe(160))),
         MeshMaterial3d(materials.add(StandardMaterial {
@@ -163,30 +167,48 @@ fn setup_scene(
             ..default()
         })),
         Transform::IDENTITY,
-        // globe CASTS shadows: terrain hills shadow the land in walk mode, and the planet self-shadows its
-        // own night side (so the sun does not light night-side creatures "through" the planet).
+        viz::Planet, // mode-toggled shadow caster: casts in orbit (night-side shadow), not in walk (acne)
     ));
-    // ocean shell: a translucent blue sphere at sea level (land pokes above it, basins flood below)
+    // ocean shell: a translucent blue sphere at sea level (land pokes above it, basins flood below). Glossy
+    // (low roughness + high reflectance) so the sun glints off it; viz::animate_ocean breathes a slow swell.
     let sea_r = sphere::PLANET_R + sphere::SEA_LEVEL * sphere::ELEV_MAX;
     commands.spawn((
         Mesh3d(meshes.add(Sphere::new(sea_r).mesh().ico(6).unwrap())),
         MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgba(0.10, 0.32, 0.52, 0.55),
+            base_color: Color::srgba(0.07, 0.26, 0.44, 0.62),
             alpha_mode: AlphaMode::Blend,
-            perceptual_roughness: 0.1,
+            perceptual_roughness: 0.04, // glossy -> sharp sun specular glint
+            reflectance: 0.6,
             ..default()
         })),
         Transform::IDENTITY,
         bevy::light::NotShadowCaster,
+        viz::Ocean,
     ));
     // sun (directional light; direction set per-frame by day_night_lighting) + soft ambient so the night
     // side is not pitch black. shadows_enabled is toggled by camera::update_shadow_mode: OFF in orbit (the
     // shadow-range boundary showed as an "eclipse" disc when zoomed), ON in walk mode (eye-level horizon is
-    // close so the range covers the whole view -> real shadows, no disc). Cascade tuned tight for ground
-    // scale (creatures ~0.5, trees ~3 units); globe+ocean are NotShadowCaster so only trees/creatures cast.
+    // close so the range covers the whole view -> real shadows, no disc). Cascade tuned TIGHT for ground
+    // scale (creatures ~0.5, trees ~3 units): the default config spreads its shadow map over a ~1000-unit
+    // frustum, so at ground level the depth precision collapses and tree/creature shadows vanish. Pack 4
+    // cascades within 130 units (first 12) so close-up shadows stay crisp; globe+ocean are NotShadowCaster
+    // so only trees/creatures cast. shadow_normal_bias trims acne on the curved terrain receiver.
     commands.spawn((
-        DirectionalLight { shadows_enabled: true, illuminance: 100_000.0, ..default() }, // full daylight (was overcast-dim)
-        bevy::light::CascadeShadowConfigBuilder::default().build(),
+        DirectionalLight {
+            shadows_enabled: true,
+            illuminance: 100_000.0, // full daylight (was overcast-dim)
+            shadow_depth_bias: 0.04,
+            shadow_normal_bias: 1.8,
+            ..default()
+        },
+        bevy::light::CascadeShadowConfigBuilder {
+            num_cascades: 4,
+            minimum_distance: 0.3,
+            maximum_distance: 130.0,
+            first_cascade_far_bound: 12.0,
+            overlap_proportion: 0.2,
+        }
+        .build(),
         Transform::from_xyz(1.0, 0.5, 0.0).looking_at(Vec3::ZERO, Vec3::Y),
         // keep the light ViewVisible so its shadow cascades keep building even as day_night rotates it
         bevy::camera::visibility::NoFrustumCulling,
@@ -201,6 +223,7 @@ fn setup_scene(
             ..default()
         })),
         Transform::from_translation(sphere::moon_pos(0)),
+        bevy::light::NotShadowCaster, // celestial body: must not cast (it sits in the light path)
         viz::Moon,
     ));
     // visible sun disc: a bright emissive sphere far out along the sun direction (moved each frame). Sized
@@ -214,6 +237,10 @@ fn setup_scene(
             ..default()
         })),
         Transform::from_translation(sphere::sun_dir(0) * sphere::SUN_DIST),
+        // CRITICAL: the sun disc sits far out ALONG the sun direction = directly between the directional
+        // light and the planet. If it casts, its huge shadow blankets the whole lit hemisphere -> total
+        // walk-mode blackout (no light = no drop shadows). NotShadowCaster is what makes ground shadows work.
+        bevy::light::NotShadowCaster,
         viz::SunDisc,
     ));
     // starfield: evenly-spread points on a far shell (deterministic Fibonacci sphere), shared emissive mesh.
@@ -235,6 +262,7 @@ fn setup_scene(
             Mesh3d(star_mesh.clone()),
             MeshMaterial3d(star_mat.clone()),
             Transform::from_translation(dir * 7000.0),
+            bevy::light::NotShadowCaster, // background stars never cast
         ));
     }
 }

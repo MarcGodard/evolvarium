@@ -2,7 +2,7 @@
 // They grow mass (autotroph), reproduce by dispersing mutated offspring, evolve, and die when eaten.
 // Selection is implicit: a plant that reproduces before being eaten passes on its genes.
 // Arms race: plant `defense` vs creature `bite` decides whether a contact actually consumes it.
-use crate::genome::NFOOD;
+use crate::genome::{NFOOD, NUTRIENTS};
 use crate::rng::Rng;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -30,6 +30,16 @@ pub struct PlantGenome {
                        // (no mass damage); costs growth. Trade-off vs growing tall + bare.
     pub spread: f32,   // offspring dispersal distance
     pub maturity: f32, // mass needed before it can reproduce
+    #[serde(default = "default_nutrients")]
+    pub nutrients: [f32; NUTRIENTS], // genetic baseline production per nutrient (sparse: a plant is rich in a few).
+                                     // Effective output at eat-time = this x soil fertility (richer ground -> more).
+    #[serde(default)]
+    pub toxicity: f32, // 0..1 genetic toxin load: deters eaters (energy hit + growth-load) but costs growth.
+}
+
+// serde default for nutrients on old saves: a flat mid spread (a generic plant feeds every nutrient a little).
+fn default_nutrients() -> [f32; NUTRIENTS] {
+    [0.3; NUTRIENTS]
 }
 
 // serde default for light_pref on old saves: mid-light
@@ -46,6 +56,12 @@ pub struct PlantState {
 
 impl PlantGenome {
     pub fn random(rng: &mut Rng, ntypes: u8) -> Self {
+        // nutrient profile: sparse -> each plant species is rich in a few nutrients, scarce in others, so
+        // no single food is nutritionally complete -> eaters must vary their diet (drives the food web).
+        let mut nutrients = [0.0f32; NUTRIENTS];
+        for n in nutrients.iter_mut() {
+            *n = if rng.f32() < 0.35 { rng.range(0.4, 1.0) } else { rng.f32() * 0.2 };
+        }
         PlantGenome {
             kind: ((rng.f32() * ntypes as f32) as u8).min(ntypes.saturating_sub(1)),
             nutrient: rng.f32(),
@@ -58,6 +74,8 @@ impl PlantGenome {
             branches: rng.f32() * 0.1, // ground plants barely branch; trees set this high (tree_genome)
             spread: rng.range(2.0, 8.0),
             maturity: rng.range(2.0, 6.0),
+            nutrients,
+            toxicity: rng.f32() * 0.3, // most plants mildly toxic; evolves up as a defense (costs growth)
         }
     }
 
@@ -72,6 +90,10 @@ impl PlantGenome {
         self.branches = (self.branches + rng.normal() * 0.12).clamp(0.0, 1.0);
         self.spread = (self.spread + rng.normal() * 1.5).clamp(3.0, 16.0); // bigger dispersal range
         self.maturity = (self.maturity + rng.normal() * 1.5).clamp(8.0, 26.0); // trees stay large
+        for n in &mut self.nutrients {
+            *n = (*n + rng.normal() * 0.1).clamp(0.0, 1.0);
+        }
+        self.toxicity = (self.toxicity + rng.normal() * 0.08).clamp(0.0, 1.0);
     }
 
     pub fn mutate(&mut self, rng: &mut Rng) {
@@ -89,6 +111,10 @@ impl PlantGenome {
         self.branches = (self.branches + rng.normal() * 0.1).clamp(0.0, 1.0);
         self.spread = (self.spread + rng.normal() * 1.0).clamp(1.0, 12.0);
         self.maturity = (self.maturity + rng.normal() * 0.8).clamp(1.5, 10.0);
+        for n in &mut self.nutrients {
+            *n = (*n + rng.normal() * 0.1).clamp(0.0, 1.0);
+        }
+        self.toxicity = (self.toxicity + rng.normal() * 0.08).clamp(0.0, 1.0);
     }
 
     // Investing in nutrient richness, defense, and digestible quality slows growth (no free lunch, 10).
@@ -96,6 +122,9 @@ impl PlantGenome {
     // plants can't armor up to ~1.0 for free (balance lever, iter 1). Quality (palatable soft tissue)
     // costs growth too; its payoff is dispersal-on-eat (13), so quality reaches an interior optimum.
     pub fn growth_rate(&self) -> f32 {
+        // producing nutrients + toxins costs growth (no free lunch). Mean nutrient richness taxes growth;
+        // toxicity is QUADRATIC (cheap when light, dear when maxed) so chemical defense can't peg for free.
+        let mean_nutri = self.nutrients.iter().sum::<f32>() / NUTRIENTS as f32;
         GROWTH_BASE
             * (1.0_f32
                 - 0.3 * self.nutrient
@@ -103,7 +132,9 @@ impl PlantGenome {
                 - 0.2 * self.quality
                 - 0.25 * self.height
                 - 0.15 * self.regrow
-                - 0.2 * self.branches)
+                - 0.2 * self.branches
+                - 0.18 * mean_nutri
+                - 0.3 * self.toxicity * self.toxicity)
                 .clamp(0.12, 1.0)
     }
 }
@@ -117,7 +148,7 @@ pub fn plant_color(g: &PlantGenome) -> Color {
         2 => 45.0,
         _ => 190.0,
     };
-    let hue = base_hue - 40.0 * g.defense; // tougher plants shift toward warmer/red
+    let hue = base_hue - 40.0 * g.defense + 60.0 * g.toxicity; // tough -> warmer/red; toxic -> shifts purple (warning)
     let light = 0.35 + 0.35 * g.nutrient; // richer plants brighter
     let sat = 0.35 + 0.55 * g.quality; // tastier (digestible) plants more vivid; tough/fibrous = washed out
     Color::hsl(hue, sat, light)

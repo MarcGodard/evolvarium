@@ -44,6 +44,19 @@ pub const CREATURE_MIN: usize = 12; // reseed floor (safety net): below this, su
 pub const WARMUP_GENS: u32 = 12; // generational warm-up before continuous birth/death kicks in
 pub const CONT_LOG_TICKS: u32 = 600; // continuous-mode stats log interval (fine enough to watch a crash unfold)
 
+// --- three energy stores (metabolic currencies, see components::Energy) ---
+// fast: tiny cap, burned first, LEAKS even at rest -> can't bank (volatile quick power, "fermented fruit").
+// sugar: medium cap (the staple plants give). fat: big cap (easy store) but slow to mobilize + costs upkeep.
+pub const FAST_CAP: f32 = 8.0;     // fast-store ceiling (small: can't hoard volatile energy)
+pub const SUGAR_CAP: f32 = 28.0;   // sugar-store ceiling
+pub const FAT_CAP: f32 = 30.0;     // base fat-store ceiling (x adiposity gene x size, see fat_cap())
+pub const FAST_LEAK: f32 = 0.4;    // fast energy/sec lost passively even at rest (use-it-or-lose-it)
+pub const FAT_POWER: f32 = 0.12;   // fraction of stored fat counted as instantly-available power (slow burn)
+pub const STORE_LOSS: f32 = 0.5;   // sugar->fat conversion efficiency on overflow (storing is lossy)
+pub const FAT_UPKEEP: f32 = 0.7;   // energy/sec extra basal at a full fat store x adiposity (carrying fat costs)
+pub const MOVE_POWER_REF: f32 = 8.0; // power() at/above which full thrust is available; below -> sluggish
+pub const ADIPOSITY_CAP: f32 = 1.2; // fat_cap multiplier span: cap = FAT_CAP*(0.4 + this*adiposity)*size
+
 // --- creature metabolism + movement ---
 pub const START_ENERGY: f32 = 30.0;
 pub const BASAL_COST: f32 = 0.5; // energy/sec just to live (low so a fed creature can coast/rest and a competent forager is net-positive -> continuous persistence; bad foragers still starve = selection)
@@ -64,12 +77,11 @@ pub const ALPINE_FLAT_COST: f32 = 1.2;  // energy/sec penalty at full alpine on 
 pub const SENSE_COST: f32 = 0.012; // energy/sec per unit of total sensor range (long-range vision isn't free)
 pub const BRAIN_COST: f32 = 0.05; // energy/sec per hidden neuron: a bigger brain (more nodes) costs upkeep, so the NN grows only when the extra compute pays off -> brain size evolves to an interior optimum
 pub const EAT_RADIUS: f32 = 1.1;
-pub const ENERGY_MAX: f32 = 60.0; // energy ceiling; eating past it harms (overeating trade-off, see 12)
 pub const OVEREAT_G: f32 = 0.2; // growth-load gained per unit of energy eaten while already full
 pub const HEIGHT_COST: f32 = 0.7; // energy/sec upkeep per unit height (tall reaches trees but costs more)
 // Body size (mass): a bigger creature stores more energy + hits harder in combat, but costs more to run
 // and to maintain. Small = nimble + cheap; large = a tank. A physical axis the visualizer shows as scale.
-pub const SIZE_ENERGY: f32 = 1.0;  // energy-store ceiling scales: ENERGY_MAX * (1 + this*size)
+pub const SIZE_ENERGY: f32 = 1.0;  // fat-store ceiling scales: fat_cap *= (1 + this*size) (bigger body banks more)
 pub const SIZE_COMBAT: f32 = 0.5;  // added to bite as effective combat power in predation (mass wins fights)
 pub const SIZE_BASAL: f32 = 1.6;   // energy/sec extra basal upkeep at full size (big bodies cost to maintain)
 pub const SIZE_MOVE: f32 = 1.2;    // movement cost multiplier scales by (1 + this*size) (more mass to push)
@@ -129,6 +141,19 @@ pub const TREE_MASS_NUTRI: f32 = 0.5; // at full maturity a tree's fruit is (1-t
 pub const P_TREE_EAT_DISPERSE: f32 = 0.03; // per-grazed-tick chance an eaten fruit tree disperses a seed (animal-carried)
 pub const TREE_EAT_SPREAD_MULT: f32 = 2.5; // animal-carried seeds travel this much farther than wind-fall
 
+// --- fruit + fermentation (Phase B): the forageable source of FAST energy ---
+// Fruit trees drop fruit; fallen fruit + dead-plant detritus ferment over their Rot clock. Eating in
+// the fermentation window (FERMENT_START..FERMENT_END as a fraction of ROT_GONE) yields FAST energy
+// (ethanol). Before it: fresh -> sugar. After it: spoiled (toxic, near-zero yield), then rot_step gone.
+pub const P_FRUIT_DROP: f32 = 0.012;        // per-tick chance a mature fruit tree drops a fruit
+pub const FALLEN_FRUIT_MASS: f32 = 0.8;     // mass of a dropped fruit (a bite-sized ground food)
+pub const FERMENT_START: f32 = 0.25;        // rot fraction where fermentation begins (before: fresh sugar)
+pub const FERMENT_END: f32 = 0.70;          // rot fraction where it spoils (after: toxic, near-zero yield)
+pub const FRUIT_FAST_GAIN: f32 = 22.0;      // fast energy per (mass*nutrient) from fermented fruit
+pub const DETRITUS_FAST_GAIN: f32 = 5.0;    // fast energy from fermented detritus (<< fruit: poor, scrappy)
+pub const FERMENT_TOX_FRUIT: f32 = 0.15;    // toxicity scale of fermented fruit (low: ripe ethanol)
+pub const FERMENT_TOX_DETRITUS: f32 = 0.85; // toxicity scale of fermented detritus (high: rotten sludge)
+
 // --- rot chain (P3): dead creature -> carrion -> poison -> gone ---
 pub const CARRION_KIND: u8 = 0; // meat = food type 0 (couples to diet expr only via sensing, not digestion)
 pub const CARRION_MASS: f32 = 3.0; // a meaty chunk: worth scavenging while fresh
@@ -182,16 +207,24 @@ pub const FERT_GROWTH: f32 = 0.6; // max growth-rate bonus from saturated soil
 pub const FERT_CAP: f32 = 1.5; // fertility level at which the growth bonus saturates
 pub const PLANT_REPRO_FRAC: f32 = 0.5; // fraction of mass kept after budding off a child
 
-// --- diet/epigenetic model (--diet, see 12) ---
-pub const EXPR_RAMP: f32 = 0.08; // how fast expression of the eaten type rises (x (1-rigidity))
-pub const EXPR_DECAY: f32 = 0.04; // how fast unused types' expression falls (x (1-rigidity))
-pub const EXPR_OVERHEAD: f32 = 0.4; // maintenance energy/sec per unit total expression (generalist cost). Lowered: at 1.2 a generalist (4 types expressed) paid ~4.8/sec -> net-negative -> whole-cohort death every ~1300 ticks (masked by generational revival, fatal in continuous). Still a real specialist-vs-generalist trade-off, not lethal.
-// Diet penalties softened for continuous viability (were a death sentence masked by generational
-// revival): still penalize eating the wrong food, but survivably -> a fitness gradient, not mass death.
-pub const G_GAIN: f32 = 0.3; // growth-load gained per low-efficiency (mismatch) eat
-pub const G_DECAY: f32 = 0.015; // growth-load shed per tick when on-diet (faster recovery)
+// --- nutrients + regulatory diet genome (Phase C, see 14/05) ---
+// 10 nutrients. Plants produce a sparse profile (x soil fertility); meat is balanced. Creatures absorb
+// per their uptake genes into reserves, which deplete with use. The master expression gene (reserves vs
+// uptake demand) gates energy extraction; an unmet demanded nutrient = deficiency -> growth-load (soft).
+pub const RESERVE_REQ: f32 = 0.6;       // reserve level at which a nutrient's demand is fully satisfied
+pub const RESERVE_CAP: f32 = 1.5;       // max stored per nutrient (bank a little, not unlimited)
+pub const MASTER_FLOOR: f32 = 0.45;     // floor on master expression: digestion never below this (soft gradient, not lethal)
+pub const NUTRIENT_USE: f32 = 0.02;     // per-sec reserve depletion per unit uptake (slow: reserves are a buffer, not a fuse)
+pub const NUTRIENT_ABSORB: f32 = 1.0;   // fraction of delivered nutrient (x uptake) that enters reserves on eat
+pub const UPTAKE_OVERHEAD: f32 = 0.08;  // energy/sec upkeep per unit total uptake (gentle generalist tax; was lethal at 0.45)
+pub const DEFICIT_G: f32 = 0.15;        // growth-load/sec per unit of average demanded-nutrient deficiency (soft)
+pub const SOIL_NUTRI: f32 = 0.8;        // soil fertility boost to plant nutrient output: x(1 - this + this*fert/FERT_CAP)
+pub const PLANT_TOX_HIT: f32 = 2.0;     // energy hit per unit plant toxicity eaten (x bite mass fraction)
+pub const MEAT_RESERVE: f32 = 0.5;      // flat reserve top-up (all nutrients) from eating meat (balanced tissue)
+
+// --- diet model (--diet): growth-load disease + aging (nutrient mechanics live in the Phase C block above) ---
+pub const G_DECAY: f32 = 0.015; // growth-load shed per tick (recovery when well-nourished)
 pub const DISEASE_K: f32 = 0.004; // per-tick disease mortality per unit growth-load
-pub const MISMATCH_STRESS: f32 = 1.0; // energy hit for eating a poorly-expressed (wrong) food
 pub const AGE_HAZARD: f32 = 0.02; // late-life mortality ceiling (decelerates -> ~plateau)
 pub const AGE_SCALE: f32 = 2400.0; // ticks; age at which aging hazard reaches half its ceiling (longer lifespans)
 // Longevity gene: effective lifespan = AGE_SCALE * (0.4 + 1.2*longevity) (so longevity 0.5 = baseline x1.0).

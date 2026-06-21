@@ -3,8 +3,8 @@
 use bevy::prelude::*;
 use std::collections::{HashMap, HashSet};
 
-use crate::components::{Alive, Brain, Creature, DietState, Energy, Fitness, Food, Heading, Locomotion, Rot, Tree};
-use crate::genome::{forward, learn, Genome, CONE_HALF, GLOBAL_INPUTS, NFOOD, SIG_PER_SENSOR};
+use crate::components::{Alive, Brain, Creature, DietState, Energy, Ferment, Fitness, Food, Heading, Locomotion, Rot, Tree};
+use crate::genome::{forward, learn, master_expression, Genome, CONE_HALF, GLOBAL_INPUTS, NFOOD, NUTRIENTS, SIG_PER_SENSOR};
 use crate::plant::{PlantGenome, PlantState, P_REPRO, PLANT_CAP, PLANT_MIN};
 use crate::rng::Rng;
 
@@ -203,21 +203,25 @@ pub fn fire_step(
     let _ = gen;
     let dt = DT;
     let n = SOIL_RES;
-    // lightning: during a storm, occasionally strike -> seek out DRY fuel (sample a few cells, ignite the
-    // driest). At storm onset the ground is still dry before rain soaks in; rocky highland stays dry too.
+    // Min flammable vegetation for a cell to ignite/carry fire. Oceans, bare rock + barren desert have ~0
+    // fuel, so they never burn and act as natural firebreaks (a strike there fizzles; fire can't cross them).
+    const FUEL_MIN: f32 = 0.30;
+    // lightning: during a storm, occasionally strike VEGETATED, currently-dry ground (storms hit land; wet
+    // ground, water, rock + desert won't catch). Sample a few cells, strike the one with the most dry fuel.
     if weather.rain > LIGHTNING_RAIN && rng.f32() < P_LIGHTNING {
-        let mut best = 0usize;
-        let mut driest = f32::INFINITY;
+        let mut best: Option<usize> = None;
+        let mut best_fuel = FUEL_MIN;
         for _ in 0..12 {
             let c = (rng.f32() * (n * n) as f32) as usize % (n * n);
-            let w = gw.get(cell_center(c));
-            if w < driest {
-                driest = w;
-                best = c;
+            let pos = cell_center(c);
+            let fuel = crate::sphere::fuel(pos.normalize_or_zero());
+            if fuel > best_fuel && gw.get(pos) < FIRE_WET_MAX {
+                best_fuel = fuel;
+                best = Some(c);
             }
         }
-        if driest < FIRE_WET_MAX {
-            fire.cell[best] = 1.0; // struck dry fuel -> it catches
+        if let Some(c) = best {
+            fire.cell[c] = 1.0; // struck dry vegetated fuel -> it catches
         }
     }
     if fire.cell.iter().all(|&f| f <= 0.02) {
@@ -243,7 +247,9 @@ pub fn fire_step(
         if czi > 0 { nbrs[k] = (czi - 1) * n + cxi; k += 1; }
         if czi < n - 1 { nbrs[k] = (czi + 1) * n + cxi; k += 1; }
         for &ni in &nbrs[..k] {
-            if gw.get(cell_center(ni)) < FIRE_WET_MAX {
+            let npos = cell_center(ni);
+            // spread only into flammable, dry-enough land; water/rock/desert/wet ground are firebreaks
+            if crate::sphere::fuel(npos.normalize_or_zero()) > FUEL_MIN && gw.get(npos) < FIRE_WET_MAX {
                 fire.cell[ni] = (fire.cell[ni] + FIRE_SPREAD * f * dt).min(1.0);
             }
         }
@@ -373,8 +379,19 @@ fn diverse_creature(mut g: Genome, i: usize, rng: &mut Rng) -> (Genome, Vec3) {
     }
 }
 
-fn diet_state(g: &Genome) -> DietState {
-    DietState { expr: g.expr0, g: 0.0, age: 0, fatigue: 0.0 }
+fn diet_state(_g: &Genome) -> DietState {
+    // newborns start with reserves stocked to the satisfaction level, so they aren't instantly deficient
+    DietState { reserves: [RESERVE_REQ; NUTRIENTS], g: 0.0, age: 0, fatigue: 0.0 }
+}
+
+// Eating plant matter: absorb each nutrient into reserves (delivered = plant baseline x soil fertility,
+// gated by this creature's uptake gene for that nutrient), capped. Returns the toxin to burn (plant
+// toxicity x amount eaten). Reserves later gate the master expression gene + drive deficiency (live_step).
+fn absorb_and_toxin(reserves: &mut [f32; NUTRIENTS], uptake: &[f32; NUTRIENTS], pg: &PlantGenome, soil_f: f32, amount: f32) -> f32 {
+    for i in 0..NUTRIENTS {
+        reserves[i] = (reserves[i] + pg.nutrients[i] * soil_f * uptake[i] * NUTRIENT_ABSORB).min(RESERVE_CAP);
+    }
+    pg.toxicity * PLANT_TOX_HIT * amount
 }
 
 // Spawn carrion (meat) at a spot: a Food entity with the Rot clock. Used by death + predation kills.
@@ -395,6 +412,8 @@ fn spawn_carrion(commands: &mut Commands, pos: Vec3, mass: f32) {
             branches: 0.0,   // unused for carrion
             spread: 0.0,
             maturity: 999.0, // never reproduces via plant_step (also excluded by Without<Rot>)
+            nutrients: [0.0; NUTRIENTS], // unused: meat tops reserves flat (balanced tissue), separate eat branch
+            toxicity: 0.0,
         },
         Rot { age: 0 },
         Transform::from_translation(p),
@@ -412,7 +431,7 @@ fn spawn_creature(commands: &mut Commands, g: Genome, pos: Vec3, rng: &mut Rng, 
         g,
         brain,
         diet,
-        Energy(birth_energy),
+        Energy::from_total(birth_energy),
         Fitness(0.0),
         Heading(h),
         Alive(true),
@@ -515,6 +534,9 @@ fn tree_genome(rng: &mut Rng) -> PlantGenome {
         branches: rng.range(0.0, 0.6),
         spread: rng.range(5.0, 9.0),
         maturity: TREE_MATURITY,
+        // fruit trees are nutrient-rich (fruit is good food): a broad, generous profile + low toxicity
+        nutrients: [0.55; NUTRIENTS],
+        toxicity: rng.f32() * 0.15,
     }
 }
 
@@ -570,7 +592,7 @@ pub fn spawn_world_headless(mut commands: Commands, mut rng: ResMut<Rng>, mut ge
             g,
             brain,
             diet,
-            Energy(e),
+            Energy::from_total(e),
             Fitness(0.0),
             Heading(h),
             Alive(true),
@@ -665,7 +687,7 @@ pub fn spawn_world_render(
             g,
             brain,
             diet,
-            Energy(e),
+            Energy::from_total(e),
             Fitness(0.0),
             Heading(h),
             Alive(true),
@@ -715,6 +737,7 @@ pub fn plant_step(
     let mut births: Vec<(PlantGenome, Vec3)> = Vec::new();
     let mut tree_births: Vec<(Vec3, bool, PlantGenome)> = Vec::new(); // (pos, edible, child genome)
     let mut detritus: Vec<(PlantGenome, f32, Vec3)> = Vec::new(); // moisture-killed plants -> poison
+    let mut fruit_drops: Vec<(PlantGenome, Vec3)> = Vec::new(); // mature fruit trees -> fallen fruit (fast energy)
     for (e, mut st, g, tf, tree) in &mut q {
         let ppos = tf.translation;
         let pdir = ppos.normalize_or_zero();
@@ -763,6 +786,12 @@ pub fn plant_step(
             let local = tree_positions.iter().filter(|p| p.distance_squared(tf.translation) < r2).count();
             let fert_boost = 0.4 + 1.6 * (fert / FERT_CAP).min(1.0); // richer ground -> more new trees
             let mature = st.mass >= g.maturity;
+            // mature fruit trees drop fruit nearby (the forageable fast-energy source). Drop rate scales
+            // with the tree's nutrient richness -> a richer tree fruits more (its growth already paid for it).
+            if mature && tree.edible && rng.f32() < P_FRUIT_DROP * (0.5 + g.nutrient) {
+                let fpos = disperse_pos(&mut rng, ppos, 3.0, FOOD_Y); // falls within the crown's footprint
+                fruit_drops.push((g.clone(), fpos));
+            }
             let ambient = mature && local <= TREE_MAX_LOCAL && rng.f32() < P_TREE_REPRO * fert_boost;
             let disperse = mature && tree.edible && grazed && rng.f32() < P_TREE_EAT_DISPERSE; // seed carried off
             if (ambient || disperse) && tree_count + tree_births.len() < TREE_CAP {
@@ -824,13 +853,27 @@ pub fn plant_step(
             st.mass *= PLANT_REPRO_FRAC;
         }
     }
-    // dead plants -> poison detritus (completes the rot chain, P3): poor food that turns toxic, then gone
+    // dead plants -> detritus that FERMENTS (completes the rot chain, P3): poor food, fermenting to a
+    // little toxic FAST energy, then gone. Ferment marker routes it to the plant-matter eat branch.
     for (g, mass, pos) in detritus {
         commands.spawn((
             Food,
             PlantState { mass: mass.min(CARRION_MASS), age: 0 },
             PlantGenome { nutrient: DETRITUS_NUTRIENT, defense: 0.0, quality: 0.0, ..g },
             Rot { age: 0 },
+            Ferment { toxic: FERMENT_TOX_DETRITUS },
+            Transform::from_translation(pos),
+        ));
+    }
+    // fruit drops: a mature fruit tree drops a fruit nearby. Fallen fruit is a Food carrying the tree's
+    // genome (rich + sugary) + a Rot clock + Ferment -> fresh = sugar, ferments to FAST energy, then gone.
+    for (g, pos) in fruit_drops {
+        commands.spawn((
+            Food,
+            PlantState { mass: FALLEN_FRUIT_MASS, age: 0 },
+            PlantGenome { defense: 0.0, height: 0.0, ..g }, // on the ground: no reach/defense, keeps nutrient/quality
+            Rot { age: 0 },
+            Ferment { toxic: FERMENT_TOX_FRUIT },
             Transform::from_translation(pos),
         ));
     }
@@ -861,7 +904,7 @@ pub fn predation_step(
     let snap: Vec<(Entity, Vec3, f32, f32, [f32; 8])> = cq
         .iter()
         .filter(|(_, _, _, _, a, _)| a.0)
-        .map(|(e, t, en, _, _, g)| (e, t.translation, g.bite + SIZE_COMBAT * g.size, en.0, signature(g)))
+        .map(|(e, t, en, _, _, g)| (e, t.translation, g.bite + SIZE_COMBAT * g.size, en.total(), signature(g)))
         .collect();
     if snap.len() < 2 {
         return;
@@ -913,7 +956,7 @@ pub fn predation_step(
     let continuous_live = gen.continuous && gen.generation >= WARMUP_GENS;
     for (e, t, mut energy, mut fit, mut alive, gen_e) in &mut cq {
         if let Some(g) = gains.get(&e) {
-            energy.0 = (energy.0 + g).min(energy_max(gen_e));
+            energy.add_fat(*g, fat_cap(gen_e)); // a kill = meat -> fat store
             fit.0 += g * 0.3; // predation counts toward selection
         }
         if killed.contains(&e) {
@@ -956,7 +999,7 @@ pub fn live_step(
     mut tree_bites: ResMut<TreeBites>,
     mut soil: ResMut<Soil>,
     fire: Res<Fire>,
-    fq: Query<(Entity, &Transform, &PlantState, &PlantGenome, Option<&Rot>, Option<&Tree>), (With<Food>, Without<Creature>)>,
+    fq: Query<(Entity, &Transform, &PlantState, &PlantGenome, Option<&Rot>, Option<&Tree>, Option<&Ferment>), (With<Food>, Without<Creature>)>,
 ) {
     let dt = DT;
     let ntypes = gen.ntypes();
@@ -964,12 +1007,13 @@ pub fn live_step(
     // continuous birth/death is active only AFTER the generational warm-up (see WARMUP_GENS)
     let live_continuous = gen.continuous && gen.generation >= WARMUP_GENS;
     // (daylight is now POSITIONAL: computed per-creature from its location, see `light` inside the loop)
-    // snapshot: (entity, pos, genome, mass, rot_age, tree). rot_age=Some -> carrion; tree=Some(edible) ->
-    // a tree (edible fruit tree if true, uneatable evergreen if false); else a living plant.
-    let foods: Vec<(Entity, Vec3, PlantGenome, f32, Option<u32>, Option<bool>)> = fq
+    // snapshot: (entity, pos, genome, mass, rot_age, tree, ferment_toxic). rot_age=Some + ferment=None ->
+    // animal carrion (meat); rot_age=Some + ferment=Some -> fermenting plant matter (fruit/detritus);
+    // tree=Some(edible) -> a tree; else a living plant.
+    let foods: Vec<(Entity, Vec3, PlantGenome, f32, Option<u32>, Option<bool>, Option<f32>)> = fq
         .iter()
-        .map(|(e, t, st, pg, rot, tree)| {
-            (e, t.translation, pg.clone(), st.mass, rot.map(|r| r.age), tree.map(|t| t.edible))
+        .map(|(e, t, st, pg, rot, tree, ferment)| {
+            (e, t.translation, pg.clone(), st.mass, rot.map(|r| r.age), tree.map(|t| t.edible), ferment.map(|f| f.toxic))
         })
         .collect();
     let mut eaten: HashSet<Entity> = HashSet::new();
@@ -1005,6 +1049,7 @@ pub fn live_step(
             sample_genome = Some(genome.clone());
         }
         let pos = ct.translation;
+        let fat_max = fat_cap(genome); // adiposity + size set this creature's fat-store ceiling
 
         // SINGLE grid-bounded pass over nearby foods (perf): scan only the food-grid cells within the
         // query radius (>= max sensor range, so every sensable food is covered; >= NEAR_QUERY so the
@@ -1065,25 +1110,26 @@ pub fn live_step(
         for si in 0..n_s {
             if sd[si].is_finite() {
                 input.push(1.0 / (1.0 + sd[si])); // inv-distance in this sensor's cone
-                let sig = if gen.diet {
-                    diet.expr[skind[si] as usize] // readiness to digest what this eye sees
-                } else {
-                    (skind[si] as f32 / (ntypes.max(2) - 1) as f32) * 2.0 - 1.0 // food type
-                };
-                input.push(sig);
+                // food TYPE (family) the eye sees, normalized -1..1. Digestibility now depends on the food's
+                // nutrient profile vs the gut's uptake genes (not on kind), so the eye reports identity; the
+                // brain + lifetime learning associate types with good/bad outcomes.
+                input.push((skind[si] as f32 / (ntypes.max(2) - 1) as f32) * 2.0 - 1.0);
             } else {
                 input.push(0.0);
                 input.push(0.0);
             }
         }
-        input.push(energy.0 / START_ENERGY);
+        input.push(energy.total() / START_ENERGY);
         input.push(light * 2.0 - 1.0); // daylight signal (-1 night .. +1 noon): brain can time rest by it
         input.push(diet.fatigue * 2.0 - 1.0); // exertion debt: lets the brain "feel tired" and choose to rest
         input.push(1.0); // bias
 
         // think (per-life learned brain, dynamic topology matching this genome's sensor count)
         let (h, out) = forward(&brain.net, &input);
-        let thrust = out[0];
+        // power clamp: thrust limited by instantly-available power (fat mobilizes slow) -> a fat-only or
+        // near-starved creature can't sprint. This is the "slow burning" teeth of the fat store.
+        let power_frac = (energy.power() / MOVE_POWER_REF).clamp(0.0, 1.0);
+        let thrust = out[0] * power_frac;
         let turn = out[1];
         // fatigue saps usable output (tired = sluggish); intended effort still costs full MOVE_COST below,
         // so flailing while exhausted is a net loss -> resting to recover is the only way out.
@@ -1105,7 +1151,12 @@ pub fn live_step(
         // pay for elevation change (P3): uphill costs, downhill partially refunds
         let h1 = crate::sphere::elevation(nd);
         let dh = h1 - h0;
-        energy.0 -= if dh > 0.0 { CLIMB_COST * dh } else { DESCEND_REFUND * dh };
+        let climb = if dh > 0.0 { CLIMB_COST * dh } else { DESCEND_REFUND * dh };
+        if climb > 0.0 {
+            energy.burn(climb); // uphill burns
+        } else {
+            energy.add_fast(-climb, FAST_CAP); // downhill coasting refunds a little quick energy
+        }
         loco.path += np.distance(pos); // accumulate 3D distance walked (diagnostic)
         ct.translation = np;
         ct.rotation = Quat::from_rotation_arc(Vec3::Y, nd); // stand upright on the sphere (long axis = surface normal)
@@ -1115,7 +1166,8 @@ pub fn live_step(
         let rock = crate::sphere::rockiness(nd);
         let lifespan_mult = 0.4 + 1.2 * genome.longevity; // 0.5 -> 1.0 (baseline); used for upkeep + aging
         let sense_range: f32 = genome.sensors.iter().map(|s| s.range).sum();
-        energy.0 -= (BASAL_COST * (1.0 - 0.6 * metab_f) // frugal metabolism lowers the cost of living
+        let fat_frac = energy.fat / fat_max.max(0.01); // 0..1 how full the fat store is (drives upkeep)
+        energy.burn((BASAL_COST * (1.0 - 0.6 * metab_f) // frugal metabolism lowers the cost of living
             + SIZE_BASAL * genome.size // bigger body costs more just to maintain
             + MOVE_COST * (1.0 + SIZE_MOVE * genome.size) * thrust * thrust // more mass to push
             + BITE_COST * genome.bite
@@ -1128,14 +1180,17 @@ pub fn live_step(
             + TEMP_COST * (crate::sphere::base_temperature(pdir) - genome.temp_pref).abs() // thermal mismatch: poles vs equator niche
             + LONGEVITY_COST * (lifespan_mult - 1.0).max(0.0) // a long-lived body costs more to maintain
             + SWIM_LAND_COST * genome.swim * (1.0 - wet_here) // fins are a liability on dry land
+            + FAT_UPKEEP * genome.adiposity * fat_frac // carrying fat costs upkeep (no free lunch)
             + STRESS_COST * diet.fatigue)
-            * dt;
+            * dt);
+        // fast store leaks even at rest (volatile -> can't bank quick energy, use-it-or-lose-it)
+        energy.fast = (energy.fast - FAST_LEAK * dt).max(0.0);
         // fatigue dynamics: exertion (thrust) accrues debt; idling (low thrust) sheds it. Clamped 0..1.
         diet.fatigue = (diet.fatigue + (FATIGUE_GAIN * thrust - FATIGUE_REST * (1.0 - thrust)) * dt).clamp(0.0, 1.0);
         // wildfire: standing in fire burns energy fast (deadly to anything caught in a blaze)
         let here_fire = fire.get(np);
         if here_fire > 0.05 {
-            energy.0 -= FIRE_DAMAGE * here_fire * dt;
+            energy.burn(FIRE_DAMAGE * here_fire * dt);
         }
         // social/kin need: a social creature isolated from genetic kin drains energy (loneliness). Being
         // in a herd of kin removes the drain (and grants predation safety, see predation_step). The drain
@@ -1145,7 +1200,7 @@ pub fn live_step(
         if genome.social > 0.0 {
             let kinf = kin_fraction(entity, np, &signature(genome), &cre_snap);
             let density = (pop as f32 / CREATURE_CAP as f32).min(1.0);
-            energy.0 -= SOCIAL_COST * genome.social * (1.0 - kinf) * density * dt;
+            energy.burn(SOCIAL_COST * genome.social * (1.0 - kinf) * density * dt);
         }
 
         // eat nearest plant on contact, IF bite beats its defense (arms race, see 13)
@@ -1155,6 +1210,7 @@ pub fn live_step(
             let pg = foods[i].2.clone();
             let rot_age = foods[i].4;
             let tree = foods[i].5; // None=plant/carrion, Some(true)=fruit tree, Some(false)=evergreen
+            let ferment = foods[i].6; // Some(toxic) -> fermenting plant matter (fruit/detritus); None+rot -> meat
             if np.distance(fp) < EAT_RADIUS {
                 // trees: a creature reaches an EDIBLE tree if its height + TREE_REACH_MARGIN, EXTENDED by
                 // the tree's branches (BRANCH_REACH), >= the tree's height. So a tall bare tree feeds only
@@ -1170,6 +1226,11 @@ pub fn live_step(
                     }
                 };
                 if success {
+                    // digestion efficiency = the MASTER expression gene (reserves vs uptake demand). Gates
+                    // energy extracted from ALL food in diet mode; legacy --no-diet runs ungated (eff=1).
+                    let eff = if gen.diet { master_expression(&genome.uptake, &diet.reserves, RESERVE_REQ, MASTER_FLOOR) } else { 1.0 };
+                    let fert = soil.get(np);
+                    let soil_f = 1.0 - SOIL_NUTRI + SOIL_NUTRI * (fert / FERT_CAP).min(1.0); // richer soil -> more nutrients delivered
                     if let Some(true) = tree {
                         // FRUIT TREE: the tree persists + regrows; dies only if grazed below TREE_MIN_MASS.
                         // Mass dilutes nutrition (TREE_MASS_NUTRI): a bulkier tree gives less energy/bite.
@@ -1179,24 +1240,75 @@ pub fn live_step(
                         let bite_mass = TREE_BITE_MASS.min(mass);
                         let mass_nutri = 1.0 - TREE_MASS_NUTRI * (mass / TREE_MATURITY).min(1.0);
                         let base = bite_mass * pg.nutrient * mass_nutri * (0.5 + pg.quality);
-                        let eff = if gen.diet { diet.expr[pg.kind as usize] } else { 1.0 };
-                        energy.0 += EAT_GAIN * base * eff;
+                        let wasted = energy.add_sugar(EAT_GAIN * base * eff, SUGAR_CAP, fat_max); // fruit flesh -> sugar
+                        diet.g += wasted * OVEREAT_G; // overflow -> growth-load (gorging harms)
                         fit.0 += base * eff;
+                        if gen.diet {
+                            let toxin = absorb_and_toxin(&mut diet.reserves, &genome.uptake, &pg, soil_f, base);
+                            energy.burn(toxin);
+                            diet.g += toxin * TOXIN_G;
+                        }
                         let short = genome.height + TREE_REACH_MARGIN < pg.height; // only reached via branches
                         let damage = if short { 0.0 } else { bite_mass }; // branch-feeders don't harm the tree
                         *tree_bites.0.entry(e).or_insert(0.0) += damage;
                         eat_reward = R_EAT;
+                    } else if let (Some(age), Some(toxic)) = (rot_age, ferment) {
+                        // FERMENTING PLANT MATTER (fallen fruit / detritus): a 3-stage clock over ROT_GONE.
+                        //   fresh (< FERMENT_START)        -> SUGAR (just ripe fruit/greens) + nutrients
+                        //   fermenting (START..END)        -> FAST energy (ethanol), few nutrients + toxicity
+                        //   spoiled (>= END)               -> near-zero yield, full toxicity (avoid)
+                        // fruit (low `toxic`) ferments richly; detritus (high `toxic`) gives scraps + poison.
+                        let f = (age as f32 / ROT_GONE as f32).clamp(0.0, 1.0);
+                        let base = mass * pg.nutrient * (0.5 + pg.quality);
+                        // fast-energy yield is whichever source this is (fruit rich, detritus poor)
+                        let fast_gain = if pg.nutrient >= DETRITUS_NUTRIENT + 0.05 { FRUIT_FAST_GAIN } else { DETRITUS_FAST_GAIN };
+                        if f < FERMENT_START {
+                            // fresh: a sugary plant (gated by eff + tops nutrient reserves)
+                            let wasted = energy.add_sugar(EAT_GAIN * base * eff, SUGAR_CAP, fat_max);
+                            diet.g += wasted * OVEREAT_G;
+                            fit.0 += base * eff;
+                            if gen.diet {
+                                let toxin = absorb_and_toxin(&mut diet.reserves, &genome.uptake, &pg, soil_f, base);
+                                energy.burn(toxin);
+                                diet.g += toxin * TOXIN_G;
+                            }
+                            eat_reward = R_EAT;
+                        } else {
+                            // ferment-ness ramps 0->1 across the window, then spoilage kills the yield. Ethanol
+                            // is empty calories: FAST energy, no nutrient reserves (fermentation degrades them).
+                            let fermentness = ((f - FERMENT_START) / (FERMENT_END - FERMENT_START)).clamp(0.0, 1.0);
+                            let spoiled = ((f - FERMENT_END) / (1.0 - FERMENT_END)).clamp(0.0, 1.0);
+                            let yield_mult = fermentness * (1.0 - spoiled);
+                            let wasted = energy.add_fast(fast_gain * base * yield_mult, FAST_CAP); // ethanol -> FAST store
+                            diet.g += wasted * OVEREAT_G;
+                            fit.0 += base * yield_mult;
+                            // toxicity: scales with how fermented/spoiled it is x this matter's toxic factor
+                            let toxin = TOXIN_MAX * toxic * (0.3 * fermentness + spoiled);
+                            energy.burn(toxin);
+                            diet.g += toxin * TOXIN_G;
+                            eat_reward = (yield_mult - spoiled) * 2.0 - 1.0; // ripe ferment good, spoiled bad
+                        }
                     } else if let Some(age) = rot_age {
                         // CARRION / MEAT (P3): eating another creature = TOP nutrition, near-zero toxicity
                         // while fresh, and richer + longer-lasting than plants (MEAT_BONUS). Toxin only
-                        // ramps once well-rotted (>60%). Not gated by diet expr; never disperses seeds.
+                        // ramps once well-rotted (>60%). Not gated by master expr; balanced for reserves.
                         let f = (age as f32 / ROT_GONE as f32).clamp(0.0, 1.0); // 0 fresh .. 1 rotten
                         let freshness = 1.0 - (f / 0.6).min(1.0); // stays ~1 for the first 60% of decomposition
                         let meat = mass * pg.nutrient * freshness;
                         let toxin = TOXIN_MAX * ((f - 0.6) / 0.4).max(0.0); // no toxin until 60% rotted
-                        energy.0 += EAT_GAIN * MEAT_BONUS * meat;
+                        // meat = animal tissue -> mostly fat, some sugar; fat overflow spills to sugar
+                        let gain = EAT_GAIN * MEAT_BONUS * meat;
+                        let overflow_fat = energy.add_fat(gain * 0.8, fat_max);
+                        let wasted = energy.add_sugar(gain * 0.2 + overflow_fat, SUGAR_CAP, fat_max);
+                        diet.g += wasted * OVEREAT_G;
                         fit.0 += meat * MEAT_BONUS;
-                        energy.0 -= toxin;
+                        // balanced animal tissue: tops EVERY nutrient reserve (meat is nutritionally complete)
+                        if gen.diet {
+                            for r in diet.reserves.iter_mut() {
+                                *r = (*r + MEAT_RESERVE * freshness).min(RESERVE_CAP);
+                            }
+                        }
+                        energy.burn(toxin);
                         diet.g += toxin * TOXIN_G;
                         eat_reward = freshness * 2.0 - 1.0; // fresh -> +1 (good), rotten -> -1 (avoid)
                     } else {
@@ -1207,37 +1319,20 @@ pub fn live_step(
                         *tree_bites.0.entry(e).or_insert(0.0) += bite_mass;
                         // quality scales extractable energy: factor 0.5..1.5, ~1.0 at quality 0.5 (balance-neutral)
                         let base = bite_mass * pg.nutrient * (0.5 + pg.quality);
+                        let wasted = energy.add_sugar(EAT_GAIN * base * eff, SUGAR_CAP, fat_max); // plant -> sugar
+                        diet.g += wasted * OVEREAT_G;
+                        fit.0 += base * eff;
                         if gen.diet {
-                            let t = pg.kind as usize;
-                            let eff = diet.expr[t];
-                            energy.0 += EAT_GAIN * base * eff;
-                            fit.0 += base * eff;
-                            let rate = 1.0 - genome.rigidity;
-                            diet.expr[t] += EXPR_RAMP * rate * (1.0 - diet.expr[t]);
-                            for j in 0..NFOOD {
-                                if j != t {
-                                    diet.expr[j] -= EXPR_DECAY * rate * diet.expr[j];
-                                }
-                            }
-                            if eff < 0.5 {
-                                diet.g += G_GAIN * (0.5 - eff);
-                                energy.0 -= MISMATCH_STRESS;
-                            }
-                            eat_reward = (eff - 0.5) * 4.0;
+                            let toxin = absorb_and_toxin(&mut diet.reserves, &genome.uptake, &pg, soil_f, base);
+                            energy.burn(toxin);
+                            diet.g += toxin * TOXIN_G;
+                            eat_reward = (eff - 0.5) * 4.0; // reward eating most when well-nourished (high master expr)
                         } else {
-                            energy.0 += EAT_GAIN * base;
-                            fit.0 += base;
                             eat_reward = R_EAT;
                         }
                     }
-                    // overeating trade-off (12): energy is capped; eating while already full converts
-                    // the excess into growth-load (harm) -> gorging shortens life. Eat best, in moderation.
-                    let emax = energy_max(genome);
-                    if energy.0 > emax {
-                        let excess = energy.0 - emax;
-                        energy.0 = emax;
-                        diet.g += excess * OVEREAT_G;
-                    }
+                    // overeating trade-off (12): each store has a cap; eating past it converts the excess
+                    // into growth-load (harm, via the add_* helpers above) -> gorging shortens life.
                     // carrion is eaten whole (despawn). Plants + trees PERSIST -- their mass is reduced by
                     // the grazing recorded above, and plant_step despawns any grazed below its min mass.
                     if tree.is_none() {
@@ -1257,11 +1352,24 @@ pub fn live_step(
             }
         }
 
-        // per-tick upkeep. Age every creature; diet mode adds expression overhead + growth-load decay.
+        // per-tick upkeep. Age every creature; diet mode runs the nutrient metabolism: gut-upkeep cost,
+        // reserve depletion (you burn the nutrients you're built to use), and deficiency -> growth-load.
         diet.age += 1;
         if gen.diet {
-            let total_expr: f32 = diet.expr.iter().sum();
-            energy.0 -= EXPR_OVERHEAD * total_expr * dt; // cost of keeping many genes expressed
+            let total_uptake: f32 = genome.uptake.iter().sum();
+            energy.burn(UPTAKE_OVERHEAD * total_uptake * dt); // broad gut costs upkeep (generalist tax)
+            // deplete reserves by use (x uptake demand) + measure demand-weighted deficiency
+            let mut wsum = 0.0;
+            let mut deficit = 0.0;
+            for i in 0..NUTRIENTS {
+                diet.reserves[i] = (diet.reserves[i] - NUTRIENT_USE * genome.uptake[i] * dt).max(0.0);
+                let demand = genome.uptake[i];
+                wsum += demand;
+                deficit += demand * (1.0 - (diet.reserves[i] / RESERVE_REQ).min(1.0)); // shortfall on a demanded nutrient
+            }
+            if wsum > 1e-3 {
+                diet.g += DEFICIT_G * (deficit / wsum) * dt; // soft-gradient: deficiency raises disease load
+            }
             diet.g = (diet.g - G_DECAY).max(0.0);
         }
         // mortality from the diet model (aging + disease). In continuous mode death is otherwise
@@ -1292,7 +1400,7 @@ pub fn live_step(
         }
         brain.prev_dist = cur_dist;
 
-        if energy.0 <= 0.0 {
+        if energy.total() <= 0.0 {
             alive.0 = false;
         }
 
@@ -1305,14 +1413,14 @@ pub fn live_step(
         let repro_min_age = (REPRO_MIN_AGE as f32 * (0.6 + 0.8 * k)) as u32;
         if live_continuous
             && alive.0
-            && energy.0 > repro_thr
+            && energy.total() > repro_thr
             && diet.age > repro_min_age // newborns must establish before breeding (paces birth waves)
             && pop < CREATURE_CAP
             // density-dependent: breeding rate tapers to 0 as pop approaches cap -> population asymptotes
             // to carrying capacity instead of slamming the cap and crashing (no boom-bust overshoot).
             && rng.f32() < P_REPRO_CREATURE * (1.0 - pop as f32 / CREATURE_CAP as f32)
         {
-            energy.0 -= REPRO_COST * (0.7 + 0.6 * k); // K-parents spend more per child
+            energy.burn(REPRO_COST * (0.7 + 0.6 * k)); // K-parents spend more per child
             // mating mode: cross with the nearest genetically-similar mate (assortative -> reproductive
             // isolation/speciation); fall back to single-parent budding if no compatible mate is nearby.
             let mut child = if gen.mating {
@@ -1371,15 +1479,17 @@ fn sigmoid(x: f32) -> f32 {
     1.0 / (1.0 + (-x).exp())
 }
 
-// Per-creature energy-store ceiling: bigger bodies bank more energy (buffers starvation, costs upkeep).
-fn energy_max(g: &Genome) -> f32 {
-    ENERGY_MAX * (1.0 + SIZE_ENERGY * g.size)
+// Per-creature FAT-store ceiling: adiposity sets the storage strategy, body size adds capacity.
+// fat is the big bank (fast/sugar caps are fixed small/medium). Bigger + fattier bodies buffer famine
+// but pay carrying upkeep (FAT_UPKEEP) + sluggishness (FAT_POWER) -> no free lunch.
+fn fat_cap(g: &Genome) -> f32 {
+    FAT_CAP * (0.4 + ADIPOSITY_CAP * g.adiposity) * (1.0 + SIZE_ENERGY * g.size)
 }
 
 // Compact phenotype signature for KIN similarity (diet + body traits). Two creatures are "kin" when
 // their signatures are within SOCIAL_SIM -> drives flocking-by-species + the social need.
 fn signature(g: &Genome) -> [f32; 8] {
-    [g.expr0[0], g.expr0[1], g.expr0[2], g.expr0[3], g.size, g.swim, g.light_pref, g.height]
+    [g.uptake[0], g.uptake[1], g.uptake[2], g.uptake[3], g.size, g.swim, g.light_pref, g.height]
 }
 fn sig_dist(a: &[f32; 8], b: &[f32; 8]) -> f32 {
     a.iter().zip(b).map(|(x, y)| (x - y).abs()).sum()
@@ -1432,6 +1542,12 @@ pub fn generation_step(
             let n = pop.max(1) as f32;
             let mut e = 0.0;
             let mut f = 0.0;
+            let mut fa = 0.0; // mean fast store (only fed by fermented food -> >0 proves fermentation web works)
+            let mut su = 0.0; // mean sugar store
+            let mut ft = 0.0; // mean fat store
+            let mut adp = 0.0; // mean adiposity gene
+            let mut mast = 0.0; // mean master digestion expression (nutrient sufficiency 0..1)
+            let mut brd = 0.0; // mean diet breadth = count of actively-absorbed nutrients (uptake > 0.4)
             let mut sens = 0.0;
             let mut bite = 0.0;
             let mut rig = 0.0;
@@ -1446,7 +1562,13 @@ pub fn generation_step(
             let mut hi = 0u32; // count of highland creatures (alpine > 0.5) -> mountain niche size
             let mut abslat = 0.0; // mean |latitude| of the population (0 equator .. ~1.57 pole) -> spread check
             for (t, en, fit, _h, _a, g, _b, diet, _l) in cq.iter() {
-                e += en.0;
+                e += en.total();
+                fa += en.fast;
+                su += en.sugar;
+                ft += en.fat;
+                adp += g.adiposity;
+                mast += master_expression(&g.uptake, &diet.reserves, RESERVE_REQ, MASTER_FLOOR);
+                brd += g.uptake.iter().filter(|u| **u > 0.4).count() as f32;
                 f += fit.0;
                 sens += g.n_sensors() as f32;
                 bite += g.bite;
@@ -1468,8 +1590,8 @@ pub fn generation_step(
             let avg_qual: f32 = pq.iter().map(|(g, _)| g.quality).sum::<f32>() / plant_n as f32;
             let avg_wet: f32 = pq.iter().map(|(g, _)| g.wet).sum::<f32>() / plant_n as f32;
             info!(
-                "t {:>6} | pop {:>3} | energy {:.1} | life-fit {:.1} | age {:.0} | sens {:.1} | bite {:.2} | rig {:.2} | temp {:.2} lng {:.2} met {:.2} par {:.2} lat {:.2} | swim {:.2} alp {:.2} aq {} hi {} | def {:.2} nut {:.2} qual {:.2} wet {:.2} | plants {} | soil {:.2} | rain {:.2} fire {:.3}",
-                gen.tick, pop, e / n, f / n, age / n, sens / n, bite / n, rig / n, temp / n, lng / n, met / n, par / n, abslat / n, sw / n, alp / n, aq, hi, avg_def, avg_nut, avg_qual, avg_wet, plant_n, soil.avg(), weather.rain, fire.avg()
+                "t {:>6} | pop {:>3} | energy {:.1} [f{:.1}/s{:.1}/F{:.1}] adp {:.2} | mast {:.2} brd {:.1} | life-fit {:.1} | age {:.0} | sens {:.1} | bite {:.2} | rig {:.2} | temp {:.2} lng {:.2} met {:.2} par {:.2} lat {:.2} | swim {:.2} alp {:.2} aq {} hi {} | def {:.2} nut {:.2} qual {:.2} wet {:.2} | plants {} | soil {:.2} | rain {:.2} fire {:.3}",
+                gen.tick, pop, e / n, fa / n, su / n, ft / n, adp / n, mast / n, brd / n, f / n, age / n, sens / n, bite / n, rig / n, temp / n, lng / n, met / n, par / n, abslat / n, sw / n, alp / n, aq, hi, avg_def, avg_nut, avg_qual, avg_wet, plant_n, soil.avg(), weather.rain, fire.avg()
             );
             // Track the best healthy snapshot for --save. Score = pop, gated on well-fed (avg energy >= 30)
             // so we never bank a starving crowd. Captured only when saving (snapshot clone is not free).
@@ -1619,12 +1741,12 @@ pub fn generation_step(
     {
         brain.net = child.net.clone();
         brain.prev_dist = f32::INFINITY;
-        diet.expr = child.expr0;
+        diet.reserves = [RESERVE_REQ; NUTRIENTS]; // fresh life starts with stocked reserves
         diet.g = 0.0;
         diet.age = if desync { (rng.f32() * 600.0) as u32 } else { 0 };
         diet.fatigue = 0.0;
         *g = child;
-        energy.0 = if desync { rng.range(0.8, 1.2) * START_ENERGY } else { START_ENERGY }; // stagger but never lethally low
+        *energy = Energy::from_total(if desync { rng.range(0.8, 1.2) * START_ENERGY } else { START_ENERGY }); // stagger but never lethally low
         fit.0 = 0.0;
         head.0 = rng.range(-std::f32::consts::PI, std::f32::consts::PI);
         alive.0 = true;

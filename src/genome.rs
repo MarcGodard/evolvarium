@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
 pub const MIN_HIDDEN: usize = 2; // brains never shrink below this
 pub const MAX_HIDDEN: usize = 16; // ...nor grow beyond (bounds the per-neuron upkeep cost)
 pub const OUTPUTS: usize = 2; // [thrust 0..1, turn -1..1]
-pub const NFOOD: usize = 4; // food types (epigenetic diet model, see 12)
+pub const NFOOD: usize = 4; // plant FAMILY count (sensing hue + kind label only; NOT the metabolic axis)
+pub const NUTRIENTS: usize = 10; // distinct nutrients (the metabolic axis: regulatory uptake genome, see 14/05)
 
 pub const MIN_SENSORS: usize = 1;
 pub const MAX_SENSORS: usize = 8;
@@ -39,7 +40,11 @@ pub struct Genome {
     pub sensors: Vec<Sensor>,
     pub net: Net,        // initial weights (heritable priors)
     pub plast: Net,      // per-weight plasticity 0..1, same shape as net
-    pub expr0: [f32; NFOOD], // innate diet-gene expression baseline (see 12)
+    #[serde(default = "default_uptake")]
+    pub uptake: [f32; NUTRIENTS], // gene i = absorption affinity + DEMAND for nutrient i. The "10 genes":
+                                  // many high = generalist (needs varied diet + costly machinery); few = specialist
+                                  // (cheap, needs little, but fragile if that nutrient's food vanishes). They feed
+                                  // the master expression gene (computed per-life from reserves x uptake, see DietState).
     pub rigidity: f32,       // 0=flexible generalist .. 1=pinned specialist (koala)
     pub bite: f32,           // 0..1 eating strength vs plant defense (arms race, see 13); costs energy
     #[serde(default)]
@@ -62,6 +67,8 @@ pub struct Genome {
     pub parental: f32,       // 0..1 r/K life-history: 0 = r-strategist (breed young + cheap + many small fragile young), 1 = K-strategist (breed late + costly + few well-provisioned young). Scales repro threshold/cost/birth-energy/maturity. Default 0.5 = current values (neutral), so old saves are unchanged.
     #[serde(default = "zero")]
     pub alpine: f32,         // 0..1 mountain adaptation: high = cheap rock/highland crossing (climber) but a heavy-build penalty on flat ground; low = lowland-light. Mirror of swim for mountains. Default 0 = neutral (no relief, no penalty), so old saves are unchanged.
+    #[serde(default = "half")]
+    pub adiposity: f32,      // 0..1 fat-storage strategy: high = big fat reserve + easy storage (survives famine) but sluggish (fat mobilizes slow) + carrying-fat upkeep; low = lean/nimble + cheap but famine-fragile. Default 0.5 = baseline.
 }
 
 // serde defaults for traits absent in old saves
@@ -73,6 +80,30 @@ fn third() -> f32 {
 }
 fn zero() -> f32 {
     0.0
+}
+// serde default for uptake on saves predating the nutrient genome: a mid generalist (all nutrients
+// absorbed moderately) so old creatures load as functional omnivores.
+fn default_uptake() -> [f32; NUTRIENTS] {
+    [0.5; NUTRIENTS]
+}
+
+// Master digestion expression: the single gene the 10 uptake genes feed. A gene that absorbs nutrient i
+// also DEMANDS it (demand = uptake_i). Expression = demand-weighted mean of how stocked each demanded
+// reserve is (reserves_i vs RESERVE_REQ). High when every demanded nutrient is in stock -> rewards a diet
+// that covers what the creature is built to use. Floored so a creature is never fully shut off. No uptake
+// at all -> falls to the floor (an undifferentiated gut digests poorly). Gates energy extraction (see sim).
+pub fn master_expression(uptake: &[f32; NUTRIENTS], reserves: &[f32; NUTRIENTS], req: f32, floor: f32) -> f32 {
+    let mut wsum = 0.0;
+    let mut sat = 0.0;
+    for i in 0..NUTRIENTS {
+        let demand = uptake[i];
+        wsum += demand;
+        sat += demand * (reserves[i] / req).min(1.0); // satisfaction of this demand, capped at 1
+    }
+    if wsum < 1e-3 {
+        return floor; // no uptake genes -> undifferentiated gut -> poor baseline digestion
+    }
+    (sat / wsum).max(floor)
 }
 
 pub fn n_inputs(n_sensors: usize) -> usize {
@@ -97,15 +128,17 @@ impl Genome {
             .collect();
         let n_in = n_inputs(n_sensors);
         let n_hidden = 3 + (rng.f32() * 4.0) as usize; // 3..6 to start; evolves via add/remove_hidden
-        let mut expr0 = [0.0f32; NFOOD];
-        for e in expr0.iter_mut() {
-            *e = rng.f32();
+        // uptake: sparse-ish founders -> ~1/3 of nutrients absorbed strongly, rest weakly, so founders
+        // span specialists..partial-generalists and selection can broaden or narrow the gut.
+        let mut uptake = [0.0f32; NUTRIENTS];
+        for u in uptake.iter_mut() {
+            *u = if rng.f32() < 0.35 { rng.f32() } else { rng.f32() * 0.2 };
         }
         Genome {
             sensors,
             net: random_net(rng, n_in, n_hidden, false),
             plast: random_net(rng, n_in, n_hidden, true),
-            expr0,
+            uptake,
             rigidity: rng.f32(),
             bite: rng.f32() * 0.5,
             height: rng.f32() * 0.5,
@@ -118,6 +151,7 @@ impl Genome {
             metab: rng.f32(),
             parental: rng.f32(),
             alpine: rng.f32(), // founders span lowland..mountain builds -> a highland niche can emerge
+            adiposity: rng.f32(), // founders span lean..fatty storage strategies
         }
     }
 
@@ -144,8 +178,9 @@ impl Genome {
         c.metab = pick(rng, a.metab, b.metab);
         c.parental = pick(rng, a.parental, b.parental);
         c.alpine = pick(rng, a.alpine, b.alpine);
-        for i in 0..NFOOD {
-            c.expr0[i] = pick(rng, a.expr0[i], b.expr0[i]);
+        c.adiposity = pick(rng, a.adiposity, b.adiposity);
+        for i in 0..NUTRIENTS {
+            c.uptake[i] = pick(rng, a.uptake[i], b.uptake[i]);
         }
         c
     }
@@ -175,10 +210,10 @@ impl Genome {
                 s.range = (s.range + rng.normal() * 3.5).clamp(RANGE_MIN, RANGE_MAX);
             }
         }
-        // diet genes
-        for e in &mut self.expr0 {
+        // nutrient-uptake genes (the regulatory gut)
+        for u in &mut self.uptake {
             if rng.f32() < rate {
-                *e = (*e + rng.normal() * 0.2).clamp(0.0, 1.0);
+                *u = (*u + rng.normal() * 0.15).clamp(0.0, 1.0);
             }
         }
         if rng.f32() < rate {
@@ -216,6 +251,9 @@ impl Genome {
         }
         if rng.f32() < rate {
             self.alpine = (self.alpine + rng.normal() * 0.12).clamp(0.0, 1.0);
+        }
+        if rng.f32() < rate {
+            self.adiposity = (self.adiposity + rng.normal() * 0.12).clamp(0.0, 1.0);
         }
         // structural: add / remove a sensor (and the matching input-weight columns)
         if rng.f32() < 0.06 && self.sensors.len() < MAX_SENSORS {
@@ -356,4 +394,35 @@ fn wrap_pi(a: f32) -> f32 {
         a += std::f32::consts::TAU;
     }
     a
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn master_expression_rewards_stocked_demanded_nutrients() {
+        // gut demands nutrients 0 and 1 only
+        let mut uptake = [0.0f32; NUTRIENTS];
+        uptake[0] = 1.0;
+        uptake[1] = 1.0;
+        // fully stocked on what it demands -> expression ~1
+        let mut full = [0.0f32; NUTRIENTS];
+        full[0] = 0.6;
+        full[1] = 0.6;
+        let m_full = master_expression(&uptake, &full, 0.6, 0.2);
+        assert!(m_full > 0.95, "stocked specialist should express ~1, got {m_full}");
+        // missing one demanded nutrient -> expression drops toward half (one of two demands unmet)
+        let mut half = [0.0f32; NUTRIENTS];
+        half[0] = 0.6; // nutrient 1 empty
+        let m_half = master_expression(&uptake, &half, 0.6, 0.2);
+        assert!(m_half < 0.6 && m_half >= 0.2, "half-deficient should drop, got {m_half}");
+    }
+
+    #[test]
+    fn master_expression_floors_with_no_uptake() {
+        let uptake = [0.0f32; NUTRIENTS]; // undifferentiated gut
+        let reserves = [1.0f32; NUTRIENTS];
+        assert_eq!(master_expression(&uptake, &reserves, 0.6, 0.2), 0.2);
+    }
 }

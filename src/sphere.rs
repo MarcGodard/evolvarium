@@ -235,6 +235,17 @@ pub fn plant_habitability(d: Vec3) -> f32 {
     (rock_ok * moist_ok * warm_ok).clamp(0.0, 1.0)
 }
 
+/// Flammable fuel 0..1 at `d`: how readily this spot can BURN = how much dry vegetation it carries. 0 over
+/// any water (oceans never burn, even shallow seagrass), 0 on bare rock + barren desert (no fuel). Rises
+/// with land plant habitability (grass/forest = fuel). Wildfire gates on this so only vegetated land burns;
+/// dryness (ground water) is a SEPARATE gate (wet vegetation resists fire) applied by the fire sim.
+pub fn fuel(d: Vec3) -> f32 {
+    if is_ocean(d) {
+        return 0.0; // water carries no burnable fuel (plant_habitability is high in shallow seas -> exclude)
+    }
+    plant_habitability(d) // land only: ~0 on rock, low in desert/drought, high in lush temperate/tropical
+}
+
 /// Unlit biome color (RGB 0..1) at outward direction `d`: ocean by depth, land by elevation/moisture,
 /// polar ice. Shared by the globe mesh (viz) + the snapshot renderer so they look the same.
 pub fn biome_color(d: Vec3) -> [f32; 3] {
@@ -304,8 +315,11 @@ pub fn daylight_at(d: Vec3, tick: u32) -> f32 {
 const CLOUD_FREQ: f32 = 3.0;     // cloud patch size (higher = smaller, more patches)
 const CLOUD_SPEED: f32 = 0.0009; // wind: radians/tick the cloud field rotates (drifts west->east)
 const CLOUD_COVER: f32 = 0.55;   // noise threshold: above this is cloudy (higher = sparser clouds)
-pub const CLOUD_RAIN_MIN: f32 = 0.55; // cloud cover above which rain can fall (thick cloud only)
-pub const RAIN_CHANCE: f32 = 0.10;    // per-eligible-cell chance of rain under a rain-thick cloud (~10%)
+pub const CLOUD_RAIN_MIN: f32 = 0.45; // cloud cover above which rain can fall (thick-ish cloud)
+// Rain-mask threshold on a second fbm field: rain falls only where the mask exceeds this. fbm3 clusters
+// mid-range + rarely tops ~0.85, so the old `1.0 - 0.10 = 0.90` gate was UNREACHABLE -> rain never fell.
+// 0.60 sits in the field's upper band -> scattered, drifting rain cells under the thicker clouds.
+pub const RAIN_MASK_MIN: f32 = 0.60;
 
 /// Cloud cover 0..1 at surface direction `d` and `tick`: a scrolling 3D-fBm field that drifts with the
 /// wind (the planet's clouds move). 0 = clear sky, 1 = thick overcast. Deterministic -> headless + render
@@ -320,8 +334,8 @@ pub fn cloud_cover(d: Vec3, tick: u32) -> f32 {
 }
 
 /// Rain intensity 0..1 at `d`,`tick`. Rain comes ONLY from clouds: it can rain solely where cloud cover is
-/// thick (> CLOUD_RAIN_MIN), and within that only ~RAIN_CHANCE (10%) of the area is rain-bearing (a separate
-/// slow-drifting mask) -> rain falls in scattered, moving cells under the heaviest clouds, not everywhere.
+/// thick (> CLOUD_RAIN_MIN), and within that only where a separate slow-drifting mask field is high
+/// (> RAIN_MASK_MIN) -> rain falls in scattered, moving cells under the thicker clouds, not everywhere.
 pub fn rain_at(d: Vec3, tick: u32) -> f32 {
     let cover = cloud_cover(d, tick);
     if cover <= CLOUD_RAIN_MIN {
@@ -331,7 +345,7 @@ pub fn rain_at(d: Vec3, tick: u32) -> f32 {
     let (s, c) = (a.sin(), a.cos());
     let rot = Vec3::new(c * d.x - s * d.z, d.y, s * d.x + c * d.z);
     let mask = fbm3(rot * (CLOUD_FREQ * 1.7) + Vec3::splat(71.2));
-    if mask < 1.0 - RAIN_CHANCE {
+    if mask < RAIN_MASK_MIN {
         return 0.0; // cloudy but not raining here
     }
     cover // rain as heavy as the cloud is thick

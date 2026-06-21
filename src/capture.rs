@@ -23,6 +23,29 @@ pub struct CaptureCfg {
     pub off: i64,     // raw extra sun-tick offset (overrides `when` when nonzero) for dialing sun angle
     pub pitch: f32,   // camera pitch (negative = look down at the ground)
     pub orbit: bool,  // capture from orbit (far) instead of walk (surface)
+    pub dist: f32,    // orbit distance from planet center (test zoom for the eclipse-disc regression)
+    pub underwater: bool, // stand submerged in a deep ocean (verify swim view + blue tint)
+}
+
+// Deepest-ocean surface direction, found by scanning a Fibonacci sphere (robust to the exact noise seed,
+// unlike a hardcoded direction). Used by --cap-water to stand the camera in real deep water.
+fn ocean_dir() -> Vec3 {
+    let n = 2000usize;
+    let golden = std::f32::consts::PI * (3.0 - 5.0_f32.sqrt());
+    let mut best = Vec3::Z;
+    let mut lowest = f32::INFINITY;
+    for i in 0..n {
+        let y = 1.0 - (i as f32 + 0.5) / n as f32 * 2.0;
+        let r = (1.0 - y * y).max(0.0).sqrt();
+        let theta = golden * i as f32;
+        let d = Vec3::new(theta.cos() * r, y, theta.sin() * r);
+        let e = crate::sphere::elevation01(d);
+        if e < lowest {
+            lowest = e;
+            best = d;
+        }
+    }
+    best
 }
 
 // Frames to let assets load + the sim settle before grabbing the shot (materials, dressed entities).
@@ -31,7 +54,9 @@ const WARMUP: u32 = 50;
 pub struct CapturePlugin;
 impl Plugin for CapturePlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup_capture_view)
+        // PostStartup (not Startup): spawn_camera (camera plugin Startup) must run first so the WalkCam
+        // entity exists when we drop it into the ocean for --cap-water.
+        app.add_systems(PostStartup, setup_capture_view)
             .add_systems(Update, (capture_tick, quit_countdown))
             // deterministic framing: own the camera transform in PostUpdate, after walk/orbit ran
             .add_systems(PostUpdate, force_cam.before(bevy::transform::TransformSystems::Propagate));
@@ -41,6 +66,22 @@ impl Plugin for CapturePlugin {
 // Point the camera at the homeland from a fixed side+elevated vantage, ignoring walk/orbit. Deterministic
 // so test objects + their shadows are always framed.
 fn force_cam(cfg: Res<CaptureCfg>, mut q: Query<&mut Transform, With<Camera3d>>) {
+    if cfg.orbit {
+        return; // orbit framing is owned by apply_orbit (ran in Update); don't override it here
+    }
+    if cfg.underwater {
+        // submerged in the deep ocean: eye 2 units off the seafloor, looking level + slightly up at the
+        // sunlit surface (so the shot shows the blue tint + water from below).
+        let d = ocean_dir();
+        let eye = crate::sphere::surface_pos(d, 2.0);
+        // look along the heading tilted by cap-pitch (negative = down at the lit seafloor through the water)
+        let tangent = crate::sphere::heading_tangent(d, cfg.yaw);
+        let fwd = (tangent * cfg.pitch.cos() + d * cfg.pitch.sin()).normalize();
+        if let Ok(mut t) = q.single_mut() {
+            *t = Transform::from_translation(eye).looking_to(fwd, d);
+        }
+        return;
+    }
     let home = crate::sim::homeland_center();
     let side = crate::sphere::heading_tangent(home, cfg.yaw);
     let eye = crate::sphere::surface_pos(home, 10.0) + side * 22.0;
@@ -59,13 +100,25 @@ fn setup_capture_view(
     mut orbit_q: Query<&mut crate::camera::OrbitCam>,
 ) {
     let home = crate::sim::homeland_center();
-    if cfg.orbit {
+    // sun anchor: overhead the ocean point for --cap-water, else overhead the homeland.
+    let sun_anchor = if cfg.underwater { ocean_dir() } else { home };
+    if cfg.underwater {
+        // submerged swim view: drop the walk eye into the deep ocean so track_underwater flags it (the
+        // tint overlay + murky sky then show in the shot). force_cam owns the final transform.
+        *mode = CameraMode::Walk;
+        if let Ok(mut w) = q.single_mut() {
+            w.dir = ocean_dir();
+            w.yaw = cfg.yaw;
+            w.pitch = cfg.pitch;
+            w.eye_alt = 2.0; // below the sea surface (water_top ~4.92) -> underwater
+        }
+    } else if cfg.orbit {
         *mode = CameraMode::Orbit;
         let (lon, lat) = crate::sphere::dir_to_lonlat(home);
         if let Ok(mut o) = orbit_q.single_mut() {
             o.yaw = lon;
             o.pitch = lat.clamp(-1.3, 1.3);
-            o.dist = 140.0;
+            o.dist = cfg.dist;
         }
     } else {
         *mode = CameraMode::Walk;
@@ -76,9 +129,9 @@ fn setup_capture_view(
             w.pitch = cfg.pitch;
         }
     }
-    // noon_offset puts the sun overhead home; shift it for the requested hour (or raw --cap-off).
+    // noon_offset puts the sun overhead the anchor; shift it for the requested hour (or raw --cap-off).
     let day = crate::sphere::DAY_TICKS as i64;
-    let base = crate::viz::noon_offset(home, 0);
+    let base = crate::viz::noon_offset(sun_anchor, 0);
     offset.0 = base
         + if cfg.off != 0 {
             cfg.off
@@ -101,6 +154,7 @@ fn capture_tick(
     offset: Res<SunOffset>,
     walkers: Query<&WalkCam>,
     lights: Query<(&DirectionalLight, &GlobalTransform, &ViewVisibility), With<crate::viz::SunLight>>,
+    underwater: Res<crate::viz::Underwater>,
     mut commands: Commands,
 ) {
     *frames += 1;
@@ -117,9 +171,10 @@ fn capture_tick(
         .single()
         .map(|(l, gt, v)| (l.shadows_enabled, gt.forward().as_vec3(), v.get()))
         .unwrap_or((false, Vec3::ZERO, false));
+    let weye = walkers.single().map(|w| (crate::sphere::is_ocean(w.dir), w.eye_alt)).unwrap_or((false, 0.0));
     info!(
-        "capture diag: vtick={} -forward={:?} home.dot(sd)={:.2} shadows_enabled={} light_view_visible={}",
-        vtick, -fwd, day, shadows, vis
+        "capture diag: vtick={} -forward={:?} home.dot(sd)={:.2} shadows_enabled={} light_view_visible={} underwater={} is_ocean={} eye_alt={:.2}",
+        vtick, -fwd, day, shadows, vis, underwater.0, weye.0, weye.1
     );
     let _ = sd;
     let path = format!("{}.png", cfg.prefix);

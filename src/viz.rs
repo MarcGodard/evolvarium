@@ -6,7 +6,7 @@
 use bevy::prelude::*;
 
 use crate::components::{Alive, Creature, DietState, Energy, Fitness, Food, Heading, Rot, Tree};
-use crate::genome::{Genome, NFOOD};
+use crate::genome::{master_expression, Genome, NFOOD, NUTRIENTS};
 use crate::plant::{plant_color, PlantGenome, PlantState};
 use crate::sim::{grid_cell_surface, Fire, GenState, GroundWater, ROT_GONE};
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
@@ -21,6 +21,24 @@ pub struct SunOffset(pub i64);
 // range can black out the ground receiver, so shadows are opt-in. camera::update_shadow_mode reads this.
 #[derive(Resource, Default)]
 pub struct ShowShadows(pub bool);
+
+// True while the walk eye is submerged below the sea surface. Drives the blue tint overlay + murky sky.
+#[derive(Resource, Default)]
+pub struct Underwater(pub bool);
+
+// The ocean shell entity (animate_ocean breathes a slow swell on it).
+#[derive(Component)]
+pub struct Ocean;
+
+// The planet globe entity. Its shadow-caster status is toggled by camera mode: ON in orbit so the planet
+// shadows its own night side (no sun "through" the planet), OFF in walk where a planet-scale self-shadow
+// caused ground-scale acne/blackout (and walk sits on the lit side near noon anyway).
+#[derive(Component)]
+pub struct Planet;
+
+// Full-screen translucent blue node shown only when the eye is underwater -> tints the whole frame blue.
+#[derive(Component)]
+struct UnderwaterTint;
 
 // Markers for the celestial bodies (animated by day_night_lighting).
 #[derive(Component)]
@@ -38,8 +56,9 @@ impl Plugin for VizPlugin {
             .init_resource::<Selected>()
             .init_resource::<ShowLegend>()
             .init_resource::<SunOffset>()
+            .init_resource::<Underwater>()
             .insert_resource(ShowShadows(true)) // walk shadows on by default (O toggles)
-            .add_systems(Startup, (log_viz_help, spawn_stats_ui, spawn_world_stats_ui, spawn_legend_ui, spawn_daycycle_ui, spawn_clouds, set_initial_speed))
+            .add_systems(Startup, (log_viz_help, spawn_stats_ui, spawn_world_stats_ui, spawn_legend_ui, spawn_daycycle_ui, spawn_underwater_tint, spawn_clouds, set_initial_speed))
             .add_systems(
                 Update,
                 (
@@ -49,7 +68,7 @@ impl Plugin for VizPlugin {
                     draw_sensors,
                     add_plant_visuals,
                     size_plants,
-                    (day_night_lighting, time_of_day, toggle_shadows, walk_ambient, update_daycycle, update_sky),
+                    (day_night_lighting, time_of_day, toggle_shadows, walk_ambient, update_daycycle, track_underwater, update_sky, toggle_underwater_tint, animate_ocean),
                     rain_visuals,
                     fire_visuals,
                     update_clouds,
@@ -80,16 +99,17 @@ pub struct CreatureMesh(pub Handle<Mesh>);
 // Color + body-plan scale from a genome. Shared by add_creature_visuals (initial look) and
 // restyle_creatures (on genome change) so newborns look right immediately, not default-orange.
 fn creature_look(g: &Genome) -> (Color, Vec3) {
+    // hue from the creature's dominant nutrient-uptake gene (its dietary specialization)
     let mut dom = 0;
-    let mut best = g.expr0[0];
-    for t in 1..NFOOD {
-        if g.expr0[t] > best {
-            best = g.expr0[t];
+    let mut best = g.uptake[0];
+    for t in 1..NUTRIENTS {
+        if g.uptake[t] > best {
+            best = g.uptake[t];
             dom = t;
         }
     }
     let sat = 0.2 + 0.7 * g.rigidity; // pinned specialist = vivid, generalist = washed out
-    let hue = type_hue(dom) * (1.0 - g.swim) + 200.0 * g.swim; // swim shifts toward cyan
+    let hue = type_hue(dom % NFOOD) * (1.0 - g.swim) + 200.0 * g.swim; // swim shifts toward cyan
     let girth = (0.7 + 0.06 * g.n_sensors() as f32) * (0.6 + 0.9 * g.size);
     let sx = girth * (1.0 - 0.25 * g.swim);
     let sy = girth * (0.7 + 1.6 * g.height) * (1.0 - 0.3 * g.swim);
@@ -294,16 +314,11 @@ fn walk_ambient(
     }
 }
 
-// Toggle walk-mode shadows (O). Off by default so the sunlit world is always visible; turn on to add real
-// tree/creature shadows. If turning them on darkens the whole view, that's the directional-shadow blackout.
-fn toggle_shadows(
-    keys: Res<ButtonInput<KeyCode>>,
-    mode: Res<crate::camera::CameraMode>,
-    mut show: ResMut<ShowShadows>,
-) {
-    if *mode == crate::camera::CameraMode::Walk && keys.just_pressed(KeyCode::KeyO) {
-        show.0 = !show.0;
-        info!("walk shadows: {}", if show.0 { "ON" } else { "OFF" });
+// Toggle real shadows (O), both walk + orbit. On by default; turn off for a flat always-sunlit look.
+fn toggle_shadows(keys: Res<ButtonInput<KeyCode>>, mut show: ResMut<ShowShadows>) {
+    if keys.just_pressed(KeyCode::KeyO) {
+        show.0 = !show.0; // applies to both walk + orbit (camera::update_shadow_mode reads it)
+        info!("shadows: {}", if show.0 { "ON" } else { "OFF" });
     }
 }
 
@@ -370,13 +385,21 @@ fn spawn_clouds(
                 alpha_mode: AlphaMode::Blend,
                 ..default()
             });
-            commands.spawn((
+            let mut ec = commands.spawn((
                 Mesh3d(mesh.clone()),
                 MeshMaterial3d(mat),
                 Transform::from_translation(dir * alt),
                 Visibility::Hidden,
                 CloudPuff { dir },
             ));
+            // Soft, partial cloud shadows: a translucent Blend mesh casts a FULL OPAQUE shadow in Bevy (alpha
+            // is ignored in the shadow pass), so casting EVERY overlapping puff = a hard black blob. Instead
+            // only a DITHERED ~1/3 of puffs cast (scattered, not stripey); the gaps let light through, so a
+            // cloud field drops a broken, light, dappled shade (Gaussian-softened in orbit) -> reads as a
+            // transparent cloud shadow. (Per-pixel translucent shadows would need a custom alpha-hash shader.)
+            if (i + 2 * j) % 3 != 0 {
+                ec.insert(bevy::light::NotShadowCaster); // the other ~2/3 don't cast
+            }
         }
     }
 }
@@ -398,7 +421,8 @@ fn update_clouds(
             *vis = Visibility::Inherited;
         }
         if let Some(m) = mats.get_mut(&mm.0) {
-            m.base_color = Color::srgba(0.95, 0.96, 1.0, (0.18 + 0.5 * c).min(0.7));
+            // wispier, more transparent clouds (was up to 0.7 -> read as solid); thickest cap ~0.5
+            m.base_color = Color::srgba(0.95, 0.96, 1.0, (0.10 + 0.4 * c).min(0.5));
         }
         let s = 7.0 + 11.0 * c; // thicker cloud = bigger puff
         tf.scale = Vec3::new(s, s * 0.45, s); // flattened like a cloud
@@ -423,7 +447,7 @@ fn fire_visuals(fire: Res<Fire>, mut gizmos: Gizmos) {
 pub struct ShowSensors(pub bool);
 
 fn log_viz_help() {
-    info!("viz: TAB=orbit/walk (walk arrives at noon; [ ] scrub time, \\ noon) | hue=diet, vividness=rigidity, size=sensors | G=sensor rays | SPACE=pause | 1-5=speed +/-=fine | B=seed life P=populate planet L=lightning K=cull | H=legend");
+    info!("viz: TAB=orbit/walk (walk arrives at noon; [ ] scrub time, \\ noon; swim into the sea: look + W to dive) | hue=diet, vividness=rigidity, size=sensors | G=sensor rays | SPACE=pause | 1-5=speed +/-=fine | B=seed life P=populate planet L=lightning K=cull | H=legend");
 }
 
 // Hue per dominant food/diet type, matching the food palette (green/purple/gold/cyan).
@@ -593,6 +617,7 @@ fn update_sky(
     gen: Res<GenState>,
     offset: Res<SunOffset>,
     mode: Res<crate::camera::CameraMode>,
+    underwater: Res<Underwater>,
     walkers: Query<&crate::camera::WalkCam>,
     mut clear: ResMut<ClearColor>,
 ) {
@@ -604,16 +629,76 @@ fn update_sky(
         let day = crate::sphere::DAY_TICKS as i64;
         let vtick = (gen.tick as i64 + offset.0).rem_euclid(day) as u32;
         let d = crate::sphere::daylight_at(dir, vtick);
-        let night = Vec3::new(0.02, 0.03, 0.07);
-        let warm = Vec3::new(0.75, 0.45, 0.32); // dawn/dusk horizon glow
-        let blue = Vec3::new(0.50, 0.70, 1.0); // clear bright midday
-        if d < 0.25 {
-            night.lerp(warm, (d / 0.25).clamp(0.0, 1.0))
+        if underwater.0 {
+            // submerged: a murky blue-green "horizon", darker than the open sky + dimming with daylight
+            Vec3::new(0.02, 0.12, 0.20) * (0.35 + 0.65 * d)
         } else {
-            warm.lerp(blue, ((d - 0.25) / 0.75).clamp(0.0, 1.0))
+            let night = Vec3::new(0.02, 0.03, 0.07);
+            let warm = Vec3::new(0.75, 0.45, 0.32); // dawn/dusk horizon glow
+            let blue = Vec3::new(0.50, 0.70, 1.0); // clear bright midday
+            if d < 0.25 {
+                night.lerp(warm, (d / 0.25).clamp(0.0, 1.0))
+            } else {
+                warm.lerp(blue, ((d - 0.25) / 0.75).clamp(0.0, 1.0))
+            }
         }
     };
     clear.0 = Color::srgb(c.x, c.y, c.z);
+}
+
+// Flag whether the walk eye is below the sea surface (only in walk mode + over ocean). Other systems read
+// Underwater to tint the frame blue + murk the sky. Cleared in orbit.
+fn track_underwater(
+    mode: Res<crate::camera::CameraMode>,
+    walkers: Query<&crate::camera::WalkCam>,
+    mut underwater: ResMut<Underwater>,
+) {
+    let sub = *mode == crate::camera::CameraMode::Walk
+        && walkers.single().is_ok_and(|w| {
+            let water_top = crate::sphere::SEA_LEVEL * crate::sphere::ELEV_MAX;
+            crate::sphere::is_ocean(w.dir) && w.eye_alt < water_top
+        });
+    if underwater.0 != sub {
+        underwater.0 = sub;
+    }
+}
+
+// Spawn the full-screen blue tint overlay (hidden until underwater). GlobalZIndex(-1) keeps it above the
+// 3D scene but below the HUD text -> the world tints blue while the dashboard stays readable.
+fn spawn_underwater_tint(mut commands: Commands) {
+    commands.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            width: Val::Percent(100.0),
+            height: Val::Percent(100.0),
+            ..default()
+        },
+        BackgroundColor(Color::srgba(0.06, 0.30, 0.52, 0.34)),
+        GlobalZIndex(-1),
+        Visibility::Hidden,
+        UnderwaterTint,
+    ));
+}
+
+// Show the blue overlay only while submerged.
+fn toggle_underwater_tint(
+    underwater: Res<Underwater>,
+    mut q: Query<&mut Visibility, With<UnderwaterTint>>,
+) {
+    let want = if underwater.0 { Visibility::Inherited } else { Visibility::Hidden };
+    for mut v in &mut q {
+        if *v != want {
+            *v = want;
+        }
+    }
+}
+
+// Breathe a slow swell on the ocean shell (a subtle radial scale wobble = a living tide). Cosmetic.
+fn animate_ocean(gen: Res<GenState>, mut q: Query<&mut Transform, With<Ocean>>) {
+    let s = 1.0 + 0.004 * (gen.tick as f32 * 0.03).sin();
+    for mut tf in &mut q {
+        tf.scale = Vec3::splat(s);
+    }
 }
 
 // Top-center day/night phase readout (walk mode). Tells you where in the cycle you are at a glance.
@@ -727,12 +812,14 @@ HOW CREATURES LOOK
 
 CONTROLS
   TAB         switch ORBIT (space) <-> WALK (ground)
+  O           toggle real sun shadows (on) -- both modes
   ORBIT: right-drag rotate, scroll/W,S zoom, A/D spin,
          Q/E tilt, left-click inspect, F follow
   WALK:  WASD move, arrows or right-drag look,
          Shift run (eye walks over the hills)
+         swim into the SEA: look + W to dive/rise
+         (view tints blue while underwater)
          [ / ]  scrub time-of-day   \\  jump to noon
-         O  toggle shadows (on; off = always sunlit)
          (walk arrives at local noon; scrub [ ] for
           low sun + long shadows; night goes dark)
   G  sensor rays   SPACE  pause/resume
@@ -932,20 +1019,26 @@ fn update_stats(
         return;
     };
     if let Ok((energy, fit, g, diet, alive)) = creatures.get(e) {
-        // dominant diet type (highest current expression)
+        // dominant nutrient the gut targets (highest uptake gene) + current master digestion expression
         let mut dom = 0;
-        for t in 1..NFOOD {
-            if diet.expr[t] > diet.expr[dom] {
+        for t in 1..NUTRIENTS {
+            if g.uptake[t] > g.uptake[dom] {
                 dom = t;
             }
         }
+        let breadth = g.uptake.iter().filter(|u| **u > 0.4).count(); // how many nutrients it actively absorbs
+        let master = master_expression(&g.uptake, &diet.reserves, crate::config::RESERVE_REQ, crate::config::MASTER_FLOOR);
         let mode = if g.light_pref > 0.6 { "diurnal" } else if g.light_pref < 0.4 { "nocturnal" } else { "cathemeral" };
         let habitat = if g.swim > 0.6 { "aquatic" } else if g.swim < 0.3 { "land" } else { "amphibious" };
         let clime = if g.temp_pref > 0.6 { "warm" } else if g.temp_pref < 0.4 { "cold" } else { "temperate" };
         text.0 = format!(
-            "CREATURE  {}\nenergy   {:.1}\nfitness  {:.1}\nsensors  {}\nbite     {:.2}\nheight   {:.2}\nsize     {:.2}\nswim     {:.2} ({})\nsocial   {:.2}\ntemp     {:.2} ({})\nlongevity {:.2}\nmetab    {:.2}\nparental {:.2}\nrigidity {:.2}\nlight    {:.2} ({})\nfatigue  {:.2}\ndiet>type {} (eff {:.2})\nload(G)  {:.2}\nage      {}",
+            "CREATURE  {}\nenergy   {:.1}  f{:.0}/s{:.0}/fat{:.0}\nadiposity {:.2}\nfitness  {:.1}\nsensors  {}\nbite     {:.2}\nheight   {:.2}\nsize     {:.2}\nswim     {:.2} ({})\nsocial   {:.2}\ntemp     {:.2} ({})\nlongevity {:.2}\nmetab    {:.2}\nparental {:.2}\nrigidity {:.2}\nlight    {:.2} ({})\nfatigue  {:.2}\ngut>top n{} (master {:.2})\nbreadth  {}\nload(G)  {:.2}\nage      {}",
             if alive.0 { "alive" } else { "DEAD" },
-            energy.0,
+            energy.total(),
+            energy.fast,
+            energy.sugar,
+            energy.fat,
+            g.adiposity,
             fit.0,
             g.n_sensors(),
             g.bite,
@@ -964,7 +1057,8 @@ fn update_stats(
             mode,
             diet.fatigue,
             dom,
-            diet.expr[dom],
+            master,
+            breadth,
             diet.g,
             diet.age,
         );

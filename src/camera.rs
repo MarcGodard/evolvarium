@@ -1,11 +1,10 @@
 // Two camera modes for the planet (TAB switches), render mode only.
 //   ORBIT (default): drag right-mouse to rotate the globe, scroll/W,S to zoom, A/D spin, Q/E tilt. Left-
-//     click selects a creature/plant; F follows it. Shadows OFF here (the directional shadow range painted
-//     an "eclipse" disc when zoomed).
+//     click selects a creature/plant; F follows it. Real shadows ON (O toggles): the old "eclipse disc" was
+//     a self-shadow blackout, fixed by marking the globe + celestial bodies NotShadowCaster (see main.rs).
 //   WALK: a true ground walk -- the eye rides a fixed height above the terrain (climbs hills, never flies).
-//     WASD move (W/S forward+back, A/D strafe), arrows or right-drag look, Shift run. Shadows ON here: at
-//     eye level the horizon is close so the shadow range covers the whole view -> real tree/creature
-//     shadows, no disc.
+//     WASD move (W/S forward+back, A/D strafe), arrows or right-drag look, Shift run. Walk into the sea to
+//     swim (look + W to dive). Real shadows ON: tight cascade at eye level -> crisp tree/creature shadows.
 use crate::sim::GenState;
 use crate::viz::{noon_offset, Selected, SunLight, SunOffset};
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
@@ -30,6 +29,8 @@ impl Plugin for OrbitCameraPlugin {
                     apply_walk,
                     follow_camera,
                     update_shadow_mode,
+                    update_shadow_cascade,
+                    update_planet_caster,
                 )
                     .chain(),
             );
@@ -37,7 +38,7 @@ impl Plugin for OrbitCameraPlugin {
 }
 
 fn log_controls() {
-    info!("camera: TAB = orbit/walk | ORBIT: right-drag rotate, scroll zoom, click select, F follow | WALK: WASD move, arrows/right-drag look, Shift run");
+    info!("camera: TAB = orbit/walk | ORBIT: right-drag rotate, scroll zoom, click select, F follow | WALK: WASD move, arrows/right-drag look, Shift run, swim into the sea (look + W to dive)");
 }
 
 // Which camera is active. Orbit = space view; Walk = ground view (with real shadows).
@@ -56,13 +57,15 @@ pub struct OrbitCam {
     pub dist: f32,
 }
 
-// Walk state: stand on a surface point (`dir`, unit), face compass `yaw`, look up/down with `pitch`. The
-// eye height above the terrain is fixed -> you walk over hills, never fly.
+// Walk state: stand on a surface point (`dir`, unit), face compass `yaw`, look up/down with `pitch`. On
+// land `eye_alt` is locked to WALK_EYE so you ride the terrain (walk over hills, never fly). Over ocean it
+// becomes free (swim): look + W dives/rises, clamped between the seafloor and the sea surface.
 #[derive(Component)]
 pub struct WalkCam {
     pub dir: Vec3,
     pub yaw: f32,
     pub pitch: f32,
+    pub eye_alt: f32, // eye height above the terrain at `dir`; WALK_EYE on land, swim-controlled in water
 }
 
 const MIN_DIST: f32 = 95.0; // just above the surface (planet radius ~80 + terrain)
@@ -71,6 +74,8 @@ const WALK_EYE: f32 = 2.5; // eye height above the terrain surface (true walk: r
 const WALK_SPEED: f32 = 14.0; // walk speed (units/sec); Shift runs
 const WALK_TURN: f32 = 1.6; // keyboard look speed (rad/sec)
 const PITCH_LIMIT: f32 = 1.3;
+const SWIM_FLOOR: f32 = 0.8; // swimming: eye stays this far above the seafloor (no clip-through)
+const SWIM_CEIL: f32 = 2.0; // swimming: head may breach this far above the sea surface
 
 fn spawn_camera(mut commands: Commands) {
     // start framed on the homeland (where the founding population lives)
@@ -84,7 +89,9 @@ fn spawn_camera(mut commands: Commands) {
         // soft ambient (per-camera in 0.18) so the planet's night side is not pitch black
         AmbientLight { brightness: 220.0, ..default() },
         OrbitCam { yaw: lon, pitch: lat.clamp(-1.3, 1.3), dist: 230.0 },
-        WalkCam { dir: hl.normalize_or_zero(), yaw: 0.0, pitch: 0.0 },
+        WalkCam { dir: hl.normalize_or_zero(), yaw: 0.0, pitch: 0.0, eye_alt: WALK_EYE },
+        // shadow softness: swapped per mode in update_shadow_mode (orbit = soft Gaussian, walk = crisp)
+        bevy::light::ShadowFilteringMethod::Hardware2x2,
     ));
 }
 
@@ -113,12 +120,13 @@ fn toggle_mode(
                 .normalize_or_zero();
                 walk.yaw = 0.0;
                 walk.pitch = 0.0;
+                walk.eye_alt = WALK_EYE;
                 // arrive in good light: snap the sky to ~mid-morning (sun ~45deg up, not overhead) so shadows
                 // are immediately visible (overhead noon casts them straight down = invisible). [ ] \ to scrub.
                 sun_offset.0 = noon_offset(walk.dir, gen.tick) - (crate::sphere::DAY_TICKS as i64) / 8;
             }
             selected.follow = false;
-            info!("camera: WALK mode (WASD move, arrows/right-drag look, Shift run, [ ] scrub time, \\ noon, TAB to orbit)");
+            info!("camera: WALK mode (WASD move, arrows/right-drag look, Shift run, swim into the sea: look + W to dive, [ ] scrub time, \\ noon, TAB to orbit)");
             CameraMode::Walk
         }
         CameraMode::Walk => {
@@ -185,8 +193,10 @@ fn apply_orbit(mode: Res<CameraMode>, selected: Res<Selected>, mut q: Query<(&mu
 
 // --- walk mode ---
 
-// Move along the surface (never up/down): W/S forward+back along heading, A/D strafe. Arrows turn/look,
-// Shift runs. Movement is a great-circle step so you stay glued to the planet.
+// Move over the surface: on land W/S forward+back along heading, A/D strafe (great-circle steps glued to
+// the planet, never up/down). Over OCEAN you SWIM/fly: W/S follow the look direction so pitching down +
+// W dives and pitching up + W rises; A/D strafe horizontally; eye_alt is clamped between the seafloor and
+// just above the sea surface. Arrows turn/look in both modes, Shift runs/sprints.
 fn walk_move(mode: Res<CameraMode>, keys: Res<ButtonInput<KeyCode>>, time: Res<Time>, mut q: Query<&mut WalkCam>) {
     if *mode != CameraMode::Walk {
         return;
@@ -196,14 +206,27 @@ fn walk_move(mode: Res<CameraMode>, keys: Res<ButtonInput<KeyCode>>, time: Res<T
     let boost = if keys.pressed(KeyCode::ShiftLeft) { 2.5 } else { 1.0 };
     let dist = WALK_SPEED * dt * boost;
     use std::f32::consts::FRAC_PI_2;
-    if keys.pressed(KeyCode::KeyW) { w.dir = crate::sphere::step(w.dir, w.yaw, dist).0; }
-    if keys.pressed(KeyCode::KeyS) { w.dir = crate::sphere::step(w.dir, w.yaw, -dist).0; }
-    if keys.pressed(KeyCode::KeyA) { w.dir = crate::sphere::step(w.dir, w.yaw - FRAC_PI_2, dist).0; }
-    if keys.pressed(KeyCode::KeyD) { w.dir = crate::sphere::step(w.dir, w.yaw + FRAC_PI_2, dist).0; }
+    // look (both modes)
     if keys.pressed(KeyCode::ArrowLeft) { w.yaw -= WALK_TURN * dt; }
     if keys.pressed(KeyCode::ArrowRight) { w.yaw += WALK_TURN * dt; }
     if keys.pressed(KeyCode::ArrowUp) { w.pitch = (w.pitch + WALK_TURN * dt).clamp(-PITCH_LIMIT, PITCH_LIMIT); }
     if keys.pressed(KeyCode::ArrowDown) { w.pitch = (w.pitch - WALK_TURN * dt).clamp(-PITCH_LIMIT, PITCH_LIMIT); }
+    if crate::sphere::is_ocean(w.dir) {
+        // swim: split forward into horizontal (advances along the great circle) + vertical (changes depth)
+        let (ch, sv) = (w.pitch.cos(), w.pitch.sin());
+        if keys.pressed(KeyCode::KeyW) { w.dir = crate::sphere::step(w.dir, w.yaw, dist * ch).0; w.eye_alt += dist * sv; }
+        if keys.pressed(KeyCode::KeyS) { w.dir = crate::sphere::step(w.dir, w.yaw, -dist * ch).0; w.eye_alt -= dist * sv; }
+        if keys.pressed(KeyCode::KeyA) { w.dir = crate::sphere::step(w.dir, w.yaw - FRAC_PI_2, dist).0; }
+        if keys.pressed(KeyCode::KeyD) { w.dir = crate::sphere::step(w.dir, w.yaw + FRAC_PI_2, dist).0; }
+        let water_top = crate::sphere::SEA_LEVEL * crate::sphere::ELEV_MAX; // sea surface height over the ocean floor
+        w.eye_alt = w.eye_alt.clamp(SWIM_FLOOR, water_top + SWIM_CEIL);
+    } else {
+        w.eye_alt = WALK_EYE; // on land (or wading out of the sea): stand at a fixed eye height
+        if keys.pressed(KeyCode::KeyW) { w.dir = crate::sphere::step(w.dir, w.yaw, dist).0; }
+        if keys.pressed(KeyCode::KeyS) { w.dir = crate::sphere::step(w.dir, w.yaw, -dist).0; }
+        if keys.pressed(KeyCode::KeyA) { w.dir = crate::sphere::step(w.dir, w.yaw - FRAC_PI_2, dist).0; }
+        if keys.pressed(KeyCode::KeyD) { w.dir = crate::sphere::step(w.dir, w.yaw + FRAC_PI_2, dist).0; }
+    }
 }
 
 // Right-drag to look around (yaw + pitch) in walk mode.
@@ -225,7 +248,7 @@ fn apply_walk(mode: Res<CameraMode>, mut q: Query<(&mut Transform, &WalkCam)>) {
     let Ok((mut t, w)) = q.single_mut() else { return };
     let d = w.dir.normalize_or_zero();
     let up = d; // local up = straight away from the planet center
-    let eye = crate::sphere::surface_pos(d, WALK_EYE);
+    let eye = crate::sphere::surface_pos(d, w.eye_alt); // eye_alt = WALK_EYE on land, swim depth in water
     let tangent = crate::sphere::heading_tangent(d, w.yaw);
     let forward = (tangent * w.pitch.cos() + up * w.pitch.sin()).normalize_or_zero();
     t.translation = eye;
@@ -234,28 +257,96 @@ fn apply_walk(mode: Res<CameraMode>, mut q: Query<(&mut Transform, &WalkCam)>) {
 
 // --- shared ---
 
-// Lighting per mode. Ambient lifts in walk so the ground stays readable; orbit keeps low ambient for a crisp
-// terminator. Shadows are OFF by default everywhere (the directional shadow range painted an "eclipse" disc
-// in orbit AND can black out the whole receiver at ground scale) -> guarantees you always SEE the sunlit
-// world in walk. Shadows are opt-in in walk via O (crate::viz::ShowShadows). Runs on mode/toggle change.
+// Lighting + shadows per mode. Shadows now work in BOTH modes (O toggles): the old "eclipse disc" in orbit
+// was the globe/celestial self-shadow blackout bounded by the cascade range -> fixed by marking the globe,
+// ocean, sun disc, moon + stars NotShadowCaster, so only trees/creatures cast and there's no dark disc.
+// The cascade is swapped per mode: walk packs 4 tight cascades (max 130) for crisp ground shadows at eye
+// level; orbit uses a wide cascade (max 900) so casters across the whole near hemisphere are covered from
+// the far camera. Walk ambient tracks daylight in viz::walk_ambient; orbit keeps a steady fill.
 fn update_shadow_mode(
     mode: Res<CameraMode>,
     show_shadows: Res<crate::viz::ShowShadows>,
     mut lights: Query<&mut DirectionalLight, With<SunLight>>,
     mut ambient: Query<&mut AmbientLight>,
+    mut filter: Query<&mut bevy::light::ShadowFilteringMethod>,
 ) {
     if !mode.is_changed() && !show_shadows.is_changed() {
         return;
     }
     let walk = *mode == CameraMode::Walk;
     for mut l in &mut lights {
-        // walk (ground, close) = real shadows; orbit (far) = off (its shadow range painted an eclipse disc).
-        l.shadows_enabled = walk && show_shadows.0;
+        l.shadows_enabled = show_shadows.0; // real shadows in walk AND orbit now (no more eclipse disc)
+    }
+    // orbit shadows are coarse (far camera, wide cascade) -> soften with multi-tap Gaussian PCF; walk stays
+    // crisp (Hardware2x2) since the tight eye-level cascade already resolves sharp ground shadows.
+    for mut f in &mut filter {
+        *f = if walk { bevy::light::ShadowFilteringMethod::Hardware2x2 } else { bevy::light::ShadowFilteringMethod::Gaussian };
     }
     // orbit gets a steady ambient for a crisp terminator; walk's ambient tracks daylight in viz::walk_ambient
     if !walk {
         for mut a in &mut ambient {
             a.brightness = 220.0;
+        }
+    }
+}
+
+// Size the sun's shadow cascade to the active view each frame. Walk packs 4 tight cascades (max 130) for
+// crisp ground shadows at eye level. Orbit scales the cascade to the zoom: the camera sits `dist` from the
+// planet center, so the visible near hemisphere spans up to ~dist+R in view depth -> set max to track it
+// so shadows stay sharp zoomed-in AND still cover the globe zoomed-out (no fixed coarse cascade).
+fn update_shadow_cascade(
+    mode: Res<CameraMode>,
+    orbit: Query<&OrbitCam>,
+    mut lights: Query<&mut bevy::light::CascadeShadowConfig, With<SunLight>>,
+) {
+    let builder = if *mode == CameraMode::Walk {
+        bevy::light::CascadeShadowConfigBuilder {
+            num_cascades: 4,
+            minimum_distance: 0.3,
+            maximum_distance: 130.0,
+            first_cascade_far_bound: 12.0,
+            overlap_proportion: 0.2,
+        }
+    } else {
+        let dist = orbit.single().map(|o| o.dist).unwrap_or(230.0);
+        let r = crate::sphere::PLANET_R;
+        let near = (dist - r - 30.0).max(0.5); // shadows start just in front of the near surface
+        let far = dist + r + 20.0; // reach the far edge of the visible near hemisphere
+        // first split must sit strictly between near + far (bevy asserts minimum_distance < first bound)
+        let first = near + (far - near) * 0.4;
+        bevy::light::CascadeShadowConfigBuilder {
+            num_cascades: 4,
+            minimum_distance: near,
+            maximum_distance: far,
+            first_cascade_far_bound: first,
+            overlap_proportion: 0.2,
+        }
+    };
+    let cascade = builder.build();
+    for mut c in &mut lights {
+        *c = cascade.clone();
+    }
+}
+
+// Toggle the planet globe's shadow-caster status by mode (runs on mode change). Orbit: the globe CASTS so
+// it shadows its own night side (objects on the dark hemisphere stop catching the sun "through" the planet).
+// Walk: the globe is NotShadowCaster -- a planet-scale self-shadow caused ground acne/blackout, and walk
+// sits on the lit side near local noon so night-through-planet is a non-issue.
+fn update_planet_caster(
+    mode: Res<CameraMode>,
+    show_shadows: Res<crate::viz::ShowShadows>,
+    planet: Query<Entity, With<crate::viz::Planet>>,
+    mut commands: Commands,
+) {
+    if !mode.is_changed() && !show_shadows.is_changed() {
+        return;
+    }
+    let cast = *mode == CameraMode::Orbit && show_shadows.0;
+    for e in &planet {
+        if cast {
+            commands.entity(e).remove::<bevy::light::NotShadowCaster>();
+        } else {
+            commands.entity(e).insert(bevy::light::NotShadowCaster);
         }
     }
 }
