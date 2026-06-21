@@ -752,7 +752,7 @@ fn seed_garden(commands: &mut Commands, rng: &mut Rng) {
         if edible {
             g.flower = 0.6; // blossoms on the fruit tree
         }
-        spawn_tree(commands, 6.0, crate::sphere::surface_pos(place(col, 2.6), FOOD_Y), edible, g);
+        spawn_tree(commands, 6.0, crate::sphere::surface_pos(place(col, 1.7), FOOD_Y), edible, g);
     }
 }
 
@@ -960,7 +960,7 @@ pub fn spawn_world_render(
         });
     }
     commands.insert_resource(crate::viz::TreeMeshes {
-        trunk: meshes.add(Cylinder::new(0.13, 2.0)), // shorter + thinner: less bare pole, canopy envelops it
+        trunk: meshes.add(Cylinder::new(0.14, 1.4)), // short stub; the canopy skirt drapes over most of it
         // fuller broadleaf crown: a cluster of overlapping blobs (centered ~origin; placed in the crown)
         broadleaf: meshes.add(crate::viz::blob_cluster_mesh(&[
             (Vec3::new(0.0, 0.0, 0.0), 1.0, 0.75),

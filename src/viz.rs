@@ -179,9 +179,9 @@ fn add_plant_visuals(
             // trunk is centered (half-height 1.0); canopies attach so they envelop most of the trunk,
             // leaving only a short stub of bare trunk -> a tree, not a hat on a pole.
             let (canopy, color, cy) = if t.edible {
-                (tm.broadleaf.clone(), plant_color(g), 1.5)
+                (tm.broadleaf.clone(), plant_color(g), 1.0)
             } else {
-                (tm.conifer.clone(), Color::srgb(0.06, 0.30, 0.18), -0.3)
+                (tm.conifer.clone(), Color::srgb(0.06, 0.30, 0.18), -0.6)
             };
             let child = commands
                 .spawn((Mesh3d(canopy), MeshMaterial3d(materials.add(color)), Transform::from_xyz(0.0, cy, 0.0)))
@@ -312,7 +312,7 @@ fn size_plants(mut q: Query<(&PlantState, &PlantGenome, &mut Transform, Option<&
             let s = (0.35 + 0.12 * st.mass).clamp(0.35, 1.1);
             tf.scale = Vec3::splat(s);
             tf.rotation = rot;
-            tf.translation = base + up * (1.0 * s); // trunk base rests on the surface (trunk half-height = 1.0)
+            tf.translation = base + up * (0.7 * s); // trunk base rests on the surface (trunk half-height = 0.7)
             continue;
         }
         // per-form scale (girth, height) + lift so each silhouette sits on the surface. girth grows with
@@ -661,12 +661,13 @@ pub fn cactus_mesh() -> Mesh {
 pub fn conifer_mesh() -> Mesh {
     let mut b = MeshBuf::new();
     let mut idx = Vec::new();
-    // 4 smooth tiers, base radius shrinking; each apex rises ~2x the gap to the next base so the skirts
-    // overlap and bury the trunk between them. Higher segment count -> rounded, not faceted.
-    push_cone(&mut b, &mut idx, Vec3::new(0.0, 0.0, 0.0), 1.45, 1.4, 16, 0.7);
-    push_cone(&mut b, &mut idx, Vec3::new(0.0, 0.55, 0.0), 1.15, 1.35, 16, 0.8);
-    push_cone(&mut b, &mut idx, Vec3::new(0.0, 1.1, 0.0), 0.85, 1.3, 16, 0.9);
-    push_cone(&mut b, &mut idx, Vec3::new(0.0, 1.65, 0.0), 0.5, 1.2, 16, 1.0);
+    // 4 SHORT wide skirts (flatter cones), each base flaring wider than the tier above -> the lower rim of
+    // each skirt pokes out below the next, giving a visibly TIERED Christmas tree (not one merged spike).
+    // Wide low base (r1.6) so the bottom skirt drapes over and hides the trunk. Smooth radial normals.
+    push_cone(&mut b, &mut idx, Vec3::new(0.0, 0.0, 0.0), 1.6, 0.85, 16, 0.65);
+    push_cone(&mut b, &mut idx, Vec3::new(0.0, 0.5, 0.0), 1.3, 0.85, 16, 0.78);
+    push_cone(&mut b, &mut idx, Vec3::new(0.0, 1.0, 0.0), 1.0, 0.9, 16, 0.9);
+    push_cone(&mut b, &mut idx, Vec3::new(0.0, 1.5, 0.0), 0.65, 1.0, 16, 1.0);
     b.finish(idx)
 }
 
