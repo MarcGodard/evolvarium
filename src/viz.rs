@@ -661,13 +661,31 @@ pub fn cactus_mesh() -> Mesh {
 pub fn conifer_mesh() -> Mesh {
     let mut b = MeshBuf::new();
     let mut idx = Vec::new();
-    // 4 SHORT wide skirts (flatter cones), each base flaring wider than the tier above -> the lower rim of
-    // each skirt pokes out below the next, giving a visibly TIERED Christmas tree (not one merged spike).
-    // Wide low base (r1.6) so the bottom skirt drapes over and hides the trunk. Smooth radial normals.
-    push_cone(&mut b, &mut idx, Vec3::new(0.0, 0.0, 0.0), 1.6, 0.85, 16, 0.65);
-    push_cone(&mut b, &mut idx, Vec3::new(0.0, 0.5, 0.0), 1.3, 0.85, 16, 0.78);
-    push_cone(&mut b, &mut idx, Vec3::new(0.0, 1.0, 0.0), 1.0, 0.9, 16, 0.9);
-    push_cone(&mut b, &mut idx, Vec3::new(0.0, 1.5, 0.0), 0.65, 1.0, 16, 1.0);
+    // SOLID conifer: a tapered stack of overlapping blob rings WITH a filled core blob at each level, so
+    // there is no hollow to see through and the trunk stays buried inside. Ring radius steps in+out per
+    // level (skirt bulges) keep a layered evergreen look without the cardboard/see-through of bare cones.
+    // (y, ring_radius, blobs_in_ring, blob_radius)
+    let rings = [
+        (0.2_f32, 1.25_f32, 8usize, 0.6_f32),
+        (0.55, 1.4, 9, 0.58), // skirt bulge (tier)
+        (0.95, 1.0, 8, 0.56),
+        (1.3, 1.12, 8, 0.52), // tier bulge
+        (1.65, 0.72, 7, 0.48),
+        (1.95, 0.5, 6, 0.44),
+        (2.25, 0.0, 1, 0.42), // tip
+    ];
+    for (y, rr, n, br) in rings {
+        let shade = 0.6 + 0.2 * (y / 2.25); // darker base -> lighter crown (baked depth)
+        if n <= 1 {
+            push_sphere(&mut b, &mut idx, Vec3::new(0.0, y, 0.0), br, 5, 7, shade);
+        } else {
+            for k in 0..n {
+                let a = std::f32::consts::TAU * k as f32 / n as f32;
+                push_sphere(&mut b, &mut idx, Vec3::new(a.cos() * rr, y, a.sin() * rr), br, 4, 6, shade);
+            }
+            push_sphere(&mut b, &mut idx, Vec3::new(0.0, y, 0.0), br * 1.15, 4, 6, shade * 0.9); // filled core
+        }
+    }
     b.finish(idx)
 }
 
