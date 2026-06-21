@@ -2,6 +2,7 @@
 //! the world can be inspected offline (e.g. by an agent reading the images). Perspective camera; the sphere
 //! is shaded by terrain biome + sun lambert; clouds whiten; creatures/plants/trees draw as colored dots.
 use crate::components::{Creature, Food, Rot, Tree};
+use crate::genome::Genome;
 use crate::sim::GenState;
 use crate::sphere::{self, ELEV_MAX, PLANET_R};
 use bevy::prelude::*;
@@ -27,7 +28,7 @@ pub fn snapshot_capture(
     gen: Res<GenState>,
     cfg: Res<ShotCfg>,
     mut done: Local<bool>,
-    creatures: Query<&Transform, With<Creature>>,
+    creatures: Query<(&Transform, &Genome), With<Creature>>,
     foods: Query<(&Transform, Option<&Tree>, Option<&Rot>), With<Food>>,
     mut exit: MessageWriter<AppExit>,
 ) {
@@ -36,10 +37,17 @@ pub fn snapshot_capture(
     }
     *done = true;
     let tick = gen.tick;
-    // build the marker list: creatures (orange), trees (dark green), carrion (grey), plants (green)
+    // build the marker list. Creatures are colored by their thermal gene (cold=blue .. warm=red) so the
+    // latitudinal niche is visible at a glance; trees dark green, carrion grey, plants green.
     let mut dots: Vec<Dot> = Vec::new();
-    for t in &creatures {
-        dots.push(Dot { pos: t.translation, color: [245, 110, 40], r: 2 });
+    for (t, g) in &creatures {
+        let w = g.temp_pref.clamp(0.0, 1.0);
+        let color = [
+            (70.0 + (240.0 - 70.0) * w) as u8,  // cold blue -> warm red (R)
+            (120.0 + (90.0 - 120.0) * w) as u8, // (G)
+            (240.0 + (40.0 - 240.0) * w) as u8, // (B)
+        ];
+        dots.push(Dot { pos: t.translation, color, r: 2 });
     }
     for (t, tree, rot) in &foods {
         let (color, r) = if tree.is_some() {
