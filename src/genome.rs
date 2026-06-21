@@ -119,6 +119,30 @@ impl Genome {
         self.sensors.len()
     }
 
+    // Sexual recombination (--sexual mode). Body STRUCTURE (sensors + brain net/plast) comes from parent
+    // `a` (variable-topology nets can't be crossed cell-by-cell), while the scalar trait genes + diet
+    // expression are uniform-crossed from both parents. The caller mutates the result. With assortative
+    // mate choice (only similar kin mate) this gives reproductive isolation -> speciation.
+    pub fn crossover(a: &Genome, b: &Genome, rng: &mut Rng) -> Genome {
+        let pick = |rng: &mut Rng, x: f32, y: f32| if rng.f32() < 0.5 { x } else { y };
+        let mut c = a.clone();
+        c.rigidity = pick(rng, a.rigidity, b.rigidity);
+        c.bite = pick(rng, a.bite, b.bite);
+        c.height = pick(rng, a.height, b.height);
+        c.light_pref = pick(rng, a.light_pref, b.light_pref);
+        c.size = pick(rng, a.size, b.size);
+        c.swim = pick(rng, a.swim, b.swim);
+        c.social = pick(rng, a.social, b.social);
+        c.temp_pref = pick(rng, a.temp_pref, b.temp_pref);
+        c.longevity = pick(rng, a.longevity, b.longevity);
+        c.metab = pick(rng, a.metab, b.metab);
+        c.parental = pick(rng, a.parental, b.parental);
+        for i in 0..NFOOD {
+            c.expr0[i] = pick(rng, a.expr0[i], b.expr0[i]);
+        }
+        c
+    }
+
     pub fn mutate(&mut self, rng: &mut Rng, rate: f32, std: f32) {
         // weight perturbation
         for row in self.net.ih.iter_mut().chain(self.net.ho.iter_mut()) {

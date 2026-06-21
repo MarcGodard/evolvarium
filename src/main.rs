@@ -92,6 +92,7 @@ fn main() {
         save,
         load,
         diverse,
+        sexual: args.iter().any(|a| a == "--sexual"),
     });
 
     app.insert_resource(snapshot::ShotCfg { enabled: shots, at_tick: shot_tick, prefix: shot_prefix });

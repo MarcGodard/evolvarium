@@ -51,12 +51,14 @@ live in `config.rs`; the live conversion plan is `SPHERE-PLAN.md`.
       (cold 52 / warm 50, aquatic 52 / land 75). `cargo run -- --load=evolved-diverse.json` to view it.
 - [x] Feed all niches: polar flora floor raised (66b1d03) + shallow-water aquatic flora (this commit), so
       cold + coastal/aquatic regions now have food. Base stays stable (~70). NECESSARY but NOT sufficient.
-- [ ] STABLE niche diversity needs REPRODUCTIVE ISOLATION (speciation). FINDING: even with food in every
-      niche, a single freely-interbreeding population reconverges to the globally-fittest niche (warm+land)
-      within ~10 gens (aquatic 52->5, cold ->6). The kin/social gene affects energy+safety but does NOT
-      gate mating. The real lever: assortative mating (creatures only breed with genetically-similar kin)
-      so niches diverge into non-interbreeding SPECIES that persist. = the "sexual repro + speciation" item.
-      (Big reproduction change -> do carefully, verify cross-seed, ideally when no long seed is mid-run.)
+- [x] REPRODUCTIVE ISOLATION via sexual reproduction (`--sexual`, default off): offspring = crossover of two
+      nearby genetically-similar parents (assortative mate choice) + mutation, asexual fallback if no mate.
+      Genome::crossover (structure from one parent, scalar traits + diet uniform-crossed). VERIFIED: sustains
+      a stable pop (seed5 min39/mean71/max98) AND assortative mating slows reconvergence -> cold niche held
+      25 (vs 6 asexual) over 10 gens. Speciation payoff is real for cold; aquatic still 0 (coastal food too
+      sparse -> niche-area problem, not a mating one). `cargo run -- --sexual` to watch speciation.
+- [ ] Stronger diversity: widen aquatic habitat (more shallow-water flora) so the fish niche has the food to
+      persist even with sexual isolation; consider making --sexual the default once seeds are re-evolved under it.
 - [ ] Visual polish: nicer creature meshes per niche, axial-tilt seasons, atmosphere rim/haze.
 - [ ] Scale-up toward thousands of creatures (original spec headline) via density-invariant rebalance —
       big, do cautiously in validated steps.

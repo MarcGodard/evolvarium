@@ -34,6 +34,7 @@ pub struct GenState {
     pub save: Option<String>, // --save=PATH: write survivors at headless run end (BACKLOG P2)
     pub load: Option<String>, // --load=PATH: resume from a saved population instead of random
     pub diverse: bool,        // --diverse: hand-seed niche-adapted creatures across the globe (multi-niche showcase)
+    pub sexual: bool,         // --sexual: offspring = crossover of two nearby genetically-similar parents (assortative -> speciation); else asexual budding
 }
 
 impl GenState {
@@ -852,6 +853,16 @@ pub fn live_step(
         .filter(|(_, _, _, _, _, a, _, _, _, _)| a.0)
         .map(|(e, t, _, _, _, _, g, _, _, _)| (e, t.translation, signature(g)))
         .collect();
+    // sexual mode: a pool of (entity, pos, signature, genome) so a breeding creature can find a nearby
+    // genetically-similar MATE to cross with. Built only when --sexual (cloning genomes isn't free).
+    let mate_pool: Vec<(Entity, Vec3, [f32; 8], Genome)> = if gen.sexual {
+        cq.iter()
+            .filter(|(_, _, _, _, _, a, _, _, _, _)| a.0)
+            .map(|(e, t, _, _, _, _, g, _, _, _)| (e, t.translation, signature(g), g.clone()))
+            .collect()
+    } else {
+        Vec::new()
+    };
     // bin food indices into the spatial grid (built once per tick)
     let mut fgrid: Vec<Vec<u32>> = vec![Vec::new(); FGRID * FGRID];
     for (i, f) in foods.iter().enumerate() {
@@ -1174,7 +1185,24 @@ pub fn live_step(
             && rng.f32() < P_REPRO_CREATURE * (1.0 - pop as f32 / CREATURE_CAP as f32)
         {
             energy.0 -= REPRO_COST * (0.7 + 0.6 * k); // K-parents spend more per child
-            let mut child = genome.clone();
+            // sexual mode: cross with the nearest genetically-similar mate (assortative -> reproductive
+            // isolation/speciation); fall back to asexual budding if no compatible mate is nearby.
+            let mut child = if gen.sexual {
+                let my_sig = signature(genome);
+                let r2 = SOCIAL_RADIUS * SOCIAL_RADIUS;
+                let mate = mate_pool
+                    .iter()
+                    .filter(|(e, p, s, _)| *e != entity && ct.translation.distance_squared(*p) < r2 && sig_dist(&my_sig, s) < SOCIAL_SIM)
+                    .min_by(|a, b| {
+                        ct.translation.distance_squared(a.1).partial_cmp(&ct.translation.distance_squared(b.1)).unwrap()
+                    });
+                match mate {
+                    Some((_, _, _, mg)) => Genome::crossover(genome, mg, &mut rng),
+                    None => genome.clone(),
+                }
+            } else {
+                genome.clone()
+            };
             child.mutate(&mut rng, MUT_RATE, MUT_STD);
             let cp = disperse_pos(&mut rng, ct.translation, 2.0, CREATURE_Y); // child appears beside the parent
             let birth_e = BIRTH_ENERGY * (0.7 + 0.6 * k); // K-young start better-provisioned (survive); r-young cheap + fragile
