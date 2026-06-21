@@ -3,7 +3,7 @@
 //! is shaded by terrain biome + sun lambert; clouds whiten; creatures/plants/trees draw as colored dots.
 use crate::components::{Creature, Food, Rot, Tree};
 use crate::sim::GenState;
-use crate::sphere::{self, ELEV_MAX, PLANET_R, SEA_LEVEL};
+use crate::sphere::{self, ELEV_MAX, PLANET_R};
 use bevy::prelude::*;
 
 // --shots config: capture a set of planet views to PNG at `at_tick`, then exit.
@@ -85,26 +85,6 @@ fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
     [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]
 }
 
-// Surface color (unlit) at outward direction n: ocean by depth, land by elevation/moisture, polar ice.
-fn surface_color(n: Vec3) -> [f32; 3] {
-    let temp = sphere::base_temperature(n);
-    if sphere::is_ocean(n) {
-        let e = sphere::elevation01(n);
-        let depth = ((SEA_LEVEL - e) / SEA_LEVEL).clamp(0.0, 1.0);
-        return lerp3([0.13, 0.40, 0.60], [0.02, 0.09, 0.28], depth); // shallow -> deep blue
-    }
-    let elev = (sphere::elevation(n) / ELEV_MAX).clamp(0.0, 1.0);
-    let m = sphere::moisture(n);
-    let mut c = lerp3([0.20, 0.55, 0.22], [0.48, 0.40, 0.26], elev); // green lowland -> rocky highland
-    if m < 0.35 {
-        c = lerp3(c, [0.80, 0.72, 0.45], (0.35 - m) / 0.35); // arid -> sand
-    }
-    if temp < 0.25 {
-        c = lerp3(c, [0.95, 0.96, 0.98], (0.25 - temp) / 0.25); // cold -> snow/ice caps
-    }
-    c
-}
-
 // Nearest positive ray-sphere (centered at origin, radius R) hit distance.
 fn ray_sphere(o: Vec3, d: Vec3, r: f32) -> Option<f32> {
     let b = o.dot(d);
@@ -144,7 +124,7 @@ pub fn render(width: u32, height: u32, cam: &Cam, tick: u32, dots: &[Dot]) -> Ve
             let dir = (fwd + right * ndc_x + up * ndc_y).normalize();
             if let Some(t) = ray_sphere(cam.eye, dir, r_hit) {
                 let n = (cam.eye + dir * t).normalize();
-                let mut col = surface_color(n);
+                let mut col = sphere::biome_color(n);
                 let lam = n.dot(sun).max(0.0);
                 let shade = 0.30 + 0.70 * lam; // ambient floor so the night side still reads, day side bright
                 col = [col[0] * shade, col[1] * shade, col[2] * shade];

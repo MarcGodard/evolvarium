@@ -20,10 +20,16 @@ random storms. Earth-like proportions (stylized so moon stays framed).
 - [x] **Snapshot system** (`src/snapshot.rs`, `--shots`): headless CPU ray-tracer -> PNG (globe/homeland/
       farside/pole views). No GPU needed. Lets the world be inspected offline. VERIFIED (planet + oceans +
       localized life + herds visible).
-- [ ] **Live render** (`src/main.rs` setup_scene, `src/viz.rs`, `src/camera.rs`): convert `cargo run` to a
-      globe mesh + ocean sphere + orbiting sun/moon + cloud shell + orbit camera. Until then the live window
-      still draws the OLD flat terrain (creatures now orbit it) -- next step. (Snapshots already show the globe.)
-- [ ] **Re-tune balance** if needed (already healthy; revisit after live render + more genes).
+- [x] **Live render** (`cargo run`): DONE. Globe mesh (`terrain::build_globe`, elevation-displaced +
+      biome-vertex-colored) + translucent ocean sphere + orbiting sun (directional light follows
+      `sphere::sun_dir`) + emissive moon on its orbit + drifting cloud puffs + cloud-driven rain streaks +
+      surface fire glow, all on the sphere. Plants/trees orient outward (grow from the surface); creatures
+      stand on the surface (sim sets it). Camera starts in space over the homeland, faster fly speed.
+      Builds clean; render binary starts without panic.
+- [ ] **Cleanup**: the old flat `terrain.rs` helpers (build_mesh/height/moisture/rockiness/cloud_shade/
+      WATER_LEVEL) + `config` storm consts are now unused (warnings) -> prune in a follow-up.
+- [ ] **Re-tune balance** if needed (already healthy ~70-90; revisit after more genes).
+- [ ] **Polish**: nicer clouds (shell mesh vs gizmos), star background, sun billboard, axial-tilt seasons.
 
 ## Sim conversion checklist (next ticks)
 

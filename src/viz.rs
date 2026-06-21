@@ -8,8 +8,14 @@ use bevy::prelude::*;
 use crate::components::{Alive, Creature, DietState, Energy, Fitness, Food, Heading, Rot, Tree};
 use crate::genome::{Genome, NFOOD};
 use crate::plant::{plant_color, PlantGenome, PlantState};
-use crate::sim::{daylight, Fire, GenState, Weather, ROT_GONE};
+use crate::sim::{grid_cell_surface, Fire, GenState, ROT_GONE};
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
+
+// Markers for the celestial bodies (animated by day_night_lighting).
+#[derive(Component)]
+pub struct SunLight;
+#[derive(Component)]
+pub struct Moon;
 
 pub struct VizPlugin;
 
@@ -26,7 +32,6 @@ impl Plugin for VizPlugin {
                     draw_sensors,
                     add_plant_visuals,
                     size_plants,
-                    ground_creatures,
                     day_night_lighting,
                     rain_visuals,
                     fire_visuals,
@@ -122,108 +127,97 @@ fn color_carrion(mut mats: ResMut<Assets<StandardMaterial>>, q: Query<(&Rot, &Me
 // their base stays on the ground (no floating). Trees render much bigger (tall trunk + canopy).
 fn size_plants(mut q: Query<(&PlantState, &PlantGenome, &mut Transform, Option<&Tree>), With<Food>>) {
     for (st, g, mut tf, tree) in &mut q {
-        let ground = crate::terrain::height(tf.translation.x, tf.translation.z);
+        let up = tf.translation.normalize_or_zero(); // outward surface normal at this spot
+        let base = crate::sphere::surface_pos(up, 0.0); // foot on the terrain surface
+        let rot = Quat::from_rotation_arc(Vec3::Y, up); // grow outward from the planet, not world-up
         if tree.is_some() {
             let s = (0.9 + 0.28 * st.mass).clamp(0.9, 4.5);
             tf.scale = Vec3::splat(s);
-            tf.translation.y = ground + 1.5 * s; // trunk base rests on the ground
+            tf.rotation = rot;
+            tf.translation = base + up * (1.5 * s); // trunk base rests on the surface
         } else {
             // sphere mesh radius 0.35; girth from mass, vertical stretch from the height gene
             let girth = (0.25 + 0.13 * st.mass).clamp(0.25, 1.6);
             let tall = 1.0 + 2.0 * g.height; // taller plants = harder for short creatures to reach
             tf.scale = Vec3::new(girth, girth * tall, girth);
-            tf.translation.y = ground + 0.35 * girth * tall; // base rooted on the ground (no float)
+            tf.rotation = rot;
+            tf.translation = base + up * (0.35 * girth * tall); // base rooted on the surface (no float)
         }
     }
 }
 
-// Day/night: dim the sun at night + bright at noon, AND arc it across the sky (so shadows sweep).
-// Rain overcasts the sky: a storm dims the sun and tints it grey-blue (gloom you can see coming).
+// Orbit the sun + moon: the directional light comes FROM the sun's current direction (so the lit half of
+// the planet + the terminator sweep as it spins), and the moon sphere rides its orbit. The globe self-
+// shades via surface normals, so illuminance stays constant; ambient (set in setup) lifts the night side.
 fn day_night_lighting(
     gen: Res<GenState>,
-    weather: Res<Weather>,
-    mut suns: Query<(&mut DirectionalLight, &mut Transform)>,
+    mut suns: Query<&mut Transform, (With<SunLight>, Without<Moon>)>,
+    mut moons: Query<&mut Transform, (With<Moon>, Without<SunLight>)>,
 ) {
-    let d = daylight(gen.tick);
-    let phase = (gen.tick as f32 / crate::sim::DAY_TICKS as f32) * std::f32::consts::TAU; // 0 = midnight
-    // sun arcs east (morning) -> overhead (noon) -> west (evening); below horizon at night
-    let sun_pos = Vec3::new(phase.sin() * 60.0, -phase.cos() * 60.0, 22.0);
-    let overcast = 1.0 - 0.7 * weather.rain; // storm dims the light up to 70%
-    for (mut sun, mut tf) in &mut suns {
-        sun.illuminance = (150.0 + 11000.0 * d) * overcast; // night dark .. noon bright, dimmed by rain
-        sun.color = Color::srgb(1.0, 1.0 - 0.25 * weather.rain, 1.0 - 0.45 * weather.rain); // warm -> grey-blue gloom
-        *tf = Transform::from_translation(sun_pos).looking_at(Vec3::ZERO, Vec3::Y);
+    let sd = crate::sphere::sun_dir(gen.tick);
+    for mut tf in &mut suns {
+        // place the light source out along the sun direction, aimed at the planet center
+        *tf = Transform::from_translation(sd * (crate::sphere::PLANET_R * 4.0)).looking_at(Vec3::ZERO, Vec3::Y);
+    }
+    let mp = crate::sphere::moon_pos(gen.tick);
+    for mut tf in &mut moons {
+        tf.translation = mp;
     }
 }
 
 // Rain streaks: when a storm is active, draw falling streaks via gizmos (immediate-mode, no entities).
 // Count + opacity scale with Weather.rain. Positions are a deterministic scatter that falls + wraps on
 // the tick clock (no per-frame RNG -> stays reproducible). Cosmetic; reads the rain cycle at a glance.
-fn rain_visuals(gen: Res<GenState>, weather: Res<Weather>, mut gizmos: Gizmos) {
-    if weather.rain < 0.05 {
-        return;
-    }
-    let span = crate::sim::WORLD_HALF; // scatter over the arena
-    let n = (weather.rain * 600.0) as u32; // heavier rain = more streaks
-    let fall = (gen.tick as f32) * 0.9; // falling offset
-    let streak = 2.2; // length of each drop
-    let col = Color::srgba(0.65, 0.72, 0.9, 0.35 + 0.4 * weather.rain);
-    for i in 0..n {
-        // cheap hash scatter in x,z; phase per-drop so they don't fall in lockstep
-        let hx = ((i.wrapping_mul(374761393)) & 0xffff) as f32 / 65535.0;
-        let hz = ((i.wrapping_mul(668265263)) & 0xffff) as f32 / 65535.0;
-        let x = (hx * 2.0 - 1.0) * span;
-        let z = (hz * 2.0 - 1.0) * span;
-        let phase = (hx + hz) * 40.0;
-        let y = 28.0 - ((fall + phase) % 30.0); // fall from y~28 down, wrapping
-        gizmos.line(Vec3::new(x, y + streak, z), Vec3::new(x, y, z), col);
-    }
-}
-
-// Drifting clouds: sample the cloud-shade field on a coarse grid and draw translucent puffs at altitude
-// where it's cloudy. They scroll with the wind (same deterministic field the sim uses to dim local light).
-fn cloud_visuals(gen: Res<GenState>, mut gizmos: Gizmos) {
-    let span = crate::sim::WORLD_HALF;
-    let step = 13.0;
-    let y = 30.0; // cloud altitude
-    let mut x = -span;
-    while x <= span {
-        let mut z = -span;
-        while z <= span {
-            let s = crate::terrain::cloud_shade(x, z, gen.tick);
-            if s > 0.12 {
-                let a = (0.15 + 0.5 * s).min(0.6);
-                gizmos.sphere(Vec3::new(x, y, z), 5.0 * s + 2.5, Color::srgba(0.85, 0.86, 0.92, a));
+// Rain streaks: short radial lines hanging under thick clouds wherever it is currently raining (cloud-
+// driven). Sampled on a lat/lon grid; rain is sparse (~10% of thick cloud) so streaks are scattered.
+fn rain_visuals(gen: Res<GenState>, mut gizmos: Gizmos) {
+    use std::f32::consts::{FRAC_PI_2, PI, TAU};
+    let (rows, cols) = (44, 88);
+    let col = Color::srgba(0.6, 0.7, 0.95, 0.55);
+    for j in 0..rows {
+        for i in 0..cols {
+            let lat = -FRAC_PI_2 + PI * (j as f32 + 0.5) / rows as f32;
+            let lon = -PI + TAU * (i as f32 + 0.5) / cols as f32;
+            let d = crate::sphere::lonlat_to_pos(lon, lat, 0.0).normalize();
+            if crate::sphere::rain_at(d, gen.tick) > 0.0 {
+                let base = crate::sphere::surface_pos(d, 0.0);
+                gizmos.line(base + d * 9.0, base + d * 3.0, col); // a drop falling toward the surface
             }
-            z += step;
         }
-        x += step;
     }
 }
 
-// Wildfire glow: draw an orange flame sphere at each burning fire-cell, sized + brightened by intensity.
-// Immediate-mode gizmos; reads the fire grid directly so blazes (and their spread) are visible.
+// Drifting clouds: translucent puffs on a shell above the planet wherever the cloud field is thick. The
+// field scrolls with the wind (same deterministic cloud_cover the sim uses for rain) -> clouds move around.
+fn cloud_visuals(gen: Res<GenState>, mut gizmos: Gizmos) {
+    use std::f32::consts::{FRAC_PI_2, PI, TAU};
+    let r = crate::sphere::PLANET_R + crate::sphere::ELEV_MAX + 6.0;
+    let (rows, cols) = (26, 52);
+    for j in 0..rows {
+        for i in 0..cols {
+            let lat = -FRAC_PI_2 + PI * (j as f32 + 0.5) / rows as f32;
+            let lon = -PI + TAU * (i as f32 + 0.5) / cols as f32;
+            let d = crate::sphere::lonlat_to_pos(lon, lat, 0.0).normalize();
+            let c = crate::sphere::cloud_cover(d, gen.tick);
+            if c > 0.25 {
+                let a = (0.10 + 0.45 * c).min(0.5);
+                gizmos.sphere(d * r, 3.0 + 5.0 * c, Color::srgba(0.9, 0.92, 0.96, a));
+            }
+        }
+    }
+}
+
+// Wildfire glow: an orange flame sphere at each burning fire-cell on the surface, sized by intensity.
 fn fire_visuals(fire: Res<Fire>, mut gizmos: Gizmos) {
-    let n = crate::sim::SOIL_RES;
-    let to_world = |k: usize| ((k as f32 + 0.5) / n as f32) * 2.0 * crate::sim::WORLD_HALF - crate::sim::WORLD_HALF;
     for c in 0..fire.cell.len() {
         let f = fire.cell[c];
         if f < 0.1 {
             continue;
         }
-        let (x, z) = (to_world(c % n), to_world(c / n));
-        let y = crate::terrain::height(x, z);
+        let surf = grid_cell_surface(c);
+        let up = surf.normalize_or_zero();
         let col = Color::srgb(1.0, 0.35 + 0.25 * f, 0.05); // deep orange .. yellow-hot
-        gizmos.sphere(Vec3::new(x, y + 0.6 + 2.0 * f, z), 0.6 + 1.8 * f, col);
-    }
-}
-
-// Sit creatures on the terrain (feet on the ground; taller bodies stand higher). Cosmetic; runs after
-// the sim's per-tick move so it just corrects the render height.
-fn ground_creatures(mut q: Query<&mut Transform, With<Creature>>) {
-    for mut tf in &mut q {
-        let ground = crate::terrain::height(tf.translation.x, tf.translation.z);
-        tf.translation.y = ground + 0.8 * tf.scale.y;
+        gizmos.sphere(surf + up * (0.6 + 2.0 * f), 0.6 + 1.8 * f, col);
     }
 }
 

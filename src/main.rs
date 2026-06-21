@@ -113,36 +113,51 @@ fn main() {
     app.run();
 }
 
-// Render-only scene dressing: ground plane sized to the arena + a light.
+// Render-only scene dressing: the planet globe, a translucent ocean shell, the sun light + a moon. The
+// sun direction + moon position are animated each frame by viz::day_night_lighting.
 fn setup_scene(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let span = sim::WORLD_HALF * 2.0 + 4.0;
-    // heightfield terrain (P3): elevation-shaded landscape (vertex colors), white base lets them show
+    // planet: elevation-displaced, biome-vertex-colored globe. White base_color lets vertex colors show.
     commands.spawn((
-        Mesh3d(meshes.add(terrain::build_mesh(span, 200))),
+        Mesh3d(meshes.add(terrain::build_globe(160))),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::WHITE,
             perceptual_roughness: 0.95,
             ..default()
         })),
-        Transform::from_xyz(0.0, 0.0, 0.0),
+        Transform::IDENTITY,
     ));
-    // translucent water surface: floods low basins below WATER_LEVEL (valleys/desert sinks)
+    // ocean shell: a translucent blue sphere at sea level (land pokes above it, basins flood below)
+    let sea_r = sphere::PLANET_R + sphere::SEA_LEVEL * sphere::ELEV_MAX;
     commands.spawn((
-        Mesh3d(meshes.add(Plane3d::default().mesh().size(span, span))),
+        Mesh3d(meshes.add(Sphere::new(sea_r).mesh().ico(6).unwrap())),
         MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgba(0.18, 0.42, 0.62, 0.6),
+            base_color: Color::srgba(0.10, 0.32, 0.52, 0.55),
             alpha_mode: AlphaMode::Blend,
-            perceptual_roughness: 0.1, // calm, reflective
+            perceptual_roughness: 0.1,
             ..default()
         })),
-        Transform::from_xyz(0.0, terrain::WATER_LEVEL, 0.0),
+        Transform::IDENTITY,
     ));
+    // sun (directional light; direction set per-frame by day_night_lighting) + soft ambient so the night
+    // side is not pitch black.
     commands.spawn((
-        DirectionalLight { shadows_enabled: true, ..default() },
-        Transform::from_xyz(20.0, 40.0, 20.0).looking_at(Vec3::ZERO, Vec3::Y),
+        DirectionalLight { shadows_enabled: true, illuminance: 11000.0, ..default() },
+        Transform::from_xyz(1.0, 0.5, 0.0).looking_at(Vec3::ZERO, Vec3::Y),
+        viz::SunLight,
+    ));
+    // moon: a small emissive sphere; position set per-frame by day_night_lighting.
+    commands.spawn((
+        Mesh3d(meshes.add(Sphere::new(sphere::MOON_R).mesh().ico(3).unwrap())),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::srgb(0.85, 0.85, 0.9),
+            emissive: LinearRgba::rgb(0.5, 0.5, 0.55),
+            ..default()
+        })),
+        Transform::from_translation(sphere::moon_pos(0)),
+        viz::Moon,
     ));
 }

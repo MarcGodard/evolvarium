@@ -29,14 +29,18 @@ pub struct FlyCam {
 
 impl Default for FlyCam {
     fn default() -> Self {
-        Self { speed: 12.0, sensitivity: 0.003, yaw: 0.0, pitch: 0.0 }
+        Self { speed: 45.0, sensitivity: 0.003, yaw: 0.0, pitch: 0.0 } // faster: the planet is ~80-unit radius
     }
 }
 
 fn spawn_camera(mut commands: Commands) {
+    // start out in space looking at the planet (radius ~80) from over the homeland
+    let eye = crate::sim::homeland_center() * 230.0 + Vec3::Y * 40.0;
     commands.spawn((
         Camera3d::default(),
-        Transform::from_xyz(0.0, 8.0, 22.0).looking_at(Vec3::new(0.0, 4.0, 0.0), Vec3::Y),
+        Transform::from_translation(eye).looking_at(Vec3::ZERO, Vec3::Y),
+        // soft ambient (per-camera in 0.18) so the planet's night side is not pitch black
+        AmbientLight { brightness: 220.0, ..default() },
         FlyCam::default(),
     ));
 }

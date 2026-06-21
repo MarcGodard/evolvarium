@@ -196,6 +196,30 @@ pub fn plant_habitability(d: Vec3) -> f32 {
     (rock_ok * moist_ok * warm_ok).clamp(0.0, 1.0)
 }
 
+/// Unlit biome color (RGB 0..1) at outward direction `d`: ocean by depth, land by elevation/moisture,
+/// polar ice. Shared by the globe mesh (viz) + the snapshot renderer so they look the same.
+pub fn biome_color(d: Vec3) -> [f32; 3] {
+    let lerp3 = |a: [f32; 3], b: [f32; 3], t: f32| {
+        let t = t.clamp(0.0, 1.0);
+        [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]
+    };
+    let temp = base_temperature(d);
+    if is_ocean(d) {
+        let depth = ((SEA_LEVEL - elevation01(d)) / SEA_LEVEL).clamp(0.0, 1.0);
+        return lerp3([0.13, 0.40, 0.60], [0.02, 0.09, 0.28], depth);
+    }
+    let elev = (elevation(d) / ELEV_MAX).clamp(0.0, 1.0);
+    let m = moisture(d);
+    let mut c = lerp3([0.20, 0.55, 0.22], [0.48, 0.40, 0.26], elev);
+    if m < 0.35 {
+        c = lerp3(c, [0.80, 0.72, 0.45], (0.35 - m) / 0.35);
+    }
+    if temp < 0.25 {
+        c = lerp3(c, [0.95, 0.96, 0.98], (0.25 - temp) / 0.25);
+    }
+    c
+}
+
 /// Sample a random surface direction inside a "homeland" cap: within `cap_rad` radians of `center`.
 /// Used to start the population LOCALIZED in one region (it then spreads). cap_rad = PI = whole globe.
 pub fn random_dir_in_cap(rng: &mut crate::rng::Rng, center: Vec3, cap_rad: f32) -> Vec3 {

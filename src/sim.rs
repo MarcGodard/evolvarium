@@ -108,6 +108,11 @@ fn cell_center(c: usize) -> Vec3 {
     crate::sphere::lonlat_to_pos(lon, lat, 0.0) // dir * PLANET_R; callers sample fields by direction
 }
 
+// Surface position (on the terrain) of grid cell `c`. For the render to place fire/effects on the globe.
+pub fn grid_cell_surface(c: usize) -> Vec3 {
+    crate::sphere::surface_pos(cell_center(c).normalize_or_zero(), 0.0)
+}
+
 // Food spatial grid (perf): bin foods into FGRID^2 cells so a creature scans only nearby cells instead
 // of all ~1900 foods. NEAR_QUERY is the min query radius so the global-nearest is always found (plants
 // are dense -> nearest is within a few units, well inside this).
