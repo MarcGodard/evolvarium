@@ -53,24 +53,28 @@ live in `config.rs`; the live conversion plan is `SPHERE-PLAN.md`.
       evolves 9.7->6.5. KNOWN-SOFT: master expr pegs ~0.99 (reserve gradient too gentle) -> friction F1
       (`clients/evolvarium/tuning-frictions.md`) for the tuning harness.
 
-### Grass: lesser ubiquitous ground cover (2026-06-21)
-- [x] **Grass = a lesser plant** (`Grass` marker + `PlantGenome::grass`): one nutrient (vs ~3-4),
-      low energy density, defenseless, flat, full-sun, high-regrow turf. Own lifecycle (`grass_step`)
-      + own cap (`GRASS_CAP`, kept OFF `PLANT_CAP`), refills toward target each tick, dies on
-      fire/drown/poor-soil so it persists only where `plant_habitability > GRASS_HAB_MIN` (= "soil
-      capable of plants"). Excluded from the saved-plant snapshot + plant stats (`Without<Grass>`).
-- [x] **Grazeable as a hunger-gated FALLBACK, NOT a forage target**: grass is kept out of the
-      forage `best`/sensor slot (`best_grass` tracked separately) so creatures still navigate to real
-      plants, and is grazed underfoot only when `energy < START_ENERGY`, yield x`GRASS_EAT_GAIN`.
-      WHY both: (1) creatures eat/approach only the SINGLE nearest food -> ubiquitous grass-as-best
-      traps them nibbling low-yield turf, never reaching plants; (2) an ungated graze force-feeds full
-      creatures every tick and the overflow pumps `OVEREAT_G` growth-load -> chronic gorging disease.
-      Either alone crashed pop 62->12. Fixed design: pop 63 (== grass-off 62), balance-neutral.
-- [x] **Visualized as instanced 3D tufts** (`viz::grass_tuft_mesh`): one shared bushy 7-blade clump
-      mesh + one green double-sided material for ALL tufts (cheap). `size_grass` sets each tuft's
-      LENGTH + girth from local soil (habitability + moisture) so rich ground grows visibly taller,
-      lush turf; rooted + stood on the surface normal. Homeland-clustered in normal mode so the walk
-      view shows a green carpet. Verified via `--capture`.
+### Grass: whole-planet ground cover + whole-planet trees (2026-06-21)
+- [x] **Grass = render-only ground cover** (`Grass` marker + `PlantGenome::grass`): a "lesser plant"
+      (one nutrient vs ~3-4, low energy, defenseless, flat, high-regrow turf). Carries NO `Food`, so it
+      stays OUT of the per-tick food clone/sensing entirely -> 8000 tufts cost ~nothing in the sim
+      (putting grass in the food scan both crushed perf and crashed foraging). Own lifecycle
+      (`grass_step`) + own cap (`GRASS_CAP`); seeds/persists only where `plant_habitability >
+      GRASS_HAB_MIN` ("soil capable of plants"), dies on fire/drown/poor-soil, refills each tick.
+      WHOLE-PLANET: `grass_pos` samples the full sphere (not homeland).
+- [x] **Edible as a thin POSITION-based fallback** (`GRASS_GRAZE`): since grass is not an entity in
+      the food scan, a HUNGRY creature (`energy < START_ENERGY`) standing on grass-bearing soil nibbles
+      a small sugar trickle (x local habitability). Hunger-gated so it neither distracts foraging (grass
+      is never sensed) nor force-feeds the full. NOTE: fine population balance deferred (per owner); the
+      sim currently runs hot -- revisit `GRASS_GRAZE` + tree caps when tuning.
+- [x] **Visualized as 3D blades** (`viz::grass_tuft_mesh`): one shared clump of 11 thin, tall, pointed,
+      curved blade strips + one green double-sided material for ALL tufts. `add_grass_visuals` sizes each
+      tuft ONCE at attach (static -> no per-frame cost): LENGTH + thickness are WATER-driven (moisture,
+      so coastal/edge grass grows tall + lush; dry interior short), gated by habitability; rooted + stood
+      on the surface normal. ROOT-CAUSE fix: `add_plant_visuals` was grabbing grass (it has no `Food`
+      now, plus a `Without<Grass>` guard) and rendering it as plant domes -> grass looked like "blobs."
+- [x] **Trees now whole-planet**: `spawn_trees` always scatters worldwide (`rand_pos`); `N_TREES`
+      240, `TREE_CAP` 480 so forests fill the globe (ambient reproduction tops up).
+- [ ] **Rebalance population** for the heavier whole-planet world (grass graze + tree caps); deferred.
 
 ## Open
 
