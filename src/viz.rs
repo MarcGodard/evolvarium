@@ -205,7 +205,7 @@ fn add_plant_visuals(
                         .spawn((
                             Mesh3d(forms.flower.clone()),
                             MeshMaterial3d(fmat.clone()),
-                            Transform::from_xyz(0.9 * a.cos(), 2.4, 0.9 * a.sin()).with_scale(Vec3::splat(0.85)),
+                            Transform::from_xyz(1.0 * a.cos(), 1.4, 1.0 * a.sin()).with_scale(Vec3::splat(0.85)),
                         ))
                         .id();
                     commands.entity(e).add_child(c);
@@ -240,11 +240,16 @@ fn add_plant_visuals(
         commands.entity(e).insert((Mesh3d(forms.forms[fi].clone()), MeshMaterial3d(mat)));
         // bloom child for a flowering plant (placed near the top of the unit mesh, in local space)
         if g.flower > 0.25 && !matches!(g.form, form::KELP | form::MOSS) {
+            // local-y of each mesh's TOP, so the bloom sits ON the plant (not floating above it). The flower
+            // stalk is a CENTERED cylinder (top at y=0.5); clumps/cactus reach ~1.0; clusters ~0.5; flat
+            // forms hug the ground.
             let top = match g.form {
-                form::FLOWER_STALK | form::REED => 1.0,
+                form::FLOWER_STALK => 0.5, // centered cylinder, top at half-height
+                form::REED | form::SUCCULENT | form::FERN => 0.85,
+                form::HERB => 0.4,
                 form::SHRUB => 0.6,
-                form::LILYPAD | form::GROUNDCOVER | form::ROSETTE => 0.1,
-                _ => 0.7,
+                form::LILYPAD | form::GROUNDCOVER | form::ROSETTE => 0.12,
+                _ => 0.5,
             };
             let child = commands
                 .spawn((
