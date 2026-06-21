@@ -47,6 +47,12 @@ live in `config.rs`; the live conversion plan is `SPHERE-PLAN.md`.
 - [ ] Metabolic-efficiency on digestion, vision acuity, etc. (lower priority).
 
 ### World / visuals
+- [x] Hand-seeded diverse showcase (`--diverse`, evolved-diverse.json @ gens=0): loads a multi-niche world
+      (cold 52 / warm 50, aquatic 52 / land 75). `cargo run -- --load=evolved-diverse.json` to view it.
+- [ ] STABLE niche diversity: the diverse seed RECONVERGES to warm+land over render time because the poles
+      + oceans lack food (cold lowers plant_habitability; no plants in water). To sustain cold/aquatic
+      niches the ENVIRONMENT must feed them: cold-tolerant flora at the poles + an aquatic food source
+      (algae/plankton in water). This is the real lever for permanent biodiversity (balance/world change).
 - [ ] Visual polish: nicer creature meshes per niche, axial-tilt seasons, atmosphere rim/haze.
 - [ ] Scale-up toward thousands of creatures (original spec headline) via density-invariant rebalance —
       big, do cautiously in validated steps.
