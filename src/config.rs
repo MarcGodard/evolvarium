@@ -16,8 +16,7 @@ pub const DT: f32 = 1.0 / 60.0;
 pub const CREATURE_Y: f32 = 0.5;
 pub const FOOD_Y: f32 = 0.4;
 
-// --- day/night + light ---
-pub const DAY_TICKS: u32 = 2400; // ticks per full day-night cycle (40s at 60Hz render: slow, watchable sunrise->sunset)
+// --- day/night + light --- (day length lives in sphere::DAY_TICKS; day/night is positional on the planet)
 pub const LIGHT_COST: f32 = 0.8; // energy/sec per unit mismatch between local light and a creature's light_pref
 pub const TEMP_COST: f32 = 0.9; // energy/sec per unit mismatch between local temperature and temp_pref (thermal niche: poles harsh for warm-adapted, equator harsh for cold-adapted)
 
@@ -142,9 +141,8 @@ pub const SEASON_FREQ: f32 = 0.4; // seasonal wet/dry oscillation speed (radians
 // evaporates it (faster at noon), storms refill it. Rocky cells shed runoff (no gain); grassy cells
 // soak it up -> after a heavy rain, low-lying grassland turns wet and favors wet-liking plants, which
 // then dry out and get stressed during the next drought. Drives temporal selection on plant `wet`.
-pub const P_STORM: f32 = 0.0008; // per-tick chance a downpour begins (~1 storm / 1250 ticks)
+// (Rain is now LOCAL + cloud-driven: sphere::rain_at / weather_step. No global storm onset/decay.)
 pub const RAIN_RATE: f32 = 0.8;  // ground-water added/sec at full rain on a fully-absorbing (grassy) cell
-pub const RAIN_DECAY: f32 = 0.2; // rain intensity shed/sec (a storm fades over ~5s)
 pub const EVAP: f32 = 0.06;      // ground-water evaporated/sec at noon (scaled by sunlight, x current water)
 pub const WET_GAIN: f32 = 0.45;  // how much saturated ground water adds to a plant's effective local moisture
 pub const WET_GROWTH: f32 = 0.3; // growth-rate boost from watered ground (rain visibly greens the land)

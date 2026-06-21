@@ -11,11 +11,7 @@ use crate::rng::Rng;
 // Tuning constants live in config.rs; re-exported so existing `sim::FOO` refs still resolve.
 pub use crate::config::*;
 
-// Global daylight: 0 at midnight .. 1 at noon, cycling on the tick clock. (Spherical world uses the
-// POSITIONAL sphere::daylight_at per creature/plant; this global form remains for whole-world stats/logs.)
-pub fn daylight(tick: u32) -> f32 {
-    0.5 - 0.5 * (tick as f32 / DAY_TICKS as f32 * std::f32::consts::TAU).cos()
-}
+// (Day/night is POSITIONAL on the planet: sphere::daylight_at per creature/plant. No global daylight.)
 
 // Map a 3D sphere position to pseudo-planar grid coords in [-WORLD_HALF, WORLD_HALF] (longitude -> u,
 // latitude -> v) so the existing 2D fertility/water/fire/food grids can index the globe by lon/lat.
