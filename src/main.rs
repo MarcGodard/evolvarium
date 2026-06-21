@@ -185,7 +185,7 @@ fn setup_scene(
     // close so the range covers the whole view -> real shadows, no disc). Cascade tuned tight for ground
     // scale (creatures ~0.5, trees ~3 units); globe+ocean are NotShadowCaster so only trees/creatures cast.
     commands.spawn((
-        DirectionalLight { shadows_enabled: true, illuminance: 40000.0, ..default() },
+        DirectionalLight { shadows_enabled: true, illuminance: 100_000.0, ..default() }, // full daylight (was overcast-dim)
         bevy::light::CascadeShadowConfigBuilder::default().build(),
         Transform::from_xyz(1.0, 0.5, 0.0).looking_at(Vec3::ZERO, Vec3::Y),
         // keep the light ViewVisible so its shadow cascades keep building even as day_night rotates it

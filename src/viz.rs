@@ -49,7 +49,7 @@ impl Plugin for VizPlugin {
                     draw_sensors,
                     add_plant_visuals,
                     size_plants,
-                    (day_night_lighting, time_of_day, toggle_shadows, walk_ambient, update_daycycle),
+                    (day_night_lighting, time_of_day, toggle_shadows, walk_ambient, update_daycycle, update_sky),
                     rain_visuals,
                     fire_visuals,
                     update_clouds,
@@ -286,7 +286,9 @@ fn walk_ambient(
     let Ok(w) = walkers.single() else { return };
     let vtick = (gen.tick as i64 + offset.0).rem_euclid(crate::sphere::DAY_TICKS as i64) as u32;
     let day = crate::sphere::daylight_at(w.dir.normalize_or_zero(), vtick); // 0 night .. 1 noon overhead
-    let b = 35.0 + 175.0 * day; // dim moonlit ~35 at night, soft day fill ~210 (low so shadows still read)
+    // low-ish fill so the strong directional sun (100k lux) keeps shadows + 3D shading; day still reads
+    // bright because lit surfaces are sun-lit. High fill washed shadows flat.
+    let b = 45.0 + 230.0 * day; // moonlit ~45 at night, soft day fill ~275 (shadows survive)
     for mut a in &mut ambient {
         a.brightness = b;
     }
@@ -584,6 +586,35 @@ struct StatsText;
 // Live world dashboard (bottom-left): population, day, average evolved genes + niche counts. Render-only.
 #[derive(Component)]
 struct WorldStatsText;
+
+// Sky color tracks the sun in walk mode (black sky made midday look like night). Dark night -> warm
+// dawn/dusk -> blue midday, by local daylight at the walker. Orbit keeps near-black space (you're in space).
+fn update_sky(
+    gen: Res<GenState>,
+    offset: Res<SunOffset>,
+    mode: Res<crate::camera::CameraMode>,
+    walkers: Query<&crate::camera::WalkCam>,
+    mut clear: ResMut<ClearColor>,
+) {
+    let space = Vec3::new(0.015, 0.02, 0.05);
+    let c = if *mode != crate::camera::CameraMode::Walk {
+        space
+    } else {
+        let dir = walkers.single().map(|w| w.dir.normalize_or_zero()).unwrap_or(Vec3::Y);
+        let day = crate::sphere::DAY_TICKS as i64;
+        let vtick = (gen.tick as i64 + offset.0).rem_euclid(day) as u32;
+        let d = crate::sphere::daylight_at(dir, vtick);
+        let night = Vec3::new(0.02, 0.03, 0.07);
+        let warm = Vec3::new(0.75, 0.45, 0.32); // dawn/dusk horizon glow
+        let blue = Vec3::new(0.50, 0.70, 1.0); // clear bright midday
+        if d < 0.25 {
+            night.lerp(warm, (d / 0.25).clamp(0.0, 1.0))
+        } else {
+            warm.lerp(blue, ((d - 0.25) / 0.75).clamp(0.0, 1.0))
+        }
+    };
+    clear.0 = Color::srgb(c.x, c.y, c.z);
+}
 
 // Top-center day/night phase readout (walk mode). Tells you where in the cycle you are at a glance.
 #[derive(Component)]
