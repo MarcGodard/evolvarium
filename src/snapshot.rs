@@ -40,6 +40,9 @@ pub fn snapshot_capture(
     // build the marker list. Creatures are colored by their thermal gene (cold=blue .. warm=red) so the
     // latitudinal niche is visible at a glance; trees dark green, carrion grey, plants green.
     let mut dots: Vec<Dot> = Vec::new();
+    // niche census: count creatures by their evolved niche so biodiversity is quantified, not just drawn.
+    let (mut cold, mut warm, mut aquatic, mut land, mut frugal, mut fast, mut spec, mut hidden) =
+        (0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32);
     for (t, g) in &creatures {
         let w = g.temp_pref.clamp(0.0, 1.0);
         let color = [
@@ -48,7 +51,13 @@ pub fn snapshot_capture(
             (240.0 + (40.0 - 240.0) * w) as u8, // (B)
         ];
         dots.push(Dot { pos: t.translation, color, r: 2 });
+        if g.temp_pref < 0.4 { cold += 1; } else if g.temp_pref > 0.6 { warm += 1; }
+        if g.swim > 0.6 { aquatic += 1; } else if g.swim < 0.3 { land += 1; }
+        if g.metab > 0.6 { frugal += 1; } else if g.metab < 0.4 { fast += 1; }
+        if g.rigidity > 0.6 { spec += 1; } // diet specialist
+        hidden += g.net.ih.len() as u32; // brain hidden neurons
     }
+    let nc = creatures.iter().count().max(1) as f32;
     for (t, tree, rot) in &foods {
         let (color, r) = if tree.is_some() {
             ([25, 95, 35], 2)
@@ -68,6 +77,10 @@ pub fn snapshot_capture(
         ("pole", Cam { eye: pole * (PLANET_R * 3.0), target: Vec3::ZERO, fov_deg: 36.0 }),
     ];
     info!("snapshot at tick {tick}: {} creatures, {} foods", creatures.iter().count(), foods.iter().count());
+    info!(
+        "niche census: clime[cold {cold} / warm {warm}] habitat[aquatic {aquatic} / land {land}] metab[frugal {frugal} / fast {fast}] | diet-specialists {spec} | avg brain {:.1} neurons",
+        hidden as f32 / nc
+    );
     for (name, cam) in &views {
         let buf = render(SHOT_W, SHOT_H, cam, tick, &dots);
         save_png(&format!("{}-{}.png", cfg.prefix, name), SHOT_W, SHOT_H, &buf);
