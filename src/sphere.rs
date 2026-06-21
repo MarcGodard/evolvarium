@@ -187,12 +187,17 @@ pub fn rockiness(d: Vec3) -> f32 {
 /// Plant habitability 0..1 at `d`: 0 in ocean, reduced on rock, in drought, and in the cold (poles). Land
 /// flora thrives in warm, moist, low ground -> plants + the creatures that eat them cluster temperate/tropical.
 pub fn plant_habitability(d: Vec3) -> f32 {
-    if is_ocean(d) {
-        return 0.0;
+    let e = elevation01(d);
+    if e < SEA_LEVEL - 0.10 {
+        return 0.0; // deep ocean: barren
+    }
+    let warm_ok = 0.45 + 0.55 * base_temperature(d); // poles support hardy (cold-tolerant) flora, not barren
+    if e < SEA_LEVEL {
+        // shallow coastal water: aquatic flora (algae/seagrass) -> food for swimmers, a real aquatic niche
+        return (0.65 * warm_ok).clamp(0.0, 1.0);
     }
     let rock_ok = 1.0 - 0.9 * rockiness(d);
     let moist_ok = (moisture(d) / 0.35).clamp(0.0, 1.0);
-    let warm_ok = 0.45 + 0.55 * base_temperature(d); // poles support hardy (cold-tolerant) flora, not barren -> a cold niche has food to sustain it
     (rock_ok * moist_ok * warm_ok).clamp(0.0, 1.0)
 }
 

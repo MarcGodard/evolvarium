@@ -287,6 +287,24 @@ fn rand_pos(rng: &mut Rng, offset: f32) -> Vec3 {
     crate::sphere::surface_pos(d, offset)
 }
 
+// Plant spawn position: land OR shallow coastal water (avoids only DEEP ocean), so aquatic flora seeds the
+// shallows -> a food base for the swimmer/"fish" niche. `homeland` clusters it with the founding pop.
+fn plant_spawn_pos(rng: &mut Rng, homeland: bool, offset: f32) -> Vec3 {
+    let (center, cap) = if homeland {
+        (homeland_center(), HOMELAND_CAP)
+    } else {
+        (Vec3::Y, std::f32::consts::PI)
+    };
+    let mut d = crate::sphere::random_dir_in_cap(rng, center, cap);
+    for _ in 0..8 {
+        if crate::sphere::elevation01(d) >= crate::sphere::SEA_LEVEL - 0.10 {
+            break; // land or shallow water is fine; only deep ocean is rejected
+        }
+        d = crate::sphere::random_dir_in_cap(rng, center, cap);
+    }
+    crate::sphere::surface_pos(d, offset)
+}
+
 // --- hand-seeded DIVERSE world (--diverse): place niche-adapted creatures in matching regions so the
 // showcase starts with coexisting niches (swimmers in wet coast, cold creatures at the poles, warm
 // grazers at the equator, tall browsers temperate) instead of one converged winner. Genes are overridden
@@ -449,7 +467,7 @@ pub fn spawn_world_headless(mut commands: Commands, mut rng: ResMut<Rng>, mut ge
     }
     let ntypes = gen.ntypes();
     // diverse mode spreads life globally (creatures are placed in niches worldwide, so food must be too).
-    let food_pos = |rng: &mut Rng| if gen.diverse { rand_pos(rng, FOOD_Y) } else { homeland_pos(rng, FOOD_Y) };
+    let food_pos = |rng: &mut Rng| plant_spawn_pos(rng, !gen.diverse, FOOD_Y); // land + shallow water (aquatic flora)
     match &snap {
         Some(s) if !s.plants.is_empty() => {
             for sp in &s.plants {
@@ -542,7 +560,7 @@ pub fn spawn_world_render(
         ));
     }
     let ntypes = gen.ntypes();
-    let food_pos = |rng: &mut Rng| if gen.diverse { rand_pos(rng, FOOD_Y) } else { homeland_pos(rng, FOOD_Y) };
+    let food_pos = |rng: &mut Rng| plant_spawn_pos(rng, !gen.diverse, FOOD_Y); // land + shallow water (aquatic flora)
     match &snap {
         Some(s) if !s.plants.is_empty() => {
             for sp in &s.plants {

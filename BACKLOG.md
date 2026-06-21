@@ -49,10 +49,14 @@ live in `config.rs`; the live conversion plan is `SPHERE-PLAN.md`.
 ### World / visuals
 - [x] Hand-seeded diverse showcase (`--diverse`, evolved-diverse.json @ gens=0): loads a multi-niche world
       (cold 52 / warm 50, aquatic 52 / land 75). `cargo run -- --load=evolved-diverse.json` to view it.
-- [ ] STABLE niche diversity: the diverse seed RECONVERGES to warm+land over render time because the poles
-      + oceans lack food (cold lowers plant_habitability; no plants in water). To sustain cold/aquatic
-      niches the ENVIRONMENT must feed them: cold-tolerant flora at the poles + an aquatic food source
-      (algae/plankton in water). This is the real lever for permanent biodiversity (balance/world change).
+- [x] Feed all niches: polar flora floor raised (66b1d03) + shallow-water aquatic flora (this commit), so
+      cold + coastal/aquatic regions now have food. Base stays stable (~70). NECESSARY but NOT sufficient.
+- [ ] STABLE niche diversity needs REPRODUCTIVE ISOLATION (speciation). FINDING: even with food in every
+      niche, a single freely-interbreeding population reconverges to the globally-fittest niche (warm+land)
+      within ~10 gens (aquatic 52->5, cold ->6). The kin/social gene affects energy+safety but does NOT
+      gate mating. The real lever: assortative mating (creatures only breed with genetically-similar kin)
+      so niches diverge into non-interbreeding SPECIES that persist. = the "sexual repro + speciation" item.
+      (Big reproduction change -> do carefully, verify cross-seed, ideally when no long seed is mid-run.)
 - [ ] Visual polish: nicer creature meshes per niche, axial-tilt seasons, atmosphere rim/haze.
 - [ ] Scale-up toward thousands of creatures (original spec headline) via density-invariant rebalance —
       big, do cautiously in validated steps.
