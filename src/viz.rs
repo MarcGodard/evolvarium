@@ -178,7 +178,7 @@ fn add_plant_visuals(
             let (canopy, color, cy) = if t.edible {
                 (tm.broadleaf.clone(), plant_color(g), 2.2)
             } else {
-                (tm.conifer.clone(), Color::srgb(0.06, 0.30, 0.18), 1.1)
+                (tm.conifer.clone(), Color::srgb(0.06, 0.30, 0.18), 0.5)
             };
             let child = commands
                 .spawn((Mesh3d(canopy), MeshMaterial3d(materials.add(color)), Transform::from_xyz(0.0, cy, 0.0)))
@@ -630,13 +630,15 @@ pub fn cactus_mesh() -> Mesh {
     b.finish(idx)
 }
 
-// A conifer: three stacked cones (broad bottom -> narrow top), the classic Christmas-tree silhouette.
+// A conifer: stacked cones that OVERLAP heavily (each tier's base sits well inside the cone below) so the
+// tiers merge into ONE solid Christmas-tree silhouette instead of three separate floating cones. Base at
+// y=0; each cone's apex rises well past the next cone's base, closing the gaps.
 pub fn conifer_mesh() -> Mesh {
     let mut b = MeshBuf::new();
     let mut idx = Vec::new();
-    push_cone(&mut b, &mut idx, Vec3::new(0.0, 0.0, 0.0), 1.3, 1.6, 9, 0.7);
-    push_cone(&mut b, &mut idx, Vec3::new(0.0, 1.1, 0.0), 1.0, 1.5, 9, 0.82);
-    push_cone(&mut b, &mut idx, Vec3::new(0.0, 2.1, 0.0), 0.65, 1.4, 9, 0.95);
+    push_cone(&mut b, &mut idx, Vec3::new(0.0, 0.0, 0.0), 1.4, 1.5, 10, 0.7);
+    push_cone(&mut b, &mut idx, Vec3::new(0.0, 0.65, 0.0), 1.1, 1.4, 10, 0.82);
+    push_cone(&mut b, &mut idx, Vec3::new(0.0, 1.3, 0.0), 0.75, 1.3, 10, 0.95);
     b.finish(idx)
 }
 
