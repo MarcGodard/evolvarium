@@ -142,6 +142,18 @@ pub const RAIN_DECAY: f32 = 0.2; // rain intensity shed/sec (a storm fades over 
 pub const EVAP: f32 = 0.06;      // ground-water evaporated/sec at noon (scaled by sunlight, x current water)
 pub const WET_GAIN: f32 = 0.45;  // how much saturated ground water adds to a plant's effective local moisture
 pub const WET_GROWTH: f32 = 0.3; // growth-rate boost from watered ground (rain visibly greens the land)
+// Lightning -> fire: during a storm, lightning strikes ignite a fire-grid cell. Fire spreads through DRY
+// vegetation, burns plants/trees + hurts creatures caught in it, is doused by rain/wet ground, and leaves
+// fertile ash. Ties the weather system to a dramatic, visible ecological disturbance + renewal cycle.
+pub const P_LIGHTNING: f32 = 0.02; // per-tick strike chance while a storm is active (several per storm; most fizzle on wet ground, the dry-fuel ones catch)
+pub const LIGHTNING_RAIN: f32 = 0.4; // rain intensity above which lightning can strike (storms only)
+pub const FIRE_WET_MAX: f32 = 0.45; // fire only ignites/spreads into cells drier than this (wet ground won't burn)
+pub const FIRE_DECAY: f32 = 0.12; // natural burnout per sec
+pub const FIRE_DOUSE: f32 = 2.0; // extra burnout per sec per unit local ground water (rain puts fire out)
+pub const FIRE_SPREAD: f32 = 0.5; // spread rate per sec to adjacent dry cells
+pub const FIRE_ASH: f32 = 2.5; // soil fertility deposited per sec by a burning cell (ash enriches regrowth)
+pub const FIRE_KILL: f32 = 0.4; // fire intensity at which a plant/tree in the cell burns up
+pub const FIRE_DAMAGE: f32 = 9.0; // energy/sec a creature loses standing in fire
 // Defense also taxes REPRODUCTION, not just growth: at carrying capacity growth cost is toothless, so
 // armored plants pegged defense ~free; penalizing repro lets cheaper plants win cap slots -> interior def.
 pub const DEF_REPRO_COST: f32 = 0.7; // armored plant (def=1) reproduces at (1-0.7)=30% the base rate

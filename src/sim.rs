@@ -140,6 +140,86 @@ pub fn weather_step(
     }
 }
 
+// Fire grid (lightning-ignited wildfires): per-cell burn intensity 0..1. Shares the soil/ground-water
+// grid resolution + indexing.
+#[derive(Resource)]
+pub struct Fire {
+    pub cell: Vec<f32>,
+}
+
+impl Fire {
+    pub fn new() -> Self {
+        Fire { cell: vec![0.0; SOIL_RES * SOIL_RES] }
+    }
+    pub fn get(&self, x: f32, z: f32) -> f32 {
+        self.cell[GroundWater::index(x, z)]
+    }
+    pub fn avg(&self) -> f32 {
+        self.cell.iter().sum::<f32>() / self.cell.len() as f32
+    }
+}
+
+// --- fire (lightning): strikes during storms ignite dry cells; fire spreads through dry fuel, is doused
+// by rain/wet ground, and deposits ash fertility. plant_step burns vegetation, live_step burns creatures.
+pub fn fire_step(
+    gen: Res<GenState>,
+    mut rng: ResMut<Rng>,
+    weather: Res<Weather>,
+    gw: Res<GroundWater>,
+    mut fire: ResMut<Fire>,
+    mut soil: ResMut<Soil>,
+) {
+    let _ = gen;
+    let dt = DT;
+    let n = SOIL_RES;
+    // lightning: during a storm, occasionally strike -> seek out DRY fuel (sample a few cells, ignite the
+    // driest). At storm onset the ground is still dry before rain soaks in; rocky highland stays dry too.
+    if weather.rain > LIGHTNING_RAIN && rng.f32() < P_LIGHTNING {
+        let mut best = 0usize;
+        let mut driest = f32::INFINITY;
+        for _ in 0..12 {
+            let c = (rng.f32() * (n * n) as f32) as usize % (n * n);
+            let (cx, cz) = cell_center(c);
+            let w = gw.get(cx, cz);
+            if w < driest {
+                driest = w;
+                best = c;
+            }
+        }
+        if driest < FIRE_WET_MAX {
+            fire.cell[best] = 1.0; // struck dry fuel -> it catches
+        }
+    }
+    if fire.cell.iter().all(|&f| f <= 0.02) {
+        return; // nothing burning, skip the sweep
+    }
+    let cur = fire.cell.clone(); // spread reads the pre-tick state
+    for c in 0..cur.len() {
+        let f = cur[c];
+        if f <= 0.02 {
+            continue;
+        }
+        let (cx, cz) = cell_center(c);
+        let wet = gw.get(cx, cz);
+        fire.cell[c] = (f - (FIRE_DECAY + FIRE_DOUSE * wet) * dt).max(0.0); // decay + rain douses
+        soil.add(cx, cz, FIRE_ASH * f * dt); // ash enriches the burned ground
+        // spread to the 4 orthogonal neighbours that are dry enough to catch
+        let (cxi, czi) = (c % n, c / n);
+        let mut nbrs = [usize::MAX; 4];
+        let mut k = 0;
+        if cxi > 0 { nbrs[k] = czi * n + cxi - 1; k += 1; }
+        if cxi < n - 1 { nbrs[k] = czi * n + cxi + 1; k += 1; }
+        if czi > 0 { nbrs[k] = (czi - 1) * n + cxi; k += 1; }
+        if czi < n - 1 { nbrs[k] = (czi + 1) * n + cxi; k += 1; }
+        for &ni in &nbrs[..k] {
+            let (wx, wz) = cell_center(ni);
+            if gw.get(wx, wz) < FIRE_WET_MAX {
+                fire.cell[ni] = (fire.cell[ni] + FIRE_SPREAD * f * dt).min(1.0);
+            }
+        }
+    }
+}
+
 fn rand_pos(rng: &mut Rng, y: f32) -> Vec3 {
     let x = rng.range(-WORLD_HALF, WORLD_HALF);
     let z = rng.range(-WORLD_HALF, WORLD_HALF);
@@ -387,6 +467,7 @@ pub fn plant_step(
     gen: Res<GenState>,
     mut soil: ResMut<Soil>,
     gw: Res<GroundWater>,
+    fire: Res<Fire>,
     mut tree_bites: ResMut<TreeBites>,
     mut q: Query<(Entity, &mut PlantState, &PlantGenome, &Transform, Option<&Tree>), Without<Rot>>, // not carrion
 ) {
@@ -402,6 +483,15 @@ pub fn plant_step(
     let mut detritus: Vec<(PlantGenome, f32, Vec3)> = Vec::new(); // moisture-killed plants -> poison
     for (e, mut st, g, tf, tree) in &mut q {
         let (px, pz) = (tf.translation.x, tf.translation.z);
+        // wildfire: a plant/tree in a strongly-burning cell burns up (despawn). fire_step already laid
+        // down ash fertility here, so burned ground regrows richer.
+        if fire.get(px, pz) > FIRE_KILL {
+            commands.entity(e).despawn();
+            if tree.is_none() {
+                plant_count = plant_count.saturating_sub(1);
+            }
+            continue;
+        }
         let fert = soil.get(px, pz);
         let water = gw.get(px, pz); // dynamic rain-fed ground water at this spot
         // fertility AND rain-watered ground both speed growth (rain visibly greens the land)
@@ -621,6 +711,7 @@ pub fn live_step(
     mut commands: Commands,
     mut tree_bites: ResMut<TreeBites>,
     mut soil: ResMut<Soil>,
+    fire: Res<Fire>,
     fq: Query<(Entity, &Transform, &PlantState, &PlantGenome, Option<&Rot>, Option<&Tree>), (With<Food>, Without<Creature>)>,
 ) {
     let dt = DT;
@@ -753,6 +844,11 @@ pub fn live_step(
             * dt;
         // fatigue dynamics: exertion (thrust) accrues debt; idling (low thrust) sheds it. Clamped 0..1.
         diet.fatigue = (diet.fatigue + (FATIGUE_GAIN * thrust - FATIGUE_REST * (1.0 - thrust)) * dt).clamp(0.0, 1.0);
+        // wildfire: standing in fire burns energy fast (deadly to anything caught in a blaze)
+        let here_fire = fire.get(np.x, np.z);
+        if here_fire > 0.05 {
+            energy.0 -= FIRE_DAMAGE * here_fire * dt;
+        }
         // social/kin need: a social creature isolated from genetic kin drains energy (loneliness). Being
         // in a herd of kin removes the drain (and grants predation safety, see predation_step). The drain
         // is SCALED BY POPULATION DENSITY (pop/CREATURE_CAP): at a healthy density social creatures must
@@ -1017,6 +1113,8 @@ pub fn generation_step(
     tq: Query<&PlantGenome, With<Tree>>, // trees only, for the evolvable-height stat
     soil: Res<Soil>,
     gw: Res<GroundWater>,
+    fire: Res<Fire>,
+    weather: Res<Weather>,
     mut exit: MessageWriter<AppExit>,
 ) {
     gen.tick = gen.tick.wrapping_add(1); // global clock: drives season (plant_step) + continuous timing
@@ -1048,8 +1146,8 @@ pub fn generation_step(
             let avg_qual: f32 = pq.iter().map(|(g, _)| g.quality).sum::<f32>() / plant_n as f32;
             let avg_wet: f32 = pq.iter().map(|(g, _)| g.wet).sum::<f32>() / plant_n as f32;
             info!(
-                "t {:>6} | pop {:>3} | energy {:.1} | life-fit {:.1} | age {:.0} | sens {:.1} | bite {:.2} | rig {:.2} | def {:.2} nut {:.2} qual {:.2} wet {:.2} | plants {} | soil {:.2}",
-                gen.tick, pop, e / n, f / n, age / n, sens / n, bite / n, rig / n, avg_def, avg_nut, avg_qual, avg_wet, plant_n, soil.avg()
+                "t {:>6} | pop {:>3} | energy {:.1} | life-fit {:.1} | age {:.0} | sens {:.1} | bite {:.2} | rig {:.2} | def {:.2} nut {:.2} qual {:.2} wet {:.2} | plants {} | soil {:.2} | rain {:.2} fire {:.3}",
+                gen.tick, pop, e / n, f / n, age / n, sens / n, bite / n, rig / n, avg_def, avg_nut, avg_qual, avg_wet, plant_n, soil.avg(), weather.rain, fire.avg()
             );
         }
         if done {
@@ -1139,7 +1237,7 @@ pub fn generation_step(
     let avg_wet: f32 = pq.iter().map(|(g, _)| g.wet).sum::<f32>() / plant_n as f32;
     if gen.diet {
         let avg_rig: f32 = scored.iter().map(|(_, g)| g.rigidity).sum::<f32>() / n as f32;
-        info!("gen {:>3} | nutri {:>6.2} | sens {:.1} r{:.0} | rig {:.2} | bite {:.2} vs def {:.2} | light {:.2} sz {:.2} sw {:.2} so {:.2} brain {:.1} | plant-nut {:.2} qual {:.2} wet {:.2} | roam {:.2} elev {:.1} | plants {} soil {:.2} gw {:.2} | trees {} h{:.2} b{:.2}", gen.generation, avg, avg_sensors, avg_range, avg_rig, avg_bite, avg_def, avg_light, avg_size, avg_swim, avg_social, avg_hidden, avg_nut, avg_qual, avg_wet, avg_roam, avg_elev, plant_n, soil.avg(), gw.avg(), tree_n, avg_tree_h, avg_tree_b);
+        info!("gen {:>3} | nutri {:>6.2} | sens {:.1} r{:.0} | rig {:.2} | bite {:.2} vs def {:.2} | light {:.2} sz {:.2} sw {:.2} so {:.2} brain {:.1} | plant-nut {:.2} qual {:.2} wet {:.2} | roam {:.2} elev {:.1} | plants {} soil {:.2} gw {:.2} fire {:.3} | trees {} h{:.2} b{:.2}", gen.generation, avg, avg_sensors, avg_range, avg_rig, avg_bite, avg_def, avg_light, avg_size, avg_swim, avg_social, avg_hidden, avg_nut, avg_qual, avg_wet, avg_roam, avg_elev, plant_n, soil.avg(), gw.avg(), fire.avg(), tree_n, avg_tree_h, avg_tree_b);
     } else {
         info!("gen {:>3} | food {:>6.2} | sens {:.1} r{:.0} | bite {:.2} vs def {:.2} | plant-nut {:.2} qual {:.2} wet {:.2} | roam {:.2} elev {:.1} | plants {} soil {:.2} gw {:.2}", gen.generation, avg, avg_sensors, avg_range, avg_bite, avg_def, avg_nut, avg_qual, avg_wet, avg_roam, avg_elev, plant_n, soil.avg(), gw.avg());
     }

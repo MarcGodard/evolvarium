@@ -8,7 +8,7 @@ use bevy::prelude::*;
 use crate::components::{Alive, Creature, DietState, Energy, Fitness, Food, Heading, Rot, Tree};
 use crate::genome::{Genome, NFOOD};
 use crate::plant::{plant_color, PlantGenome, PlantState};
-use crate::sim::{daylight, GenState, Weather, ROT_GONE};
+use crate::sim::{daylight, Fire, GenState, Weather, ROT_GONE};
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
 pub struct VizPlugin;
@@ -29,6 +29,7 @@ impl Plugin for VizPlugin {
                     ground_creatures,
                     day_night_lighting,
                     rain_visuals,
+                    fire_visuals,
                     hide_dead,
                     color_carrion,
                     pick_on_click,
@@ -175,6 +176,23 @@ fn rain_visuals(gen: Res<GenState>, weather: Res<Weather>, mut gizmos: Gizmos) {
         let phase = (hx + hz) * 40.0;
         let y = 28.0 - ((fall + phase) % 30.0); // fall from y~28 down, wrapping
         gizmos.line(Vec3::new(x, y + streak, z), Vec3::new(x, y, z), col);
+    }
+}
+
+// Wildfire glow: draw an orange flame sphere at each burning fire-cell, sized + brightened by intensity.
+// Immediate-mode gizmos; reads the fire grid directly so blazes (and their spread) are visible.
+fn fire_visuals(fire: Res<Fire>, mut gizmos: Gizmos) {
+    let n = crate::sim::SOIL_RES;
+    let to_world = |k: usize| ((k as f32 + 0.5) / n as f32) * 2.0 * crate::sim::WORLD_HALF - crate::sim::WORLD_HALF;
+    for c in 0..fire.cell.len() {
+        let f = fire.cell[c];
+        if f < 0.1 {
+            continue;
+        }
+        let (x, z) = (to_world(c % n), to_world(c / n));
+        let y = crate::terrain::height(x, z);
+        let col = Color::srgb(1.0, 0.35 + 0.25 * f, 0.05); // deep orange .. yellow-hot
+        gizmos.sphere(Vec3::new(x, y + 0.6 + 2.0 * f, z), 0.6 + 1.8 * f, col);
     }
 }
 
