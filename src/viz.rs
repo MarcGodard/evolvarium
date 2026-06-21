@@ -8,7 +8,7 @@ use bevy::prelude::*;
 use crate::components::{Alive, Creature, DietState, Energy, Fitness, Food, Heading, Rot, Tree};
 use crate::genome::{Genome, NFOOD};
 use crate::plant::{plant_color, PlantGenome, PlantState};
-use crate::sim::{grid_cell_surface, Fire, GenState, ROT_GONE};
+use crate::sim::{grid_cell_surface, Fire, GenState, GroundWater, ROT_GONE};
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
 // Markers for the celestial bodies (animated by day_night_lighting).
@@ -44,6 +44,7 @@ impl Plugin for VizPlugin {
                     update_stats,
                     update_world_stats,
                     time_controls,
+                    god_disturbances,
                     draw_selection,
                 ),
             );
@@ -281,7 +282,7 @@ fn fire_visuals(fire: Res<Fire>, mut gizmos: Gizmos) {
 pub struct ShowSensors(pub bool);
 
 fn log_viz_help() {
-    info!("viz: creature hue=diet specialization, vividness=rigidity, size=sensor count | G=sensor rays | SPACE=pause | +/-=sim speed");
+    info!("viz: hue=diet, vividness=rigidity, size=sensors | G=sensor rays | SPACE=pause +/-=speed | L=lightning K=cull");
 }
 
 // Hue per dominant food/diet type, matching the food palette (green/purple/gold/cyan).
@@ -329,6 +330,50 @@ fn restyle_creatures(
 fn toggle_sensors(keys: Res<ButtonInput<KeyCode>>, mut show: ResMut<ShowSensors>) {
     if keys.just_pressed(KeyCode::KeyG) {
         show.0 = !show.0;
+    }
+}
+
+// God-controls (M6): live disturbances to steer the ecosystem + watch it respond. L = lightning strike
+// (ignite a wildfire in the driest land cell -> it spreads/burns via fire_step). K = mass-mortality event
+// (kill ~a third of creatures -> watch the population recover). Pokes sim resources/state transiently;
+// no balance constants changed. Uses no sim RNG (stays deterministic-safe).
+fn god_disturbances(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut fire: ResMut<Fire>,
+    gw: Res<GroundWater>,
+    mut creatures: Query<&mut Alive, With<Creature>>,
+) {
+    if keys.just_pressed(KeyCode::KeyL) {
+        // ignite the driest non-ocean grid cell (most flammable fuel)
+        let mut best = 0usize;
+        let mut driest = f32::INFINITY;
+        for c in 0..fire.cell.len() {
+            let surf = grid_cell_surface(c);
+            if crate::sphere::is_ocean(surf.normalize_or_zero()) {
+                continue;
+            }
+            let w = gw.get(surf);
+            if w < driest {
+                driest = w;
+                best = c;
+            }
+        }
+        fire.cell[best] = 1.0;
+        info!("god: lightning strike -> wildfire ignited");
+    }
+    if keys.just_pressed(KeyCode::KeyK) {
+        let mut i = 0u32;
+        let mut killed = 0u32;
+        for mut alive in &mut creatures {
+            if alive.0 {
+                i += 1;
+                if i % 3 == 0 {
+                    alive.0 = false; // sim turns it into carrion + despawns next step
+                    killed += 1;
+                }
+            }
+        }
+        info!("god: mass-mortality event -> culled {killed} creatures");
     }
 }
 
