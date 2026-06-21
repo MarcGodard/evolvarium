@@ -316,7 +316,7 @@ fn spawn_carrion(commands: &mut Commands, pos: Vec3, mass: f32) {
 
 // Spawn one creature (no render mesh; viz::add_creature_visuals gives it one in render mode).
 // Used for continuous-mode offspring; fresh brain from the genome's priors, learns over its own life.
-fn spawn_creature(commands: &mut Commands, g: Genome, pos: Vec3, rng: &mut Rng) {
+fn spawn_creature(commands: &mut Commands, g: Genome, pos: Vec3, rng: &mut Rng, birth_energy: f32) {
     let h = rng.range(-std::f32::consts::PI, std::f32::consts::PI);
     let brain = Brain { net: g.net.clone(), prev_dist: f32::INFINITY };
     let diet = diet_state(&g);
@@ -325,7 +325,7 @@ fn spawn_creature(commands: &mut Commands, g: Genome, pos: Vec3, rng: &mut Rng) 
         g,
         brain,
         diet,
-        Energy(BIRTH_ENERGY),
+        Energy(birth_energy),
         Fitness(0.0),
         Heading(h),
         Alive(true),
@@ -1099,20 +1099,26 @@ pub fn live_step(
 
         // continuous reproduction: a well-fed creature spends energy to bud a mutated child nearby.
         // Energy cost is the trade-off (breeding vs survival); cap bounds the population.
+        // r/K life-history (parental gene, 0.5 = current values): r = breed young/cheap/many small fragile
+        // young; K = breed late/costly/few well-provisioned young. Density taper still bounds the population.
+        let k = genome.parental;
+        let repro_thr = REPRO_THRESHOLD * (0.8 + 0.4 * k);
+        let repro_min_age = (REPRO_MIN_AGE as f32 * (0.6 + 0.8 * k)) as u32;
         if live_continuous
             && alive.0
-            && energy.0 > REPRO_THRESHOLD
-            && diet.age > REPRO_MIN_AGE // newborns must establish before breeding (paces birth waves)
+            && energy.0 > repro_thr
+            && diet.age > repro_min_age // newborns must establish before breeding (paces birth waves)
             && pop < CREATURE_CAP
             // density-dependent: breeding rate tapers to 0 as pop approaches cap -> population asymptotes
             // to carrying capacity instead of slamming the cap and crashing (no boom-bust overshoot).
             && rng.f32() < P_REPRO_CREATURE * (1.0 - pop as f32 / CREATURE_CAP as f32)
         {
-            energy.0 -= REPRO_COST;
+            energy.0 -= REPRO_COST * (0.7 + 0.6 * k); // K-parents spend more per child
             let mut child = genome.clone();
             child.mutate(&mut rng, MUT_RATE, MUT_STD);
             let cp = disperse_pos(&mut rng, ct.translation, 2.0, CREATURE_Y); // child appears beside the parent
-            spawn_creature(&mut commands, child, cp, &mut rng);
+            let birth_e = BIRTH_ENERGY * (0.7 + 0.6 * k); // K-young start better-provisioned (survive); r-young cheap + fragile
+            spawn_creature(&mut commands, child, cp, &mut rng, birth_e);
             pop += 1;
         }
 
@@ -1138,7 +1144,7 @@ pub fn live_step(
                 let mut child = g.clone();
                 child.mutate(&mut rng, MUT_RATE, MUT_STD);
                 let p = rand_pos(&mut rng, CREATURE_Y);
-                spawn_creature(&mut commands, child, p, &mut rng);
+                spawn_creature(&mut commands, child, p, &mut rng, BIRTH_ENERGY); // reseed: baseline provisioning
             }
         }
     }
@@ -1217,6 +1223,7 @@ pub fn generation_step(
             let mut temp = 0.0;
             let mut lng = 0.0;
             let mut met = 0.0;
+            let mut par = 0.0;
             let mut abslat = 0.0; // mean |latitude| of the population (0 equator .. ~1.57 pole) -> spread check
             for (t, en, fit, _h, _a, g, _b, diet, _l) in cq.iter() {
                 e += en.0;
@@ -1228,6 +1235,7 @@ pub fn generation_step(
                 temp += g.temp_pref;
                 lng += g.longevity;
                 met += g.metab;
+                par += g.parental;
                 abslat += crate::sphere::dir_to_lonlat(t.translation.normalize_or_zero()).1.abs();
             }
             let plant_n = pq.iter().len().max(1);
@@ -1236,8 +1244,8 @@ pub fn generation_step(
             let avg_qual: f32 = pq.iter().map(|(g, _)| g.quality).sum::<f32>() / plant_n as f32;
             let avg_wet: f32 = pq.iter().map(|(g, _)| g.wet).sum::<f32>() / plant_n as f32;
             info!(
-                "t {:>6} | pop {:>3} | energy {:.1} | life-fit {:.1} | age {:.0} | sens {:.1} | bite {:.2} | rig {:.2} | temp {:.2} lng {:.2} met {:.2} lat {:.2} | def {:.2} nut {:.2} qual {:.2} wet {:.2} | plants {} | soil {:.2} | rain {:.2} fire {:.3}",
-                gen.tick, pop, e / n, f / n, age / n, sens / n, bite / n, rig / n, temp / n, lng / n, met / n, abslat / n, avg_def, avg_nut, avg_qual, avg_wet, plant_n, soil.avg(), weather.rain, fire.avg()
+                "t {:>6} | pop {:>3} | energy {:.1} | life-fit {:.1} | age {:.0} | sens {:.1} | bite {:.2} | rig {:.2} | temp {:.2} lng {:.2} met {:.2} par {:.2} lat {:.2} | def {:.2} nut {:.2} qual {:.2} wet {:.2} | plants {} | soil {:.2} | rain {:.2} fire {:.3}",
+                gen.tick, pop, e / n, f / n, age / n, sens / n, bite / n, rig / n, temp / n, lng / n, met / n, par / n, abslat / n, avg_def, avg_nut, avg_qual, avg_wet, plant_n, soil.avg(), weather.rain, fire.avg()
             );
             // Track the best healthy snapshot for --save. Score = pop, gated on well-fed (avg energy >= 30)
             // so we never bank a starving crowd. Captured only when saving (snapshot clone is not free).
