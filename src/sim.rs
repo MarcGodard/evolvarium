@@ -902,7 +902,7 @@ pub fn spawn_world_render(
         });
     }
     commands.insert_resource(crate::viz::TreeMeshes {
-        trunk: meshes.add(Cylinder::new(0.16, 3.0)),
+        trunk: meshes.add(Cylinder::new(0.13, 2.0)), // shorter + thinner: less bare pole, canopy envelops it
         // fuller broadleaf crown: a cluster of overlapping blobs (centered ~origin; placed in the crown)
         broadleaf: meshes.add(crate::viz::blob_cluster_mesh(&[
             (Vec3::new(0.0, 0.0, 0.0), 1.0, 0.75),

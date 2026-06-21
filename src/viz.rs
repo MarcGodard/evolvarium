@@ -175,10 +175,12 @@ fn add_plant_visuals(
             ));
             // broadleaf crown is centered (sits high in the canopy); the stacked-cone conifer has its base
             // at y=0 so it rests on the trunk top (lower attach point).
+            // trunk is centered (half-height 1.0); canopies attach so they envelop most of the trunk,
+            // leaving only a short stub of bare trunk -> a tree, not a hat on a pole.
             let (canopy, color, cy) = if t.edible {
-                (tm.broadleaf.clone(), plant_color(g), 2.2)
+                (tm.broadleaf.clone(), plant_color(g), 1.5)
             } else {
-                (tm.conifer.clone(), Color::srgb(0.06, 0.30, 0.18), 0.5)
+                (tm.conifer.clone(), Color::srgb(0.06, 0.30, 0.18), -0.3)
             };
             let child = commands
                 .spawn((Mesh3d(canopy), MeshMaterial3d(materials.add(color)), Transform::from_xyz(0.0, cy, 0.0)))
@@ -298,7 +300,7 @@ fn size_plants(mut q: Query<(&PlantState, &PlantGenome, &mut Transform, Option<&
             let s = (0.35 + 0.12 * st.mass).clamp(0.35, 1.1);
             tf.scale = Vec3::splat(s);
             tf.rotation = rot;
-            tf.translation = base + up * (1.5 * s); // trunk base rests on the surface
+            tf.translation = base + up * (1.0 * s); // trunk base rests on the surface (trunk half-height = 1.0)
             continue;
         }
         // per-form scale (girth, height) + lift so each silhouette sits on the surface. girth grows with
