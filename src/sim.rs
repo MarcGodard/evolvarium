@@ -201,6 +201,16 @@ pub fn fire_step(
     mut soil: ResMut<Soil>,
 ) {
     let _ = gen;
+    // Fire DISABLED for now: the flammability model still lets fire appear where it shouldn't (over ocean +
+    // the polar ice cap). Turned off until the weather/flammability pass is solid. Clear any active fire and
+    // skip all ignition + spread. Flip FIRE_ENABLED to re-enable wildfire. (Lightning god-control L too.)
+    const FIRE_ENABLED: bool = false;
+    if !FIRE_ENABLED {
+        if fire.cell.iter().any(|&f| f > 0.0) {
+            fire.cell.iter_mut().for_each(|f| *f = 0.0);
+        }
+        return;
+    }
     let dt = DT;
     let n = SOIL_RES;
     // Min flammable vegetation for a cell to ignite/carry fire. Oceans, bare rock + barren desert have ~0

@@ -385,21 +385,19 @@ fn spawn_clouds(
                 alpha_mode: AlphaMode::Blend,
                 ..default()
             });
-            let mut ec = commands.spawn((
+            commands.spawn((
                 Mesh3d(mesh.clone()),
                 MeshMaterial3d(mat),
                 Transform::from_translation(dir * alt),
                 Visibility::Hidden,
+                // Clouds don't cast (for now): a translucent Blend mesh casts a FULL OPAQUE shadow in Bevy
+                // (alpha is ignored in the shadow pass), so casting big overlapping puffs = hard black blobs.
+                // A true ~50%-opacity soft cloud shadow needs alpha-HASHED (dithered) shadows = a small custom
+                // shadow shader; until that lands, clouds stay non-casting so they read soft + transparent.
+                bevy::light::NotShadowCaster,
                 CloudPuff { dir },
             ));
-            // Soft, partial cloud shadows: a translucent Blend mesh casts a FULL OPAQUE shadow in Bevy (alpha
-            // is ignored in the shadow pass), so casting EVERY overlapping puff = a hard black blob. Instead
-            // only a DITHERED ~1/3 of puffs cast (scattered, not stripey); the gaps let light through, so a
-            // cloud field drops a broken, light, dappled shade (Gaussian-softened in orbit) -> reads as a
-            // transparent cloud shadow. (Per-pixel translucent shadows would need a custom alpha-hash shader.)
-            if (i + 2 * j) % 3 != 0 {
-                ec.insert(bevy::light::NotShadowCaster); // the other ~2/3 don't cast
-            }
+            let _ = (i, j);
         }
     }
 }
