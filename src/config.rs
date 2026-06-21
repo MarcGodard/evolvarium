@@ -183,6 +183,10 @@ pub const DISEASE_K: f32 = 0.004; // per-tick disease mortality per unit growth-
 pub const MISMATCH_STRESS: f32 = 1.0; // energy hit for eating a poorly-expressed (wrong) food
 pub const AGE_HAZARD: f32 = 0.02; // late-life mortality ceiling (decelerates -> ~plateau)
 pub const AGE_SCALE: f32 = 2400.0; // ticks; age at which aging hazard reaches half its ceiling (longer lifespans)
+// Longevity gene: effective lifespan = AGE_SCALE * (0.4 + 1.2*longevity) (so longevity 0.5 = baseline x1.0).
+// A long-lived body pays extra basal upkeep per unit lifespan above baseline -> slow-life (durable but
+// costly) vs fast-life (cheap, breed young, die young) trade-off. Default longevity 0.5 = no extra cost.
+pub const LONGEVITY_COST: f32 = 1.1; // energy/sec extra basal at the maximum lifespan multiplier
 
 // --- generational GA ---
 pub const ELITE_FRAC: f32 = 0.3;

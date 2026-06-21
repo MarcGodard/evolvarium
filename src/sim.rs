@@ -913,6 +913,7 @@ pub fn live_step(
         // metabolism: basal + movement (convex in speed) + bite upkeep + rocky crossing + vision upkeep.
         // Longer/more sensors see farther but cost energy (SENSE_COST x total range) -> range is a trade-off.
         let rock = crate::sphere::rockiness(nd);
+        let lifespan_mult = 0.4 + 1.2 * genome.longevity; // 0.5 -> 1.0 (baseline); used for upkeep + aging
         let sense_range: f32 = genome.sensors.iter().map(|s| s.range).sum();
         energy.0 -= (BASAL_COST
             + SIZE_BASAL * genome.size // bigger body costs more just to maintain
@@ -924,6 +925,7 @@ pub fn live_step(
             + HEIGHT_COST * genome.height
             + LIGHT_COST * (light - genome.light_pref).abs() // positional daylight at this creature's location
             + TEMP_COST * (crate::sphere::base_temperature(pdir) - genome.temp_pref).abs() // thermal mismatch: poles vs equator niche
+            + LONGEVITY_COST * (lifespan_mult - 1.0).max(0.0) // a long-lived body costs more to maintain
             + SWIM_LAND_COST * genome.swim * (1.0 - wet_here) // fins are a liability on dry land
             + STRESS_COST * diet.fatigue)
             * dt;
@@ -1068,7 +1070,7 @@ pub fn live_step(
             // have a real finite lifespan instead of living forever if well-fed. Ages are staggered (warmup
             // desync + spread-out births) so this does NOT sync-kill a cohort. Turnover keeps the gene pool
             // flowing (old die, young replace) -> a true life cycle to watch.
-            let age_frac = diet.age as f32 / AGE_SCALE;
+            let age_frac = diet.age as f32 / (AGE_SCALE * lifespan_mult); // longevity gene stretches lifespan
             let aging = AGE_HAZARD * (age_frac / (age_frac + 1.0));
             let p_death = (aging + DISEASE_K * diet.g) * dt;
             if rng.f32() < p_death {
@@ -1211,6 +1213,7 @@ pub fn generation_step(
             let mut rig = 0.0;
             let mut age = 0.0;
             let mut temp = 0.0;
+            let mut lng = 0.0;
             let mut abslat = 0.0; // mean |latitude| of the population (0 equator .. ~1.57 pole) -> spread check
             for (t, en, fit, _h, _a, g, _b, diet, _l) in cq.iter() {
                 e += en.0;
@@ -1220,6 +1223,7 @@ pub fn generation_step(
                 rig += g.rigidity;
                 age += diet.age as f32;
                 temp += g.temp_pref;
+                lng += g.longevity;
                 abslat += crate::sphere::dir_to_lonlat(t.translation.normalize_or_zero()).1.abs();
             }
             let plant_n = pq.iter().len().max(1);
@@ -1228,8 +1232,8 @@ pub fn generation_step(
             let avg_qual: f32 = pq.iter().map(|(g, _)| g.quality).sum::<f32>() / plant_n as f32;
             let avg_wet: f32 = pq.iter().map(|(g, _)| g.wet).sum::<f32>() / plant_n as f32;
             info!(
-                "t {:>6} | pop {:>3} | energy {:.1} | life-fit {:.1} | age {:.0} | sens {:.1} | bite {:.2} | rig {:.2} | temp {:.2} lat {:.2} | def {:.2} nut {:.2} qual {:.2} wet {:.2} | plants {} | soil {:.2} | rain {:.2} fire {:.3}",
-                gen.tick, pop, e / n, f / n, age / n, sens / n, bite / n, rig / n, temp / n, abslat / n, avg_def, avg_nut, avg_qual, avg_wet, plant_n, soil.avg(), weather.rain, fire.avg()
+                "t {:>6} | pop {:>3} | energy {:.1} | life-fit {:.1} | age {:.0} | sens {:.1} | bite {:.2} | rig {:.2} | temp {:.2} lng {:.2} lat {:.2} | def {:.2} nut {:.2} qual {:.2} wet {:.2} | plants {} | soil {:.2} | rain {:.2} fire {:.3}",
+                gen.tick, pop, e / n, f / n, age / n, sens / n, bite / n, rig / n, temp / n, lng / n, abslat / n, avg_def, avg_nut, avg_qual, avg_wet, plant_n, soil.avg(), weather.rain, fire.avg()
             );
             // Track the best healthy snapshot for --save. Score = pop, gated on well-fed (avg energy >= 30)
             // so we never bank a starving crowd. Captured only when saving (snapshot clone is not free).
