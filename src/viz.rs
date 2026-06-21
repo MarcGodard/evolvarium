@@ -17,6 +17,11 @@ use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 #[derive(Resource, Default)]
 pub struct SunOffset(pub i64);
 
+// Walk-mode shadow toggle (O). Default OFF so the sunlit world is always visible; the directional shadow
+// range can black out the ground receiver, so shadows are opt-in. camera::update_shadow_mode reads this.
+#[derive(Resource, Default)]
+pub struct ShowShadows(pub bool);
+
 // Markers for the celestial bodies (animated by day_night_lighting).
 #[derive(Component)]
 pub struct SunLight;
@@ -33,6 +38,7 @@ impl Plugin for VizPlugin {
             .init_resource::<Selected>()
             .init_resource::<ShowLegend>()
             .init_resource::<SunOffset>()
+            .insert_resource(ShowShadows(true)) // walk shadows on by default (O toggles)
             .add_systems(Startup, (log_viz_help, spawn_stats_ui, spawn_world_stats_ui, spawn_legend_ui, spawn_clouds, set_initial_speed))
             .add_systems(
                 Update,
@@ -43,8 +49,7 @@ impl Plugin for VizPlugin {
                     draw_sensors,
                     add_plant_visuals,
                     size_plants,
-                    day_night_lighting,
-                    time_of_day,
+                    (day_night_lighting, time_of_day, toggle_shadows, walk_ambient),
                     rain_visuals,
                     fire_visuals,
                     update_clouds,
@@ -70,6 +75,7 @@ pub struct PlantMesh(pub Handle<Mesh>);
 // creatures born mid-sim (spawn_creature adds no mesh) -> newborns + B-seeded creatures become visible.
 #[derive(Resource)]
 pub struct CreatureMesh(pub Handle<Mesh>);
+
 
 // Color + body-plan scale from a genome. Shared by add_creature_visuals (initial look) and
 // restyle_creatures (on genome change) so newborns look right immediately, not default-orange.
@@ -222,8 +228,10 @@ fn day_night_lighting(
     let vtick = (gen.tick as i64 + offset.0).rem_euclid(crate::sphere::DAY_TICKS as i64) as u32;
     let sd = crate::sphere::sun_dir(vtick);
     for mut tf in &mut suns {
-        // place the light source out along the sun direction, aimed at the planet center
-        *tf = Transform::from_translation(sd * (crate::sphere::PLANET_R * 4.0)).looking_at(Vec3::ZERO, Vec3::Y);
+        // ROTATE the directional light in place (only direction matters). The light carries NoFrustumCulling
+        // so it stays ViewVisible -> Bevy keeps building its shadow cascades. (Teleporting it far / to the
+        // planet core got it frustum-culled to invisible, which silently disabled shadows.)
+        *tf = Transform::IDENTITY.looking_to(-sd, Vec3::Y);
     }
     for mut tf in &mut discs {
         tf.translation = sd * crate::sphere::SUN_DIST; // the visible sun rides the same direction, far out
@@ -258,6 +266,42 @@ fn time_of_day(
         if let Ok(w) = walkers.single() {
             offset.0 = noon_offset(w.dir, gen.tick);
         }
+    }
+}
+
+// In walk mode, make the camera's ambient fill track the local daylight so NIGHT GOES DARK (flat high
+// ambient made everything glow like light from the ground). Night keeps a low moonlit floor so silhouettes
+// read; noon gets a bright sky fill. Orbit ambient is left to update_shadow_mode (steady 220 for a crisp
+// terminator). Uses the same visual sky time (sim tick + SunOffset) as the sun.
+fn walk_ambient(
+    mode: Res<crate::camera::CameraMode>,
+    gen: Res<GenState>,
+    offset: Res<SunOffset>,
+    walkers: Query<&crate::camera::WalkCam>,
+    mut ambient: Query<&mut AmbientLight>,
+) {
+    if *mode != crate::camera::CameraMode::Walk {
+        return;
+    }
+    let Ok(w) = walkers.single() else { return };
+    let vtick = (gen.tick as i64 + offset.0).rem_euclid(crate::sphere::DAY_TICKS as i64) as u32;
+    let day = crate::sphere::daylight_at(w.dir.normalize_or_zero(), vtick); // 0 night .. 1 noon overhead
+    let b = 35.0 + 175.0 * day; // dim moonlit ~35 at night, soft day fill ~210 (low so shadows still read)
+    for mut a in &mut ambient {
+        a.brightness = b;
+    }
+}
+
+// Toggle walk-mode shadows (O). Off by default so the sunlit world is always visible; turn on to add real
+// tree/creature shadows. If turning them on darkens the whole view, that's the directional-shadow blackout.
+fn toggle_shadows(
+    keys: Res<ButtonInput<KeyCode>>,
+    mode: Res<crate::camera::CameraMode>,
+    mut show: ResMut<ShowShadows>,
+) {
+    if *mode == crate::camera::CameraMode::Walk && keys.just_pressed(KeyCode::KeyO) {
+        show.0 = !show.0;
+        info!("walk shadows: {}", if show.0 { "ON" } else { "OFF" });
     }
 }
 
@@ -596,7 +640,9 @@ CONTROLS
   WALK:  WASD move, arrows or right-drag look,
          Shift run (eye walks over the hills)
          [ / ]  scrub time-of-day   \\  jump to noon
-         (walk arrives at local noon: sun + shadows)
+         O  toggle shadows (on; off = always sunlit)
+         (walk arrives at local noon; scrub [ ] for
+          low sun + long shadows; night goes dark)
   G  sensor rays   SPACE  pause/resume
   1-5  speed presets (slow..fast)   + / -  fine speed
   B  seed creatures    P  populate whole planet
@@ -875,6 +921,34 @@ fn draw_sensors(
             let a = head.0 + s.angle;
             let dir = Vec3::new(a.sin(), 0.0, a.cos());
             gizmos.line(p, p + dir * s.range, Color::srgb(1.0, 1.0, 0.3));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::noon_offset;
+    use bevy::prelude::Vec3;
+
+    // noon_offset must put the sun (nearly) overhead the walk point -> daylight ~ |horizontal| of d.
+    #[test]
+    fn noon_offset_lights_the_walk_point() {
+        for d in [
+            Vec3::new(0.30, 0.50, 0.40),   // homeland
+            Vec3::new(0.95, 0.30, -0.05),  // mountain A
+            Vec3::new(-0.10, -0.30, 0.95), // deep ocean
+            Vec3::new(-0.65, 0.20, -0.75), // mountain B
+        ] {
+            let d = d.normalize();
+            for tick in [0u32, 600, 1234, 9_000_000] {
+                let off = noon_offset(d, tick);
+                let vtick = (tick as i64 + off).rem_euclid(crate::sphere::DAY_TICKS as i64) as u32;
+                let day = crate::sphere::daylight_at(d, vtick);
+                // sun overhead -> daylight ~= horizontal extent of d (sqrt(x^2+z^2)); must be clearly lit.
+                let horiz = (d.x * d.x + d.z * d.z).sqrt();
+                assert!(day > horiz - 0.05, "d={d:?} tick={tick} day={day} horiz={horiz}");
+                assert!(day > 0.25, "walk point should be daylit at noon, got {day} for d={d:?}");
+            }
         }
     }
 }

@@ -40,6 +40,13 @@ pub fn snapshot_capture(
     // build the marker list. Creatures are colored by their thermal gene (cold=blue .. warm=red) so the
     // latitudinal niche is visible at a glance; trees dark green, carrion grey, plants green.
     let mut dots: Vec<Dot> = Vec::new();
+    // shade each marker by local daylight (same as the globe) so NIGHT entities go dark too -- otherwise
+    // dots glow full-bright on the night side (misleads day/night inspection).
+    let sun = sphere::sun_dir(tick);
+    let shade_at = |p: Vec3| -> f32 {
+        let lam = p.normalize_or_zero().dot(sun).max(0.0);
+        0.30 + 0.70 * lam
+    };
     // niche census: count creatures by their evolved niche so biodiversity is quantified, not just drawn.
     let (mut cold, mut warm, mut aquatic, mut land, mut frugal, mut fast, mut spec, mut hidden) =
         (0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32);
@@ -51,6 +58,8 @@ pub fn snapshot_capture(
             (120.0 + (90.0 - 120.0) * w) as u8, // (G)
             (240.0 + (40.0 - 240.0) * w) as u8, // (B)
         ];
+        let s = shade_at(t.translation);
+        let color = [(color[0] as f32 * s) as u8, (color[1] as f32 * s) as u8, (color[2] as f32 * s) as u8];
         dots.push(Dot { pos: t.translation, color, r: 2 });
         if g.temp_pref < 0.4 { cold += 1; } else if g.temp_pref > 0.6 { warm += 1; }
         if g.swim > 0.6 { aquatic += 1; } else if g.swim < 0.3 { land += 1; }
@@ -68,6 +77,8 @@ pub fn snapshot_capture(
         } else {
             ([70, 190, 80], 1)
         };
+        let s = shade_at(t.translation);
+        let color = [(color[0] as f32 * s) as u8, (color[1] as f32 * s) as u8, (color[2] as f32 * s) as u8];
         dots.push(Dot { pos: t.translation, color, r });
     }
     let home = crate::sim::homeland_center();

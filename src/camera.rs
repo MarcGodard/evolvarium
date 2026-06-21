@@ -113,8 +113,9 @@ fn toggle_mode(
                 .normalize_or_zero();
                 walk.yaw = 0.0;
                 walk.pitch = 0.0;
-                // arrive in daylight: snap the sky to local noon so you see sun + shadows (scrub with [ ] \)
-                sun_offset.0 = noon_offset(walk.dir, gen.tick);
+                // arrive in good light: snap the sky to ~mid-morning (sun ~45deg up, not overhead) so shadows
+                // are immediately visible (overhead noon casts them straight down = invisible). [ ] \ to scrub.
+                sun_offset.0 = noon_offset(walk.dir, gen.tick) - (crate::sphere::DAY_TICKS as i64) / 8;
             }
             selected.follow = false;
             info!("camera: WALK mode (WASD move, arrows/right-drag look, Shift run, [ ] scrub time, \\ noon, TAB to orbit)");
@@ -233,23 +234,29 @@ fn apply_walk(mode: Res<CameraMode>, mut q: Query<(&mut Transform, &WalkCam)>) {
 
 // --- shared ---
 
-// Shadows ON only in walk mode (close horizon -> the shadow range covers the view, no eclipse disc); OFF in
-// orbit (the range boundary showed as a disc when zoomed). Also lift ambient in walk so shadowed ground +
-// any night side stay readable (orbit keeps low ambient for a crisp terminator). Runs on mode change + once.
+// Lighting per mode. Ambient lifts in walk so the ground stays readable; orbit keeps low ambient for a crisp
+// terminator. Shadows are OFF by default everywhere (the directional shadow range painted an "eclipse" disc
+// in orbit AND can black out the whole receiver at ground scale) -> guarantees you always SEE the sunlit
+// world in walk. Shadows are opt-in in walk via O (crate::viz::ShowShadows). Runs on mode/toggle change.
 fn update_shadow_mode(
     mode: Res<CameraMode>,
+    show_shadows: Res<crate::viz::ShowShadows>,
     mut lights: Query<&mut DirectionalLight, With<SunLight>>,
     mut ambient: Query<&mut AmbientLight>,
 ) {
-    if !mode.is_changed() {
+    if !mode.is_changed() && !show_shadows.is_changed() {
         return;
     }
     let walk = *mode == CameraMode::Walk;
     for mut l in &mut lights {
-        l.shadows_enabled = walk;
+        // walk (ground, close) = real shadows; orbit (far) = off (its shadow range painted an eclipse disc).
+        l.shadows_enabled = walk && show_shadows.0;
     }
-    for mut a in &mut ambient {
-        a.brightness = if walk { 550.0 } else { 220.0 };
+    // orbit gets a steady ambient for a crisp terminator; walk's ambient tracks daylight in viz::walk_ambient
+    if !walk {
+        for mut a in &mut ambient {
+            a.brightness = 220.0;
+        }
     }
 }
 

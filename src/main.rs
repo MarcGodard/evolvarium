@@ -15,6 +15,7 @@ mod components;
 mod config;
 mod genome;
 mod persist;
+mod capture;
 mod plant;
 mod rng;
 mod sim;
@@ -68,11 +69,26 @@ fn main() {
     // --diverse: hand-seed a multi-niche showcase (swimmers/cold/warm/browsers placed in matching regions).
     // Auto-loads the showcase seed for COMPETENT brains, then overrides trait genes + placement per niche.
     let diverse = args.iter().any(|a| a == "--diverse");
+    // --capture=PREFIX: GPU screenshot of the walk view -> PREFIX.png then exit. --cap-when picks the hour,
+    // --cap-yaw the heading. Render mode (needs a GPU). Lets the real lighting/shadows be inspected offline.
+    let capture = args.iter().find_map(|a| a.strip_prefix("--capture=").map(String::from));
+    let cap_when = match args.iter().find_map(|a| a.strip_prefix("--cap-when=")).unwrap_or("morning") {
+        "noon" => capture::CapWhen::Noon,
+        "dusk" => capture::CapWhen::Dusk,
+        "night" => capture::CapWhen::Night,
+        _ => capture::CapWhen::Morning,
+    };
+    let cap_yaw = args.iter().find_map(|a| a.strip_prefix("--cap-yaw=").and_then(|s| s.parse::<f32>().ok())).unwrap_or(0.0);
+    let cap_off = args.iter().find_map(|a| a.strip_prefix("--cap-off=").and_then(|s| s.parse::<i64>().ok())).unwrap_or(0);
+    let cap_pitch = args.iter().find_map(|a| a.strip_prefix("--cap-pitch=").and_then(|s| s.parse::<f32>().ok())).unwrap_or(-0.35);
+    let cap_orbit = args.iter().any(|a| a == "--cap-orbit");
     if diverse && load.is_none() && std::path::Path::new(DEFAULT_SEED).exists() {
         load = Some(DEFAULT_SEED.to_string());
     }
 
     let mut app = App::new();
+    // crisp directional shadows (default 2048 is soft at planet scale)
+    app.insert_resource(bevy::light::DirectionalLightShadowMap { size: 4096 });
     app.insert_resource(rng::Rng::seed(seed));
     app.insert_resource(sim::Soil::new()); // dynamic soil-fertility grid (M5 nutrient loop)
     app.insert_resource(sim::GroundWater::new()); // dynamic rain-fed ground-water grid (rain cycle)
@@ -120,6 +136,10 @@ fn main() {
                 FixedUpdate,
                 (sim::weather_step, sim::fire_step, sim::live_step, sim::predation_step, sim::plant_step, sim::rot_step, sim::generation_step).chain(),
             );
+        if let Some(prefix) = capture {
+            app.insert_resource(capture::CaptureCfg { prefix, when: cap_when, yaw: cap_yaw, off: cap_off, pitch: cap_pitch, orbit: cap_orbit })
+                .add_plugins(capture::CapturePlugin);
+        }
     }
 
     app.run();
@@ -143,7 +163,8 @@ fn setup_scene(
             ..default()
         })),
         Transform::IDENTITY,
-        bevy::light::NotShadowCaster,
+        // globe CASTS shadows: terrain hills shadow the land in walk mode, and the planet self-shadows its
+        // own night side (so the sun does not light night-side creatures "through" the planet).
     ));
     // ocean shell: a translucent blue sphere at sea level (land pokes above it, basins flood below)
     let sea_r = sphere::PLANET_R + sphere::SEA_LEVEL * sphere::ELEV_MAX;
@@ -164,16 +185,11 @@ fn setup_scene(
     // close so the range covers the whole view -> real shadows, no disc). Cascade tuned tight for ground
     // scale (creatures ~0.5, trees ~3 units); globe+ocean are NotShadowCaster so only trees/creatures cast.
     commands.spawn((
-        DirectionalLight { shadows_enabled: false, illuminance: 11000.0, shadow_normal_bias: 1.8, ..default() },
-        bevy::light::CascadeShadowConfigBuilder {
-            num_cascades: 4,
-            minimum_distance: 0.3,
-            maximum_distance: 130.0,
-            first_cascade_far_bound: 12.0,
-            overlap_proportion: 0.2,
-        }
-        .build(),
+        DirectionalLight { shadows_enabled: true, illuminance: 40000.0, ..default() },
+        bevy::light::CascadeShadowConfigBuilder::default().build(),
         Transform::from_xyz(1.0, 0.5, 0.0).looking_at(Vec3::ZERO, Vec3::Y),
+        // keep the light ViewVisible so its shadow cascades keep building even as day_night rotates it
+        bevy::camera::visibility::NoFrustumCulling,
         viz::SunLight,
     ));
     // moon: a small emissive sphere; position set per-frame by day_night_lighting.
