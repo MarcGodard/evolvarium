@@ -149,6 +149,7 @@ pub const DEF_REPRO_COST: f32 = 0.7; // armored plant (def=1) reproduces at (1-0
 pub const SOIL_RES: usize = 32; // fertility grid cells per axis
 pub const SOIL_DECAY: f32 = 0.999; // fertility leaches/is taken up each tick
 pub const DECOMP_FERT: f32 = 3.0; // fertility released on full decomposition (x corpse nutrient)
+pub const DEATH_FERT: f32 = 0.5; // fertility deposited IMMEDIATELY where a creature/plant dies (body enriches the ground there); plants then grow better on death sites (death feeds the area), on top of the slower decomposition release. Kept gentle: a strong death->fertility->plant-boom->creature-boom->crash loop is a destabilizing positive feedback.
 pub const FERT_GROWTH: f32 = 0.6; // max growth-rate bonus from saturated soil
 pub const FERT_CAP: f32 = 1.5; // fertility level at which the growth bonus saturates
 pub const PLANT_REPRO_FRAC: f32 = 0.5; // fraction of mass kept after budding off a child

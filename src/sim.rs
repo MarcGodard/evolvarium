@@ -453,6 +453,7 @@ pub fn plant_step(
             st.mass = (st.mass - bite).max(0.0);
             if st.mass < PLANT_MIN_MASS {
                 commands.entity(e).despawn();
+                soil.add(px, pz, DEATH_FERT * 0.3); // a consumed plant returns some nutrients to the ground
                 plant_count = plant_count.saturating_sub(1);
                 continue;
             }
@@ -468,6 +469,7 @@ pub fn plant_step(
         if rng.f32() < p_mort {
             commands.entity(e).despawn();
             detritus.push((g.clone(), st.mass, tf.translation));
+            soil.add(px, pz, DEATH_FERT * 0.3); // a dead plant enriches the ground where it falls
             plant_count = plant_count.saturating_sub(1);
             continue;
         }
@@ -519,6 +521,7 @@ pub fn predation_step(
     gen: Res<GenState>,
     mut rng: ResMut<Rng>,
     mut commands: Commands,
+    mut soil: ResMut<Soil>,
     mut cq: Query<(Entity, &Transform, &mut Energy, &mut Fitness, &mut Alive, &Genome), With<Creature>>,
 ) {
     // snapshot living creatures: (entity, pos, combat, energy, kin-signature). Combat = bite + size.
@@ -582,6 +585,7 @@ pub fn predation_step(
         if killed.contains(&e) {
             alive.0 = false;
             spawn_carrion(&mut commands, t.translation, CARRION_MASS * 0.5); // predator already ate some
+            soil.add(t.translation.x, t.translation.z, DEATH_FERT); // death enriches the ground here
             if continuous_live {
                 commands.entity(e).despawn();
             }
@@ -616,6 +620,7 @@ pub fn live_step(
     >,
     mut commands: Commands,
     mut tree_bites: ResMut<TreeBites>,
+    mut soil: ResMut<Soil>,
     fq: Query<(Entity, &Transform, &PlantState, &PlantGenome, Option<&Rot>, Option<&Tree>), (With<Food>, Without<Creature>)>,
 ) {
     let dt = DT;
@@ -940,6 +945,7 @@ pub fn live_step(
         // rots into poison (rot_step). Closes part of the nutrient loop: death feeds the food web (P3).
         if !alive.0 {
             spawn_carrion(&mut commands, ct.translation, CARRION_MASS);
+            soil.add(ct.translation.x, ct.translation.z, DEATH_FERT); // death enriches the ground here
             // continuous (post-warmup): the corpse entity is gone (became carrion). Generational mode
             // and the warm-up keep it (Alive=false) to be recycled into the next generation.
             if live_continuous {
