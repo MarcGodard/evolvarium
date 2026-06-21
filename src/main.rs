@@ -155,20 +155,9 @@ fn setup_scene(
         Transform::IDENTITY,
     ));
     // sun (directional light; direction set per-frame by day_night_lighting) + soft ambient so the night
-    // side is not pitch black. Cascade shadows tuned for our scale: planet R~80, creatures ~0.5 units.
-    // Default one-cascade config spreads its shadow map over a huge frustum, so zoomed to creature level
-    // the depth precision collapses + the surface reads as fully shadowed (sun "disappears"). Pack several
-    // tight cascades within ~520 units so close-up shadows stay crisp at every zoom.
+    // side is not pitch black.
     commands.spawn((
         DirectionalLight { shadows_enabled: true, illuminance: 11000.0, ..default() },
-        bevy::light::CascadeShadowConfigBuilder {
-            num_cascades: 4,
-            minimum_distance: 0.5,
-            maximum_distance: 520.0,
-            first_cascade_far_bound: 18.0,
-            overlap_proportion: 0.2,
-        }
-        .build(),
         Transform::from_xyz(1.0, 0.5, 0.0).looking_at(Vec3::ZERO, Vec3::Y),
         viz::SunLight,
     ));
