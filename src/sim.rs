@@ -686,8 +686,14 @@ fn grass_hab(d: Vec3, gw: Option<&GroundWater>) -> f32 {
 fn grass_pos(rng: &mut Rng, gw: Option<&GroundWater>) -> Vec3 {
     let mut d = crate::sphere::random_dir_in_cap(rng, Vec3::Y, std::f32::consts::PI);
     for _ in 0..8 {
-        if !crate::sphere::is_ocean(d) && grass_hab(d, gw) > GRASS_HAB_MIN {
-            break;
+        if !crate::sphere::is_ocean(d) {
+            // normal grassland + rain-bloomed desert clear the habitability gate; rocky ground still gets
+            // SOME grass between the rocks, but only a small fraction of rocky samples take -> sparse + thin.
+            let lush = grass_hab(d, gw) > GRASS_HAB_MIN;
+            let rocky = crate::sphere::rockiness(d) > 0.12 && rng.f32() < ROCK_GRASS_FRAC;
+            if lush || rocky {
+                break;
+            }
         }
         d = crate::sphere::random_dir_in_cap(rng, Vec3::Y, std::f32::consts::PI);
     }
@@ -935,7 +941,10 @@ pub fn grass_step(
         let water = gw.get(ppos);
         let m = (crate::sphere::moisture(pdir) + 0.2 * season + WET_GAIN * water).clamp(0.0, 1.0);
         let stress = (m - g.wet).abs();
-        let hab = grass_hab(pdir, Some(&gw)); // rain-lifted: desert turf survives while wet, dies as it dries
+        let mut hab = grass_hab(pdir, Some(&gw)); // rain-lifted: desert turf survives while wet, dies as it dries
+        if crate::sphere::rockiness(pdir) > 0.12 {
+            hab = hab.max(ROCK_GRASS_HAB); // thin grass clings between the rocks: don't cull it as a "poor site"
+        }
         let e01 = crate::sphere::elevation01(pdir);
         let submersion = ((crate::sphere::SEA_LEVEL - e01) / crate::sphere::SEA_LEVEL).clamp(0.0, 1.0);
         let drown = DROWN_KILL * submersion * (1.0 - g.wet);

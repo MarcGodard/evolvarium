@@ -315,8 +315,11 @@ fn add_grass_visuals(
         let wet = crate::sphere::moisture(up).clamp(0.0, 1.0);
         let viable = crate::sphere::plant_habitability(up).clamp(0.0, 1.0);
         let mass_f = 0.7 + 0.3 * st.mass.min(1.0);
-        let len = (0.35 + 2.2 * wet) * (0.55 + 0.45 * viable) * mass_f; // water-dominated height
-        let girth = (0.9 + 1.9 * wet) * (0.6 + 0.4 * viable); // wetter = thicker, fuller clump
+        // grass between rocks is short + wispy: rockiness thins length + girth so rocky ground reads as a
+        // few sparse blades among the stones, not a lawn.
+        let thin = 1.0 - 0.65 * crate::sphere::rockiness(up);
+        let len = (0.35 + 2.2 * wet) * (0.55 + 0.45 * viable) * mass_f * thin; // water-dominated height
+        let girth = (0.9 + 1.9 * wet) * (0.6 + 0.4 * viable) * (0.45 + 0.55 * thin); // wetter = thicker, fuller clump
         tf.scale = Vec3::new(girth, len, girth);
         tf.rotation = Quat::from_rotation_arc(Vec3::Y, up);
         tf.translation = base + up * 0.02; // roots on the surface
@@ -580,9 +583,9 @@ fn update_clouds(
     }
 }
 
-// Wildfire (immediate-mode gizmos). Each burning cell renders as a cluster of flickering flame tongues
-// (deep-red base -> yellow-hot tip gradient lines that sway + pulse on the tick clock) plus a few rising,
-// cooling embers. Tongue count + height scale with burn intensity. Tight to the land cell so coarse-grid
+// Wildfire (immediate-mode gizmos). Each burning cell renders as a teardrop cluster of flickering flame
+// tongues (hot yellow-white base fading to dim red at the swaying tips) plus a few rising, cooling embers.
+// Tongue count, body radius + height scale with burn intensity. Tight to the land cell so coarse-grid
 // coastal cells don't spill flame onto the sea. Deterministic (tick clock + hashed jitter) -> reproducible.
 fn fire_visuals(fire: Res<Fire>, gen: Res<GenState>, mut gizmos: Gizmos) {
     let t = gen.tick as f32;
@@ -599,21 +602,27 @@ fn fire_visuals(fire: Res<Fire>, gen: Res<GenState>, mut gizmos: Gizmos) {
             continue;
         }
         let (east, north) = crate::sphere::tangent_frame(up);
-        // flame tongues: flickering vertical gradient lines, deep-red base climbing to a yellow-hot tip.
-        let tongues = 3 + (f * 5.0) as usize; // hotter fire = fuller flame (3..8 tongues)
+        use std::f32::consts::TAU;
+        // flame body: many short tongues packed in a small disk, fanning into a teardrop that converges to a
+        // point. Hot + bright at the base, cooling to dim red at the flickering tips (like real fire).
+        let tongues = 10 + (f * 16.0) as usize; // hotter fire = denser, fuller flame body (10..26)
         for k in 0..tongues {
-            let seed = (c * 16 + k) as u32;
-            let flick = 0.5 + 0.5 * (t * 0.25 + seed as f32 * 1.3).sin(); // pulsing height
-            let sway = (t * 0.18 + seed as f32 * 2.1).sin() * 0.6 * f; // lateral wander, wilder when hot
-            let foot = surf
-                + up * 0.2
-                + east * (hash01(seed) - 0.5) * 1.6
-                + north * (hash01(seed ^ 0x9) - 0.5) * 1.6;
-            let h = (1.0 + 2.2 * f) * (0.55 + 0.7 * flick); // taller with intensity + flicker
-            let tip = foot + up * h + east * sway + north * sway * 0.5;
-            let cool = Color::srgb(0.90, 0.16, 0.03); // deep red, cooler base
-            let hot = Color::srgb(1.0, 0.85, 0.30); // yellow-hot tip
-            gizmos.line_gradient(foot, tip, cool, hot);
+            let seed = (c * 32 + k) as u32;
+            // base point in a disk, denser toward the center (sqrt) so the flame has a solid core
+            let ang = hash01(seed) * TAU;
+            let rad = hash01(seed ^ 0x9e3);
+            let rr = rad.sqrt() * (0.4 + 0.6 * f); // body radius grows with intensity (~ up to 1.0)
+            let (bx, bz) = (ang.cos() * rr, ang.sin() * rr);
+            let foot = surf + up * 0.05 + east * bx + north * bz;
+            // height: center-tall teardrop (edge tongues short), pulsing on the tick clock
+            let flick = 0.5 + 0.5 * (t * 0.30 + seed as f32 * 1.7).sin();
+            let h = (0.6 + 1.8 * f) * (1.0 - 0.6 * rad) * (0.55 + 0.7 * flick); // ~ up to 2.4
+            let sway = (t * 0.22 + seed as f32 * 2.3).sin() * 0.3 * f; // tips wander as it flickers
+            // tips pull back toward the center as they rise -> the flame comes to a point
+            let tip = surf + up * (0.05 + h) + east * (bx * 0.2 + sway) + north * (bz * 0.2 + sway * 0.5);
+            let hot = Color::srgb(1.0, 0.92, 0.55); // near yellow-white, hottest at the base
+            let cool = Color::srgba(0.85, 0.12, 0.02, 0.55); // dim red, fading at the cooling tip
+            gizmos.line_gradient(foot, tip, hot, cool);
         }
         // embers: small bright motes that rise, drift wider, and fade as they cool
         let embers = (f * 4.0) as usize;

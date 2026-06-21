@@ -131,6 +131,8 @@ pub const GRASS_GRAZE: f32 = 1.0; // energy/sec a HUNGRY creature nibbles from g
 // --- rocky land: scattered boulders (render-only dressing). Spawned once on rocky highland so rocky terrain
 // reads as a field of stone with grass growing between the rocks. Static -> no per-frame cost. ---
 pub const ROCK_SCATTER: usize = 1200; // boulders scattered across rocky ground worldwide (denser the rockier)
+pub const ROCK_GRASS_FRAC: f32 = 0.15; // chance a rocky-ground sample still seeds a (thin) grass tuft -> sparse grass between the rocks, not bare stone
+pub const ROCK_GRASS_HAB: f32 = 0.28;  // survival-habitability floor for grass on rocky ground (keeps the sparse rocky tufts alive instead of churning)
 
 // --- trees: long-lived, near-uneatable plants ---
 pub const N_TREES: usize = 240; // initial trees (whole-planet seeding, scattered worldwide)
