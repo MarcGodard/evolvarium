@@ -20,6 +20,10 @@ pub const HOMELAND_DIR: [f32; 3] = [0.30, 0.50, 0.40];
 // Aquatic flora grows in the water column from here up to SEA_LEVEL (coast). Below = abyssal/barren. Wide
 // band -> swimmers have a real sea-wide habitat, not a thin coastal ring (fish niche kept going extinct).
 pub const AQUATIC_FLOOR: f32 = 0.12;
+// Even bone-dry desert keeps a sliver of habitability so rare drought-tolerant flora (cacti/scrub/short
+// grass) can persist, and a rain pulse (ground water -> effective moisture) blooms it briefly. Below the
+// grass seed gate (GRASS_HAB_MIN) when dry, so desert stays sparse until it actually rains.
+pub const DESERT_FLORA_FLOOR: f32 = 0.12;
 
 // --- celestial bodies (relative Earth proportions, distances stylized down to stay visible) ---
 pub const MOON_R: f32 = 0.27 * PLANET_R; // moon ~1/4 planet radius (Earth: 0.273)
@@ -250,7 +254,9 @@ pub fn plant_habitability_with_moisture(d: Vec3, moist: f32) -> f32 {
         return ((0.55 + 0.30 * shallow) * water_warm).clamp(0.0, 1.0);
     }
     let rock_ok = 1.0 - 0.9 * rockiness(d);
-    let moist_ok = (moist / 0.35).clamp(0.0, 1.0);
+    // dry-ground habitability with a desert floor: bone-dry land keeps DESERT_FLORA_FLOOR (rare scrub), and
+    // since callers pass an effective moisture (static + rain ground water), a downpour lifts this -> bloom.
+    let moist_ok = (moist / 0.35).clamp(0.0, 1.0).max(DESERT_FLORA_FLOOR);
     (rock_ok * moist_ok * warm_ok).clamp(0.0, 1.0)
 }
 
@@ -291,6 +297,12 @@ pub fn biome_color_with_moisture(d: Vec3, m: f32) -> [f32; 3] {
     }
     let elev = (elevation(d) / ELEV_MAX).clamp(0.0, 1.0);
     let mut c = lerp3([0.20, 0.55, 0.22], [0.48, 0.40, 0.26], elev);
+    // bare gray rock on the rockiest highland (rockiness ramps in above ROCK_START) -> rocky land reads as
+    // stone, not just dark soil. Stops short of full gray so grass between the rocks still shows green.
+    let rock = rockiness(d);
+    if rock > 0.0 {
+        c = lerp3(c, [0.44, 0.42, 0.40], rock * 0.85);
+    }
     if m < 0.35 {
         c = lerp3(c, [0.80, 0.72, 0.45], (0.35 - m) / 0.35);
     }
@@ -343,7 +355,12 @@ pub fn daylight_at(d: Vec3, tick: u32) -> f32 {
 // ---------- clouds + cloud-driven rain ----------
 
 const CLOUD_FREQ: f32 = 3.0;     // cloud patch size (higher = smaller, more patches)
-const CLOUD_SPEED: f32 = 0.0009; // wind: radians/tick the cloud field rotates (drifts west->east)
+// Wind is now LATITUDE-BANDED, not one uniform spin: see `zonal_wind`. WIND_PEAK = the strongest band
+// (rad/tick); bands shear past each other -> clouds at different latitudes drift at different speeds + dirs.
+const WIND_PEAK: f32 = 0.0011;
+// Slow secondary morph: nudge the noise through its 3rd axis over time so the cloud PATTERN itself evolves
+// (forms + dissolves) instead of rigidly circling forever. ~1 unit of fbm space per ~25k ticks = gentle.
+const CLOUD_MORPH: f32 = 0.00004;
 // Climate-drift field (geological): the SLOW regional wet/dry anomaly the climate memory chases. Same
 // rotate-the-sample-point trick as clouds, but ~500x slower so wet belts migrate over years, not days.
 const CLIMATE_DRIFT: f32 = 0.45;     // anomaly amplitude (0 = static climate, 1 = strong wet-belt migration)
@@ -356,15 +373,29 @@ pub const CLOUD_RAIN_MIN: f32 = 0.45; // cloud cover above which rain can fall (
 // 0.60 sits in the field's upper band -> scattered, drifting rain cells under the thicker clouds.
 pub const RAIN_MASK_MIN: f32 = 0.60;
 
-/// Cloud cover 0..1 at surface direction `d` and `tick`: a scrolling 3D-fBm field that drifts with the
-/// wind (the planet's clouds move). 0 = clear sky, 1 = thick overcast. Deterministic -> headless + render
-/// agree. Drives local shade (visual + plant light) and is the ONLY source of rain (see `rains_at`).
+/// Signed zonal (east-west) wind at direction `d`, rad/tick. Earth-like 3-band flow: gentle equatorial
+/// easterlies (-), strong mid-latitude westerlies (+), tapering toward the poles. + drifts west->east, -
+/// east->west. Rotation about the spin axis preserves latitude, so each cloud keeps its band -> the bands
+/// shear past each other and clouds move at visibly different speeds + directions by latitude.
+pub fn zonal_wind(d: Vec3) -> f32 {
+    let (_lon, lat) = dir_to_lonlat(d);
+    // 0.35 - 0.65*cos(3*lat): equator ~ -0.30 (mild easterly), ~30deg ~ +0.35, ~60deg ~ +1.0 (jet), pole
+    // ~ +0.35. Most of the populated mid-latitudes drift west->east; only the deep tropics reverse.
+    WIND_PEAK * (0.35 - 0.65 * (3.0 * lat).cos())
+}
+
+/// Cloud cover 0..1 at surface direction `d` and `tick`: a scrolling 3D-fBm field. 0 = clear sky, 1 = thick
+/// overcast. Drift is latitude-banded (`zonal_wind`) so clouds move at different speeds per band, and a slow
+/// morph evolves the pattern so cloud systems form + dissolve, not just circle. Deterministic -> headless +
+/// render agree. Drives local shade (visual + plant light) and is the ONLY source of rain (see `rain_at`).
 pub fn cloud_cover(d: Vec3, tick: u32) -> f32 {
-    // rotate the sample point about the spin axis so the pattern drifts over the surface
-    let a = tick as f32 * CLOUD_SPEED;
+    // rotate the sample point about the spin axis by this latitude's wind so the pattern drifts per band
+    let a = tick as f32 * zonal_wind(d);
     let (s, c) = (a.sin(), a.cos());
     let rot = Vec3::new(c * d.x - s * d.z, d.y, s * d.x + c * d.z);
-    let n = fbm3(rot * CLOUD_FREQ + Vec3::splat(31.7));
+    // walk the 3rd noise axis slowly -> the cloud pattern itself slowly reshapes (form + dissolve)
+    let morph = tick as f32 * CLOUD_MORPH;
+    let n = fbm3(rot * CLOUD_FREQ + Vec3::new(31.7, morph, 7.0));
     ((n - CLOUD_COVER) / (1.0 - CLOUD_COVER)).clamp(0.0, 1.0)
 }
 
@@ -376,7 +407,7 @@ pub fn rain_at(d: Vec3, tick: u32) -> f32 {
     if cover <= CLOUD_RAIN_MIN {
         return 0.0;
     }
-    let a = tick as f32 * CLOUD_SPEED * 0.7; // rain bands drift a touch slower than the clouds
+    let a = tick as f32 * zonal_wind(d) * 0.7; // rain bands drift with this band's wind, a touch slower
     let (s, c) = (a.sin(), a.cos());
     let rot = Vec3::new(c * d.x - s * d.z, d.y, s * d.x + c * d.z);
     let mask = fbm3(rot * (CLOUD_FREQ * 1.7) + Vec3::splat(71.2));

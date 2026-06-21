@@ -126,7 +126,11 @@ pub const PLANT_MIN_MASS: f32 = 0.15; // below this a grazed plant is fully cons
 pub const GRASS_CAP: usize = 8000; // target tuft count for whole-planet cover (render only; size set at attach)
 pub const GRASS_START_MASS: f32 = 0.4;
 pub const GRASS_HAB_MIN: f32 = 0.25; // min plant_habitability to seed/keep grass = "soil capable of plants"
-pub const GRASS_GRAZE: f32 = 1.6; // energy/sec a HUNGRY creature nibbles from grassy soil (x habitability); thin fallback
+pub const GRASS_GRAZE: f32 = 1.0; // energy/sec a HUNGRY creature nibbles from grassy soil (x habitability); thin fallback (balance TBD)
+
+// --- rocky land: scattered boulders (render-only dressing). Spawned once on rocky highland so rocky terrain
+// reads as a field of stone with grass growing between the rocks. Static -> no per-frame cost. ---
+pub const ROCK_SCATTER: usize = 1200; // boulders scattered across rocky ground worldwide (denser the rockier)
 
 // --- trees: long-lived, near-uneatable plants ---
 pub const N_TREES: usize = 240; // initial trees (whole-planet seeding, scattered worldwide)

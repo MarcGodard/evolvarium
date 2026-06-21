@@ -309,9 +309,14 @@ fn add_grass_visuals(
     for (e, st, mut tf) in &mut q {
         let up = tf.translation.normalize_or_zero();
         let base = crate::sphere::surface_pos(up, 0.0);
-        let soil = (0.5 * crate::sphere::plant_habitability(up) + 0.5 * crate::sphere::moisture(up)).clamp(0.0, 1.0);
-        let len = (0.5 + 1.5 * soil) * (0.7 + 0.3 * st.mass.min(1.0)); // ~0.5..2.0 units tall (soil-driven)
-        let girth = 1.4 + 1.1 * soil; // richer soil = wider, fuller clump
+        // WATER drives height + thickness: wet ground (coasts/edges, tropics) grows tall lush grass; dry
+        // interior stays short + thin. plant_habitability is a secondary viability factor (sparse on
+        // marginal land). moisture is high near the sea edge (coastal) -> tall thick grass by the water.
+        let wet = crate::sphere::moisture(up).clamp(0.0, 1.0);
+        let viable = crate::sphere::plant_habitability(up).clamp(0.0, 1.0);
+        let mass_f = 0.7 + 0.3 * st.mass.min(1.0);
+        let len = (0.35 + 2.2 * wet) * (0.55 + 0.45 * viable) * mass_f; // water-dominated height
+        let girth = (0.9 + 1.9 * wet) * (0.6 + 0.4 * viable); // wetter = thicker, fuller clump
         tf.scale = Vec3::new(girth, len, girth);
         tf.rotation = Quat::from_rotation_arc(Vec3::Y, up);
         tf.translation = base + up * 0.02; // roots on the surface
@@ -446,13 +451,22 @@ fn rain_visuals(gen: Res<GenState>, mut gizmos: Gizmos) {
 // scrolls with the wind -> clouds form, drift, and dissolve. CLOUD_ALT clears the terrain + trees.
 #[derive(Component)]
 struct CloudPuff {
-    dir: Vec3,
-    moist: f32, // ground moisture below this puff; wetter ground feeds a bigger, taller cloud
-    grow: f32,  // 0..1 smoothed fullness; ramps toward target so clouds build + dissolve (no pop-in)
+    anchor: Vec3,   // fixed field-space home; each frame it rides this latitude's wind to its drifted pos
+    moist: f32,     // ground moisture below the anchor; wetter ground feeds a bigger, taller cloud
+    grow: f32,      // 0..1 smoothed fullness; ramps toward target so clouds build + dissolve (no pop-in)
+    scale_var: f32, // per-puff size multiplier (~0.6..1.6) so a cloud reads as lumpy, not a grid of clones
+    flat: f32,      // per-puff vertical squash (thinner = wispier); flattens along local up
+    hbias: f32,     // small per-puff altitude offset so puffs layer instead of sitting on one shell
 }
 
 fn cloud_alt() -> f32 {
     crate::sphere::PLANET_R + crate::sphere::ELEV_MAX + 10.0
+}
+
+// Cheap deterministic 0..1 from an integer seed (jitter + per-puff variation; keeps spawn reproducible).
+fn hash01(n: u32) -> f32 {
+    let x = n.wrapping_mul(2654435761) ^ (n >> 15);
+    (x.wrapping_mul(40503) & 0xffff) as f32 / 65535.0
 }
 
 fn spawn_clouds(
@@ -463,12 +477,17 @@ fn spawn_clouds(
     use std::f32::consts::{FRAC_PI_2, PI, TAU};
     let mesh = meshes.add(Sphere::new(1.0).mesh().ico(2).unwrap());
     let alt = cloud_alt();
-    let (rows, cols) = (16, 32);
+    // Denser grid + per-puff jitter so cloudy regions read as clusters of varied fluffy puffs, not a lattice.
+    let (rows, cols) = (22, 44);
+    let (dlat, dlon) = (PI * 0.92 / rows as f32, TAU / cols as f32);
     for j in 0..rows {
         for i in 0..cols {
-            let lat = -FRAC_PI_2 * 0.92 + (PI * 0.92) * (j as f32 + 0.5) / rows as f32; // skip the exact poles
-            let lon = -PI + TAU * (i as f32 + 0.5) / cols as f32;
-            let dir = crate::sphere::lonlat_to_pos(lon, lat, 0.0).normalize();
+            let seed = (j as u32) * cols + i as u32;
+            // jitter each puff off the exact grid (up to ~0.6 cell) so the pattern looks organic
+            let lat = -FRAC_PI_2 * 0.92 + (PI * 0.92) * (j as f32 + 0.5) / rows as f32
+                + (hash01(seed) - 0.5) * dlat * 1.2;
+            let lon = -PI + TAU * (i as f32 + 0.5) / cols as f32 + (hash01(seed ^ 0x9e37) - 0.5) * dlon * 1.2;
+            let anchor = crate::sphere::lonlat_to_pos(lon, lat, 0.0).normalize();
             let mat = materials.add(StandardMaterial {
                 base_color: Color::srgba(0.95, 0.96, 1.0, 0.0),
                 alpha_mode: AlphaMode::Blend,
@@ -477,16 +496,22 @@ fn spawn_clouds(
             commands.spawn((
                 Mesh3d(mesh.clone()),
                 MeshMaterial3d(mat),
-                Transform::from_translation(dir * alt),
+                Transform::from_translation(anchor * alt),
                 Visibility::Hidden,
                 // Clouds don't cast (for now): a translucent Blend mesh casts a FULL OPAQUE shadow in Bevy
                 // (alpha is ignored in the shadow pass), so casting big overlapping puffs = hard black blobs.
                 // A true ~50%-opacity soft cloud shadow needs alpha-HASHED (dithered) shadows = a small custom
                 // shadow shader; until that lands, clouds stay non-casting so they read soft + transparent.
                 bevy::light::NotShadowCaster,
-                CloudPuff { dir, moist: crate::sphere::moisture(dir), grow: 0.0 },
+                CloudPuff {
+                    anchor,
+                    moist: crate::sphere::moisture(anchor),
+                    grow: 0.0,
+                    scale_var: 0.6 + hash01(seed ^ 0x1234) * 1.0,
+                    flat: 0.35 + hash01(seed ^ 0x5678) * 0.18,
+                    hbias: (hash01(seed ^ 0xabcd) - 0.5) * 6.0,
+                },
             ));
-            let _ = (i, j);
         }
     }
 }
@@ -498,11 +523,19 @@ fn update_clouds(
     mut q: Query<(&mut CloudPuff, &MeshMaterial3d<StandardMaterial>, &mut Visibility, &mut Transform)>,
 ) {
     let dt = time.delta_secs();
+    let alt = cloud_alt();
     for (mut puff, mm, mut vis, mut tf) in &mut q {
-        let c = crate::sphere::cloud_cover(puff.dir, gen.tick);
+        // Glide: the cloud PATTERN drifts at -wind per tick (features move opposite the sample rotation), so
+        // riding the anchor by -a keeps each puff sitting on its own cloud as it sweeps across the sky.
+        let a = -(gen.tick as f32) * crate::sphere::zonal_wind(puff.anchor);
+        let (s, c) = (a.sin(), a.cos());
+        let an = puff.anchor;
+        let dir = Vec3::new(c * an.x - s * an.z, an.y, s * an.x + c * an.z);
+        // Cover sampled at the drifted position -> rain (same field) falls under the visible cloud.
+        let cov = crate::sphere::cloud_cover(dir, gen.tick);
         // Target fullness: weather (cloud cover) scaled by ground moisture below (wet ground feeds taller
         // clouds). Below the cover threshold target is 0 -> the puff shrinks + fades back out, not vanishes.
-        let target = if c < 0.18 { 0.0 } else { c * (0.55 + 0.45 * puff.moist) };
+        let target = if cov < 0.18 { 0.0 } else { cov * (0.55 + 0.45 * puff.moist) };
         // Ramp grow toward target over seconds so clouds build up + dissolve smoothly (no pop-in at full
         // size). Build slow, dissipate a touch faster, like real cumulus.
         let rate = if target > puff.grow { 0.6 } else { 1.1 };
@@ -516,12 +549,18 @@ fn update_clouds(
         if *vis != Visibility::Inherited {
             *vis = Visibility::Inherited;
         }
+        // Move + orient: sit at the drifted position, lie flat against the sky shell (squash along local up).
+        tf.translation = dir * (alt + puff.hbias);
+        tf.rotation = Quat::from_rotation_arc(Vec3::Y, dir);
         if let Some(m) = mats.get_mut(&mm.0) {
             // Opacity tracks grow so a forming cloud fades in from clear; wispy, thickest cap ~0.5.
-            m.base_color = Color::srgba(0.95, 0.96, 1.0, (0.45 * puff.grow).min(0.5));
+            // Thicker cover greys the puff (rain clouds are darker underneath); thin cover stays bright white.
+            let shade = 1.0 - 0.28 * cov;
+            m.base_color = Color::srgba(0.96 * shade, 0.97 * shade, 1.0 * shade, (0.45 * puff.grow).min(0.5));
         }
-        let s = 2.0 + 16.0 * puff.grow; // start as a small wisp, grow into a full puff
-        tf.scale = Vec3::new(s, s * 0.45, s); // flattened like a cloud
+        // Start as a small wisp, grow into a full puff; per-puff size + squash make clouds lumpy not uniform.
+        let s = (2.0 + 16.0 * puff.grow) * puff.scale_var;
+        tf.scale = Vec3::new(s, s * puff.flat, s); // squash along local up (set by tf.rotation) = flat cloud
     }
 }
 

@@ -10,6 +10,19 @@ A 3D artificial-life sim on a small **planet** (Rust + Bevy 0.18). Tiny per-crea
 algorithm + lifetime learning evolve them against a living, co-evolving food web on a sphere with day/night,
 clouds, rain, wildfire, oceans, mountains, and cold-pole/warm-equator climate.
 
+## Current phase: VISUALS FIRST, balance later
+
+We are in a **visuals-first** phase: polish how the world looks and feels (clouds, weather, lighting,
+terrain, creatures, effects) before tuning the simulation. Until this note is removed:
+
+- **Do NOT gate visual work on population balance.** Skip the headless balance / carrying-capacity sanity
+  runs for render-only changes. Build + a `--gens=1` smoke (so it compiles + boots) is enough.
+- Population balancing and creature/genome improvements come in a **later phase**. Don't divert into balance
+  tuning mid-visual-task unless explicitly asked.
+- Still keep the tree green (`cargo build` + `cargo test`), still write honest commits.
+- This overrides the "verify population stays stable before committing" guidance below for as long as the
+  visuals phase is active.
+
 ## Commit & push policy (this project)
 
 **Standing permission: commit and push whenever you judge it's a good time** — you do not need to ask first.

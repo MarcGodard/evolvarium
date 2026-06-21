@@ -670,12 +670,23 @@ fn spawn_grass(commands: &mut Commands, g: PlantGenome, mass: f32, pos: Vec3) {
     ));
 }
 
+// Effective grass habitability at a surface dir: static plant_habitability LIFTED by local rain (ground
+// water raises effective soil moisture) -> dry desert greens briefly after a downpour, then dries out and
+// the tufts die back. Lush ground is already moisture-capped, so rain can't over-grow it (no runaway food).
+// gw = None -> static habitability (used at world seed, before any rain has fallen).
+fn grass_hab(d: Vec3, gw: Option<&GroundWater>) -> f32 {
+    let water = gw.map_or(0.0, |g| g.get(crate::sphere::surface_pos(d, 0.0)));
+    let m = (crate::sphere::moisture(d) + WET_GAIN * water).clamp(0.0, 1.0);
+    crate::sphere::plant_habitability_with_moisture(d, m)
+}
+
 // Whole-planet: grass blankets ALL plant-capable land worldwide (not just the homeland). Rejection samples
-// the full sphere until a non-ocean spot with plant_habitability > GRASS_HAB_MIN ("soil capable of plants").
-fn grass_pos(rng: &mut Rng) -> Vec3 {
+// the full sphere until a non-ocean spot whose EFFECTIVE habitability (with rain) clears GRASS_HAB_MIN, so a
+// rained-on desert patch becomes eligible and the turf blooms there until it dries out.
+fn grass_pos(rng: &mut Rng, gw: Option<&GroundWater>) -> Vec3 {
     let mut d = crate::sphere::random_dir_in_cap(rng, Vec3::Y, std::f32::consts::PI);
     for _ in 0..8 {
-        if !crate::sphere::is_ocean(d) && crate::sphere::plant_habitability(d) > GRASS_HAB_MIN {
+        if !crate::sphere::is_ocean(d) && grass_hab(d, gw) > GRASS_HAB_MIN {
             break;
         }
         d = crate::sphere::random_dir_in_cap(rng, Vec3::Y, std::f32::consts::PI);
@@ -743,7 +754,7 @@ pub fn spawn_world_headless(mut commands: Commands, mut rng: ResMut<Rng>, mut ge
     spawn_trees(&mut commands, &mut rng, gen.diverse);
     // start the turf half-full; grass_step tops it up to GRASS_CAP from here.
     for _ in 0..GRASS_CAP / 2 {
-        spawn_grass(&mut commands, PlantGenome::grass(&mut rng), GRASS_START_MASS, grass_pos(&mut rng));
+        spawn_grass(&mut commands, PlantGenome::grass(&mut rng), GRASS_START_MASS, grass_pos(&mut rng, None));
     }
 }
 
@@ -795,6 +806,42 @@ pub fn spawn_world_render(
         cull_mode: None,
         ..default()
     })));
+
+    // scattered boulders on rocky highland (render-only dressing): one shared low-poly icosphere + a gray
+    // stone material, instanced many times with varied squat scale + spin so rocky land reads as a field of
+    // rocks (grass still seeds between them where habitability allows). Static -> spawned once here, no
+    // per-frame cost. Rejection-samples non-ocean ground, denser the rockier the spot; base sunk slightly
+    // into the surface so each rock sits on the ground. NotShadowCaster keeps the shadow pass cheap.
+    {
+        use std::f32::consts::PI;
+        let rock_mesh = meshes.add(Sphere::new(0.5).mesh().ico(1).unwrap());
+        let rock_mat = materials.add(StandardMaterial {
+            base_color: Color::srgb(0.40, 0.39, 0.37),
+            perceptual_roughness: 1.0,
+            ..default()
+        });
+        let (mut placed, mut tries) = (0usize, 0usize);
+        while placed < ROCK_SCATTER && tries < ROCK_SCATTER * 30 {
+            tries += 1;
+            let d = crate::sphere::random_dir_in_cap(&mut rng, Vec3::Y, PI);
+            if crate::sphere::is_ocean(d) {
+                continue;
+            }
+            let rock = crate::sphere::rockiness(d);
+            if rock < 0.12 || rng.f32() > rock {
+                continue; // only genuinely rocky ground; probability rises with rockiness (denser on peaks)
+            }
+            let up = d;
+            let base = crate::sphere::surface_pos(up, 0.0);
+            let s = rng.range(0.4, 1.8) * (0.6 + rock); // bigger boulders on the rockiest peaks
+            let (sx, sy, sz) = (s * rng.range(0.7, 1.3), s * rng.range(0.5, 1.0), s * rng.range(0.7, 1.3)); // squat
+            let mut tf = Transform::from_translation(base - up * (sy * 0.18)); // sink the base into the ground
+            tf.rotation = Quat::from_rotation_arc(Vec3::Y, up) * Quat::from_rotation_y(rng.range(-PI, PI));
+            tf.scale = Vec3::new(sx, sy, sz);
+            commands.spawn((Mesh3d(rock_mesh.clone()), MeshMaterial3d(rock_mat.clone()), tf, bevy::light::NotShadowCaster));
+            placed += 1;
+        }
+    }
 
     // --load resumes a saved population; otherwise a random founding pop. Positions re-randomized.
     let snap = gen.load.as_deref().and_then(crate::persist::load_snapshot);
@@ -854,7 +901,7 @@ pub fn spawn_world_render(
     spawn_trees(&mut commands, &mut rng, gen.diverse);
     // start the turf half-full; grass_step tops it up to GRASS_CAP from here.
     for _ in 0..GRASS_CAP / 2 {
-        spawn_grass(&mut commands, PlantGenome::grass(&mut rng), GRASS_START_MASS, grass_pos(&mut rng));
+        spawn_grass(&mut commands, PlantGenome::grass(&mut rng), GRASS_START_MASS, grass_pos(&mut rng, None));
     }
 }
 
@@ -888,7 +935,7 @@ pub fn grass_step(
         let water = gw.get(ppos);
         let m = (crate::sphere::moisture(pdir) + 0.2 * season + WET_GAIN * water).clamp(0.0, 1.0);
         let stress = (m - g.wet).abs();
-        let hab = crate::sphere::plant_habitability(pdir);
+        let hab = grass_hab(pdir, Some(&gw)); // rain-lifted: desert turf survives while wet, dies as it dries
         let e01 = crate::sphere::elevation01(pdir);
         let submersion = ((crate::sphere::SEA_LEVEL - e01) / crate::sphere::SEA_LEVEL).clamp(0.0, 1.0);
         let drown = DROWN_KILL * submersion * (1.0 - g.wet);
@@ -909,7 +956,7 @@ pub fn grass_step(
     // refill toward the target density: blankets plant-capable ground + replaces grazed/burned tufts.
     let mut spawned = 0;
     while count + spawned < GRASS_CAP {
-        spawn_grass(&mut commands, PlantGenome::grass(&mut rng), GRASS_START_MASS, grass_pos(&mut rng));
+        spawn_grass(&mut commands, PlantGenome::grass(&mut rng), GRASS_START_MASS, grass_pos(&mut rng, Some(&gw)));
         spawned += 1;
     }
 }
