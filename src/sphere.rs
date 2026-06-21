@@ -192,7 +192,7 @@ pub fn plant_habitability(d: Vec3) -> f32 {
     }
     let rock_ok = 1.0 - 0.9 * rockiness(d);
     let moist_ok = (moisture(d) / 0.35).clamp(0.0, 1.0);
-    let warm_ok = 0.25 + 0.75 * base_temperature(d); // cold poles are sparse, not barren
+    let warm_ok = 0.45 + 0.55 * base_temperature(d); // poles support hardy (cold-tolerant) flora, not barren -> a cold niche has food to sustain it
     (rock_ok * moist_ok * warm_ok).clamp(0.0, 1.0)
 }
 
