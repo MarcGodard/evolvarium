@@ -25,6 +25,7 @@ pub struct CaptureCfg {
     pub orbit: bool,  // capture from orbit (far) instead of walk (surface)
     pub dist: f32,    // orbit distance from planet center (test zoom for the eclipse-disc regression)
     pub underwater: bool, // stand submerged in a deep ocean (verify swim view + blue tint)
+    pub lat: Option<f32>, // --cap-lat: top-down orbit view aimed at this latitude (deg, + = north pole)
 }
 
 // Deepest-ocean surface direction, found by scanning a Fibonacci sphere (robust to the exact noise seed,
@@ -67,7 +68,21 @@ impl Plugin for CapturePlugin {
 // so test objects + their shadows are always framed.
 fn force_cam(cfg: Res<CaptureCfg>, mut q: Query<&mut Transform, With<Camera3d>>) {
     if cfg.orbit {
-        return; // orbit framing is owned by apply_orbit (ran in Update); don't override it here
+        // --cap-lat: aim the orbit camera straight down at a chosen latitude on the homeland meridian for a
+        // top-down pole view. Own the transform here (not apply_orbit) so we can pick a stable up: look_at with
+        // up=Y collapses at the poles (view axis ~parallel to Y), so near a pole use Z as up instead.
+        if let Some(lat_deg) = cfg.lat {
+            use std::f32::consts::FRAC_PI_2;
+            let lat = lat_deg.to_radians().clamp(-FRAC_PI_2, FRAC_PI_2);
+            let (lon, _) = crate::sphere::dir_to_lonlat(crate::sim::homeland_center());
+            let dir = Vec3::new(lat.cos() * lon.cos(), lat.sin(), lat.cos() * lon.sin());
+            let eye = dir * cfg.dist;
+            let up = if dir.y.abs() > 0.9 { Vec3::Z } else { Vec3::Y };
+            if let Ok(mut t) = q.single_mut() {
+                *t = Transform::from_translation(eye).looking_at(Vec3::ZERO, up);
+            }
+        }
+        return; // plain orbit framing is owned by apply_orbit (ran in Update); don't override it here
     }
     if cfg.underwater {
         // submerged in the deep ocean: eye 2 units off the seafloor, looking level + slightly up at the

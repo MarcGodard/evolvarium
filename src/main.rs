@@ -81,7 +81,10 @@ fn main() {
     let cap_yaw = args.iter().find_map(|a| a.strip_prefix("--cap-yaw=").and_then(|s| s.parse::<f32>().ok())).unwrap_or(0.0);
     let cap_off = args.iter().find_map(|a| a.strip_prefix("--cap-off=").and_then(|s| s.parse::<i64>().ok())).unwrap_or(0);
     let cap_pitch = args.iter().find_map(|a| a.strip_prefix("--cap-pitch=").and_then(|s| s.parse::<f32>().ok())).unwrap_or(-0.35);
-    let cap_orbit = args.iter().any(|a| a == "--cap-orbit");
+    // --cap-lat=DEG: aim the orbit camera straight down at this latitude (deg, + = north pole, - = south)
+    // for a top-down pole view. Implies orbit. Pair with --cap-dist to frame the whole cap.
+    let cap_lat = args.iter().find_map(|a| a.strip_prefix("--cap-lat=").and_then(|s| s.parse::<f32>().ok()));
+    let cap_orbit = args.iter().any(|a| a == "--cap-orbit") || cap_lat.is_some();
     let cap_dist = args.iter().find_map(|a| a.strip_prefix("--cap-dist=").and_then(|s| s.parse::<f32>().ok())).unwrap_or(140.0);
     // --cap-water: stand the capture camera submerged in a deep ocean (verify swim view + underwater tint).
     let cap_water = args.iter().any(|a| a == "--cap-water");
@@ -141,7 +144,7 @@ fn main() {
                 (sim::weather_step, sim::fire_step, sim::live_step, sim::predation_step, sim::grass_step, sim::plant_step, sim::rot_step, sim::generation_step).chain(),
             );
         if let Some(prefix) = capture {
-            app.insert_resource(capture::CaptureCfg { prefix, when: cap_when, yaw: cap_yaw, off: cap_off, pitch: cap_pitch, orbit: cap_orbit, dist: cap_dist, underwater: cap_water })
+            app.insert_resource(capture::CaptureCfg { prefix, when: cap_when, yaw: cap_yaw, off: cap_off, pitch: cap_pitch, orbit: cap_orbit, dist: cap_dist, underwater: cap_water, lat: cap_lat })
                 .add_plugins(capture::CapturePlugin);
         }
     }

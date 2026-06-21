@@ -63,6 +63,7 @@ cargo run -- --capture=PREFIX               # walk view at the homeland (morning
   --cap-yaw=F                               # walk heading
   --cap-orbit                               # capture from orbit (space) instead of walk (surface)
   --cap-dist=F                              # orbit distance from planet center (test zoom; 95..420)
+  --cap-lat=DEG                             # top-down orbit view at latitude DEG (+90 = north pole, -90 = south); implies orbit, pair w/ --cap-dist
   --cap-water                               # stand submerged in deep ocean (verify swim + blue tint)
 ```
 
