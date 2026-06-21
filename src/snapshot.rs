@@ -43,6 +43,7 @@ pub fn snapshot_capture(
     // niche census: count creatures by their evolved niche so biodiversity is quantified, not just drawn.
     let (mut cold, mut warm, mut aquatic, mut land, mut frugal, mut fast, mut spec, mut hidden) =
         (0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32);
+    let (mut a_temp, mut a_lng, mut a_met, mut a_par, mut a_swim) = (0.0f32, 0.0f32, 0.0f32, 0.0f32, 0.0f32);
     for (t, g) in &creatures {
         let w = g.temp_pref.clamp(0.0, 1.0);
         let color = [
@@ -56,6 +57,7 @@ pub fn snapshot_capture(
         if g.metab > 0.6 { frugal += 1; } else if g.metab < 0.4 { fast += 1; }
         if g.rigidity > 0.6 { spec += 1; } // diet specialist
         hidden += g.net.ih.len() as u32; // brain hidden neurons
+        a_temp += g.temp_pref; a_lng += g.longevity; a_met += g.metab; a_par += g.parental; a_swim += g.swim;
     }
     let nc = creatures.iter().count().max(1) as f32;
     for (t, tree, rot) in &foods {
@@ -80,6 +82,10 @@ pub fn snapshot_capture(
     info!(
         "niche census: clime[cold {cold} / warm {warm}] habitat[aquatic {aquatic} / land {land}] metab[frugal {frugal} / fast {fast}] | diet-specialists {spec} | avg brain {:.1} neurons",
         hidden as f32 / nc
+    );
+    info!(
+        "gene averages: temp {:.2} swim {:.2} longevity {:.2} metab {:.2} r/K {:.2}",
+        a_temp / nc, a_swim / nc, a_lng / nc, a_met / nc, a_par / nc
     );
     for (name, cam) in &views {
         let buf = render(SHOT_W, SHOT_H, cam, tick, &dots);
