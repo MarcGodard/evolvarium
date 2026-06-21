@@ -173,13 +173,15 @@ fn add_plant_visuals(
                 Mesh3d(tm.trunk.clone()),
                 MeshMaterial3d(materials.add(Color::srgb(0.40, 0.26, 0.13))),
             ));
-            let (canopy, color) = if t.edible {
-                (tm.broadleaf.clone(), plant_color(g))
+            // broadleaf crown is centered (sits high in the canopy); the stacked-cone conifer has its base
+            // at y=0 so it rests on the trunk top (lower attach point).
+            let (canopy, color, cy) = if t.edible {
+                (tm.broadleaf.clone(), plant_color(g), 2.2)
             } else {
-                (tm.conifer.clone(), Color::srgb(0.06, 0.30, 0.18))
+                (tm.conifer.clone(), Color::srgb(0.06, 0.30, 0.18), 1.1)
             };
             let child = commands
-                .spawn((Mesh3d(canopy), MeshMaterial3d(materials.add(color)), Transform::from_xyz(0.0, 2.2, 0.0)))
+                .spawn((Mesh3d(canopy), MeshMaterial3d(materials.add(color)), Transform::from_xyz(0.0, cy, 0.0)))
                 .id();
             commands.entity(e).add_child(child);
             // a flowering (blossom) fruit tree gets a ring of bloom blobs in its crown
@@ -246,13 +248,13 @@ fn add_plant_visuals(
                 commands.entity(e).add_child(c);
             }
         }
-        // mushroom cap on top of the stem
+        // mushroom cap (domed) resting on the stem top
         if g.form == form::MUSHROOM {
             let c = commands
                 .spawn((
                     Mesh3d(forms.cap.clone()),
                     MeshMaterial3d(materials.add(plant_color(g))),
-                    Transform::from_xyz(0.0, 0.55, 0.0).with_scale(Vec3::new(1.0, 0.6, 1.0)),
+                    Transform::from_xyz(0.0, 0.24, 0.0).with_scale(Vec3::new(0.5, 0.45, 0.5)),
                 ))
                 .id();
             commands.entity(e).add_child(c);
@@ -306,20 +308,22 @@ fn size_plants(mut q: Query<(&PlantState, &PlantGenome, &mut Transform, Option<&
         let bushy = 0.7 + 0.6 * g.bushiness;
         let tall = (1.0 + 1.4 * g.height) * (1.0 - 0.3 * g.droop);
         // (sx, sy, sz, lift_in_local_units) per form. lift = local distance from origin to the mesh base.
+        // most forms are now base-at-y=0 multi-blob/clump/cactus meshes (lift=0); only the two centered
+        // cylinder stems (flower stalk, mushroom) lift by half their height.
         let (sx, sy, sz, lift) = match g.form {
-            form::SHRUB => (girth * bushy * 1.4, girth * bushy * 1.2, girth * bushy * 1.4, 0.5),
-            form::GROUNDCOVER => (girth * bushy * 1.7, girth * 0.35, girth * bushy * 1.7, 0.4),
-            form::MOSS => (girth * bushy * 1.5, girth * 0.22, girth * bushy * 1.5, 0.35),
+            form::SHRUB => (girth * bushy * 1.2, girth * bushy * 1.1, girth * bushy * 1.2, 0.0),
+            form::GROUNDCOVER => (girth * bushy * 1.6, girth * 0.6, girth * bushy * 1.6, 0.0),
+            form::MOSS => (girth * bushy * 1.4, girth * 0.45, girth * bushy * 1.4, 0.0),
             form::FERN => (0.55 + 0.45 * bushy, 0.6 + 0.7 * g.height, 0.55 + 0.45 * bushy, 0.0),
-            form::SUCCULENT => (0.35 + 0.3 * girth, 0.5 + 0.8 * g.height, 0.35 + 0.3 * girth, 0.53),
+            form::SUCCULENT => (0.6 + 0.4 * girth, 0.7 + 0.6 * g.height, 0.6 + 0.4 * girth, 0.0),
             form::REED => (0.3 + 0.25 * bushy, 1.0 + 1.6 * g.height, 0.3 + 0.25 * bushy, 0.0),
             form::FLOWER_STALK => (0.6 + 0.4 * girth, 0.6 + 1.0 * g.height, 0.6 + 0.4 * girth, 0.5),
             form::ROSETTE => (0.6 + 0.5 * bushy, 0.35 + 0.35 * g.height, 0.6 + 0.5 * bushy, 0.0),
             form::LILYPAD => (0.6 + 0.7 * girth, 1.0, 0.6 + 0.7 * girth, 0.0),
             form::KELP => (0.4 + 0.3 * bushy, 1.4 + 2.2 * g.height, 0.4 + 0.3 * bushy, 0.0),
             form::MUSHROOM => (0.5 + 0.4 * girth, 0.5 + 0.6 * g.height, 0.5 + 0.4 * girth, 0.25),
-            // HERB + fallback: the classic small sphere, stretched by the height gene
-            _ => (girth, girth * tall, girth, 0.35),
+            // HERB + fallback: small bushy clump, stretched by the height gene
+            _ => (girth * bushy, girth * bushy * tall, girth * bushy, 0.0),
         };
         tf.scale = Vec3::new(sx, sy, sz);
         tf.rotation = rot;
@@ -459,6 +463,183 @@ pub fn disc_mesh(segs: usize) -> Mesh {
     mesh
 }
 
+// --- richer "kid-friendly" plant geometry. All baked into the SHARED per-form meshes (zero per-plant
+// cost): fuller multi-blob bushes/canopies, petalled flowers, domed mushroom caps, an armed cactus, and
+// stacked-cone conifers. Each carries a per-vertex grayscale shade (ATTRIBUTE_COLOR) that StandardMaterial
+// multiplies into the genome color -> soft depth/AO (darker base, brighter crown) instead of flat blobs. ---
+
+// Buffers passed around by the geometry appenders below.
+struct MeshBuf {
+    pos: Vec<[f32; 3]>,
+    nor: Vec<[f32; 3]>,
+    col: Vec<[f32; 4]>, // grayscale shade (rgb=v), multiplied into the material color
+}
+impl MeshBuf {
+    fn new() -> Self {
+        MeshBuf { pos: Vec::new(), nor: Vec::new(), col: Vec::new() }
+    }
+    fn finish(self, indices: Vec<u32>) -> Mesh {
+        let n = self.pos.len();
+        let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, self.pos);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, self.nor);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0f32, 0.0]; n]);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, self.col);
+        mesh.insert_indices(Indices::U32(indices));
+        mesh
+    }
+}
+
+// Append a low-poly UV sphere at `center` (radius r) with a flat shade `v` on every vertex.
+fn push_sphere(b: &mut MeshBuf, idx: &mut Vec<u32>, center: Vec3, r: f32, rings: usize, sectors: usize, v: f32) {
+    let start = b.pos.len() as u32;
+    for ri in 0..=rings {
+        let phi = std::f32::consts::PI * ri as f32 / rings as f32;
+        let (sp, cp) = phi.sin_cos();
+        for si in 0..=sectors {
+            let th = std::f32::consts::TAU * si as f32 / sectors as f32;
+            let (st, ct) = th.sin_cos();
+            let n = Vec3::new(sp * ct, cp, sp * st);
+            let p = center + n * r;
+            b.pos.push([p.x, p.y, p.z]);
+            b.nor.push([n.x, n.y, n.z]);
+            b.col.push([v, v, v, 1.0]);
+        }
+    }
+    let cols = sectors + 1;
+    for ri in 0..rings {
+        for si in 0..sectors {
+            let a = start + (ri * cols + si) as u32;
+            let bb = start + (ri * cols + si + 1) as u32;
+            let c = start + ((ri + 1) * cols + si) as u32;
+            let d = start + ((ri + 1) * cols + si + 1) as u32;
+            idx.extend_from_slice(&[a, c, bb, bb, c, d]);
+        }
+    }
+}
+
+// Append a cone (base at `base`, pointing up `height`, base radius r), shade fading base->tip dark->light.
+fn push_cone(b: &mut MeshBuf, idx: &mut Vec<u32>, base: Vec3, r: f32, height: f32, seg: usize, v: f32) {
+    let start = b.pos.len() as u32;
+    let apex = base + Vec3::Y * height;
+    for si in 0..seg {
+        let th0 = std::f32::consts::TAU * si as f32 / seg as f32;
+        let th1 = std::f32::consts::TAU * (si + 1) as f32 / seg as f32;
+        let p0 = base + Vec3::new(th0.cos() * r, 0.0, th0.sin() * r);
+        let p1 = base + Vec3::new(th1.cos() * r, 0.0, th1.sin() * r);
+        let n = ((p1 - apex).cross(p0 - apex)).normalize_or_zero();
+        for (p, sh) in [(apex, v * 1.1), (p0, v * 0.8), (p1, v * 0.8)] {
+            b.pos.push([p.x, p.y, p.z]);
+            b.nor.push([n.x, n.y, n.z]);
+            let s = sh.min(1.0);
+            b.col.push([s, s, s, 1.0]);
+        }
+    }
+    let _ = start;
+    let base_i = b.pos.len() as u32 - (seg as u32 * 3);
+    for k in 0..seg as u32 {
+        idx.extend_from_slice(&[base_i + k * 3, base_i + k * 3 + 1, base_i + k * 3 + 2]);
+    }
+}
+
+// A bushy clump of overlapping blobs. Each blob = (center, radius, shade). Used for herbs, shrubs, ground
+// cover, moss bumps, and broadleaf tree canopies -> reads as full foliage, not one ball.
+pub fn blob_cluster_mesh(blobs: &[(Vec3, f32, f32)]) -> Mesh {
+    let mut b = MeshBuf::new();
+    let mut idx = Vec::new();
+    for &(c, r, v) in blobs {
+        push_sphere(&mut b, &mut idx, c, r, 5, 7, v);
+    }
+    b.finish(idx)
+}
+
+// A petalled flower: a ring of rounded petals around a small center button (unit-ish, base at y=0). Petals
+// are bright, the center is darker -> a cheerful little bloom for the kids.
+pub fn flower_mesh(petals: usize) -> Mesh {
+    let mut b = MeshBuf::new();
+    let mut idx = Vec::new();
+    push_sphere(&mut b, &mut idx, Vec3::new(0.0, 0.05, 0.0), 0.16, 4, 6, 0.55); // center button (dark)
+    for k in 0..petals {
+        let a = std::f32::consts::TAU * k as f32 / petals as f32;
+        let (s, c) = a.sin_cos();
+        let dir = Vec3::new(c, 0.0, s);
+        let tip = dir * 0.5 + Vec3::Y * 0.06;
+        let mid = dir * 0.28 + Vec3::Y * 0.12;
+        let side = Vec3::new(-s, 0.0, c) * 0.14;
+        let n = [0.0, 1.0, 0.0];
+        let start = b.pos.len() as u32;
+        for (p, v) in [(mid - side, 0.95), (mid + side, 0.95), (tip, 1.0)] {
+            b.pos.push([p.x, p.y, p.z]);
+            b.nor.push(n);
+            b.col.push([v, v, v, 1.0]);
+        }
+        idx.extend_from_slice(&[start, start + 1, start + 2]);
+    }
+    b.finish(idx)
+}
+
+// A mushroom cap: a rounded dome (top half of a squashed sphere). Base at y=0.
+pub fn dome_mesh() -> Mesh {
+    let mut b = MeshBuf::new();
+    let mut idx = Vec::new();
+    let (rings, sectors) = (4usize, 9usize);
+    let start = b.pos.len() as u32;
+    for ri in 0..=rings {
+        let phi = std::f32::consts::FRAC_PI_2 * ri as f32 / rings as f32; // 0 (top) .. PI/2 (rim)
+        let (sp, cp) = phi.sin_cos();
+        for si in 0..=sectors {
+            let th = std::f32::consts::TAU * si as f32 / sectors as f32;
+            let (st, ct) = th.sin_cos();
+            let n = Vec3::new(sp * ct, cp, sp * st).normalize_or_zero();
+            let p = Vec3::new(sp * ct, cp * 0.7, sp * st); // squashed dome
+            b.pos.push([p.x, p.y, p.z]);
+            b.nor.push([n.x, n.y, n.z]);
+            let v = 0.8 + 0.2 * cp;
+            b.col.push([v, v, v, 1.0]);
+        }
+    }
+    let cols = sectors + 1;
+    for ri in 0..rings {
+        for si in 0..sectors {
+            let a = start + (ri * cols + si) as u32;
+            let bb = start + (ri * cols + si + 1) as u32;
+            let c = start + ((ri + 1) * cols + si) as u32;
+            let d = start + ((ri + 1) * cols + si + 1) as u32;
+            idx.extend_from_slice(&[a, bb, c, bb, d, c]);
+        }
+    }
+    b.finish(idx)
+}
+
+// A cactus: a tall rounded column with a couple of stubby up-curved arms (saguaro silhouette). Base at y=0.
+pub fn cactus_mesh() -> Mesh {
+    let mut b = MeshBuf::new();
+    let mut idx = Vec::new();
+    // main column: stacked blobs from base to a rounded top
+    for k in 0..5 {
+        let y = 0.12 + 0.2 * k as f32;
+        let r = 0.2 - 0.015 * k as f32;
+        push_sphere(&mut b, &mut idx, Vec3::new(0.0, y, 0.0), r, 5, 7, 0.7 + 0.05 * k as f32);
+    }
+    // two arms: a horizontal stub that turns up
+    for &(sx, h) in &[(0.18f32, 0.55f32), (-0.16f32, 0.7f32)] {
+        push_sphere(&mut b, &mut idx, Vec3::new(sx, h, 0.0), 0.1, 4, 6, 0.78);
+        push_sphere(&mut b, &mut idx, Vec3::new(sx * 1.4, h + 0.12, 0.0), 0.09, 4, 6, 0.82);
+        push_sphere(&mut b, &mut idx, Vec3::new(sx * 1.5, h + 0.28, 0.0), 0.085, 4, 6, 0.9);
+    }
+    b.finish(idx)
+}
+
+// A conifer: three stacked cones (broad bottom -> narrow top), the classic Christmas-tree silhouette.
+pub fn conifer_mesh() -> Mesh {
+    let mut b = MeshBuf::new();
+    let mut idx = Vec::new();
+    push_cone(&mut b, &mut idx, Vec3::new(0.0, 0.0, 0.0), 1.3, 1.6, 9, 0.7);
+    push_cone(&mut b, &mut idx, Vec3::new(0.0, 1.1, 0.0), 1.0, 1.5, 9, 0.82);
+    push_cone(&mut b, &mut idx, Vec3::new(0.0, 2.1, 0.0), 0.65, 1.4, 9, 0.95);
+    b.finish(idx)
+}
+
 // Give any grass tuft lacking a mesh the shared tuft mesh + green material AND set its transform ONCE
 // (grass is static, so size it at attach -- not per-frame -- so 8000 tufts cost nothing each frame).
 // LENGTH + girth vary with SOIL (habitability + moisture): lush + tall on rich ground, short on marginal.
@@ -595,7 +776,7 @@ pub fn noon_offset(d: Vec3, tick: u32) -> i64 {
 // sampled on a lat/lon grid), draw a scatter that visibly FALLS: height cycles down the tick clock + wraps,
 // so it animates instead of hanging static. WARM cells -> blue rain streaks (gradient line: faded motion-tail
 // up top, bright drop head at the bottom; heavier rain = more drops, longer, brighter). COLD cells (below the
-// ice-cap onset) -> white snow: slower fall, lazy horizontal sway, soft dots, no tail. Deterministic (tick
+// snow line) -> white snow: slower fall, lazy horizontal sway, soft dots, no tail. Deterministic (tick
 // clock + hashed jitter, no per-frame RNG) -> reproducible.
 fn rain_visuals(gen: Res<GenState>, mut gizmos: Gizmos) {
     use std::f32::consts::{FRAC_PI_2, PI, TAU};
@@ -607,7 +788,11 @@ fn rain_visuals(gen: Res<GenState>, mut gizmos: Gizmos) {
     const FALL_SPAN: f32 = 9.0; // drop travel distance (surface .. top of streak)
     const FALL_SPEED: f32 = 0.25; // rain: units per tick
     const SNOW_SPEED: f32 = 0.10; // snow drifts down ~2.5x slower than rain
-    const SNOW_TEMP: f32 = 0.34; // below this the same falling precip renders as snow (matches the ice-cap onset)
+    // Snow line: falling precip renders as snow where GROUND temp < this. Set ABOVE the permanent ice-cap
+    // onset (temp<0.34) because the cloud/air aloft is much colder than the surface, so precip falls as snow
+    // well outside the year-round ice (snow line ~50deg lat). Tuned vs the rain field: at 0.34 it never snowed
+    // (rain never reaches that cold); 0.65 -> snow in ~60% of ticks (see sphere test snow_cells_exist).
+    const SNOW_TEMP: f32 = 0.65;
     // 180000 = 5000*(FALL_SPAN/FALL_SPEED) = 2000*(FALL_SPAN/SNOW_SPEED): exact multiple of BOTH fall cycles,
     // so rain AND snow phase identically across the wrap (seamless) with no f32 precision drift on long runs.
     let t = (gen.tick % 180_000) as f32;

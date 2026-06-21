@@ -861,30 +861,57 @@ pub fn spawn_world_render(
     // Round forms = icospheres; tall/leafy forms = procedural frond clumps; lily pad = a flat disc.
     {
         use crate::plant::form;
+        use crate::viz::blob_cluster_mesh as cluster;
+        let v = Vec3::new; // brevity for blob centers
         let mut forms = vec![bevy::asset::Handle::default(); form::COUNT as usize];
-        forms[form::HERB as usize] = meshes.add(Sphere::new(0.35).mesh().ico(2).unwrap());
-        forms[form::SHRUB as usize] = meshes.add(Sphere::new(0.5).mesh().ico(2).unwrap());
-        forms[form::GROUNDCOVER as usize] = meshes.add(Sphere::new(0.4).mesh().ico(2).unwrap());
-        forms[form::MOSS as usize] = meshes.add(Sphere::new(0.35).mesh().ico(1).unwrap());
-        forms[form::FERN as usize] = meshes.add(crate::viz::frond_clump_mesh(7, 0.10, 0.18, 0.5, 0.35));
-        forms[form::SUCCULENT as usize] = meshes.add(Capsule3d::new(0.28, 0.5));
-        forms[form::REED as usize] = meshes.add(crate::viz::frond_clump_mesh(6, 0.035, 0.10, 0.12, 0.05));
+        // bushy multi-blob clumps (base ~y=0, grow up) read as full foliage, not one ball
+        forms[form::HERB as usize] =
+            meshes.add(cluster(&[(v(0.0, 0.22, 0.0), 0.24, 0.85), (v(0.16, 0.30, 0.05), 0.19, 1.0), (v(-0.13, 0.27, -0.08), 0.18, 0.92)]));
+        forms[form::SHRUB as usize] = meshes.add(cluster(&[
+            (v(0.0, 0.28, 0.0), 0.3, 0.8),
+            (v(0.26, 0.4, 0.08), 0.24, 0.95),
+            (v(-0.24, 0.36, -0.1), 0.23, 0.9),
+            (v(0.05, 0.6, -0.2), 0.22, 1.0),
+            (v(-0.1, 0.34, 0.26), 0.21, 0.88),
+        ]));
+        forms[form::GROUNDCOVER as usize] = meshes.add(cluster(&[
+            (v(0.0, 0.12, 0.0), 0.2, 0.85),
+            (v(0.3, 0.1, 0.1), 0.17, 0.95),
+            (v(-0.28, 0.1, -0.12), 0.16, 0.9),
+            (v(0.1, 0.1, -0.32), 0.16, 1.0),
+        ]));
+        forms[form::MOSS as usize] = meshes.add(cluster(&[
+            (v(0.0, 0.07, 0.0), 0.13, 0.8),
+            (v(0.22, 0.06, 0.1), 0.11, 0.95),
+            (v(-0.2, 0.06, -0.1), 0.1, 0.9),
+            (v(0.08, 0.06, -0.22), 0.1, 1.0),
+        ]));
+        forms[form::FERN as usize] = meshes.add(crate::viz::frond_clump_mesh(9, 0.11, 0.18, 0.55, 0.4));
+        forms[form::SUCCULENT as usize] = meshes.add(crate::viz::cactus_mesh());
+        forms[form::REED as usize] = meshes.add(crate::viz::frond_clump_mesh(7, 0.035, 0.10, 0.12, 0.05));
         forms[form::FLOWER_STALK as usize] = meshes.add(Cylinder::new(0.05, 1.0));
-        forms[form::ROSETTE as usize] = meshes.add(crate::viz::frond_clump_mesh(10, 0.12, 0.10, 0.2, 0.9));
+        forms[form::ROSETTE as usize] = meshes.add(crate::viz::frond_clump_mesh(11, 0.12, 0.10, 0.2, 0.9));
         forms[form::LILYPAD as usize] = meshes.add(crate::viz::disc_mesh(20));
-        forms[form::KELP as usize] = meshes.add(crate::viz::frond_clump_mesh(5, 0.14, 0.12, 0.6, 0.3));
+        forms[form::KELP as usize] = meshes.add(crate::viz::frond_clump_mesh(6, 0.14, 0.12, 0.6, 0.3));
         forms[form::MUSHROOM as usize] = meshes.add(Cylinder::new(0.06, 0.5));
         commands.insert_resource(crate::viz::PlantForms {
             forms,
-            flower: meshes.add(Sphere::new(0.12).mesh().ico(1).unwrap()),
+            flower: meshes.add(crate::viz::flower_mesh(6)), // petalled bloom
             berry: meshes.add(Sphere::new(0.09).mesh().ico(1).unwrap()),
-            cap: meshes.add(Sphere::new(0.32).mesh().ico(2).unwrap()),
+            cap: meshes.add(crate::viz::dome_mesh()), // domed mushroom cap
         });
     }
     commands.insert_resource(crate::viz::TreeMeshes {
         trunk: meshes.add(Cylinder::new(0.16, 3.0)),
-        broadleaf: meshes.add(Sphere::new(1.3)),
-        conifer: meshes.add(Cone { radius: 1.2, height: 3.2 }),
+        // fuller broadleaf crown: a cluster of overlapping blobs (centered ~origin; placed in the crown)
+        broadleaf: meshes.add(crate::viz::blob_cluster_mesh(&[
+            (Vec3::new(0.0, 0.0, 0.0), 1.0, 0.75),
+            (Vec3::new(0.7, 0.3, 0.3), 0.8, 0.95),
+            (Vec3::new(-0.6, 0.2, -0.4), 0.8, 0.9),
+            (Vec3::new(0.2, 0.6, -0.5), 0.7, 1.0),
+            (Vec3::new(-0.3, -0.15, 0.55), 0.7, 0.85),
+        ])),
+        conifer: meshes.add(crate::viz::conifer_mesh()), // stacked-cone Christmas-tree silhouette
     });
     // shared grass tuft mesh + one green material for ALL tufts (grass is ubiquitous; size_grass scales
     // each tuft's length by local soil). Double-sided so the thin blades show from both faces.
