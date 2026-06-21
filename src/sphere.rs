@@ -12,7 +12,13 @@ use bevy::prelude::*;
 
 pub const PLANET_R: f32 = 80.0; // planet radius (world units). Matches old WORLD_HALF so creature scale + costs carry over.
 pub const ELEV_MAX: f32 = HEIGHT_MAX; // max terrain elevation above the sea sphere (reuses the flat-world peak)
-pub const SEA_LEVEL: f32 = 0.30; // normalized elevation (0..1) below which terrain floods (ocean)
+pub const SEA_LEVEL: f32 = 0.41; // normalized elevation (0..1) below which terrain floods (ocean) -> ~50% sea
+// Founding homeland direction: a temperate mid-latitude spot, kept as gentle habitable lowland by a land
+// landmark so founders never spawn on a peak or in the sea. Shared by terrain features + sim::homeland_center.
+pub const HOMELAND_DIR: [f32; 3] = [0.30, 0.50, 0.40];
+// Aquatic flora grows in the water column from here up to SEA_LEVEL (coast). Below = abyssal/barren. Wide
+// band -> swimmers have a real sea-wide habitat, not a thin coastal ring (fish niche kept going extinct).
+pub const AQUATIC_FLOOR: f32 = 0.12;
 
 // --- celestial bodies (relative Earth proportions, distances stylized down to stay visible) ---
 pub const MOON_R: f32 = 0.27 * PLANET_R; // moon ~1/4 planet radius (Earth: 0.273)
@@ -135,11 +141,34 @@ pub fn fbm3(p: Vec3) -> f32 {
 
 // ---------- terrain + climate fields on the sphere ----------
 
-const TERRAIN_FREQ: f32 = 2.2; // continents/oceans scale (lower = bigger landmasses)
+const TERRAIN_FREQ: f32 = 1.9; // continents/oceans scale (lower = bigger landmasses)
+
+// Guaranteed landmarks blended onto the fbm base: (center dir, angular radius rad, amplitude). +amp pushes
+// up a mountain massif, -amp carves a deep ocean basin. Ensures the planet always has >=2 mountain ranges
+// and >=1 deep ocean regardless of the noise seed. fbm fills in the rest (coasts, hills, smaller seas).
+const LANDMARKS: [([f32; 3], f32, f32); 5] = [
+    ([0.95, 0.30, -0.05], 0.46, 0.46),   // mountain range A
+    ([-0.65, 0.20, -0.75], 0.42, 0.46),  // mountain range B (opposite hemisphere)
+    ([-0.10, -0.30, 0.95], 0.90, -0.50), // great deep ocean (large, abyssal center)
+    ([0.55, -0.55, -0.62], 0.70, -0.34), // second ocean basin
+    (HOMELAND_DIR, 0.50, 0.16),          // gentle homeland lowland (habitable founding ground)
+];
+
+fn terrain_features(d: Vec3) -> f32 {
+    let dn = d.normalize_or_zero();
+    let mut sum = 0.0;
+    for (c, r, a) in LANDMARKS {
+        let cc = Vec3::new(c[0], c[1], c[2]).normalize();
+        let ang = dn.dot(cc).clamp(-1.0, 1.0).acos();
+        let g = (-(ang / r) * (ang / r)).exp(); // gaussian falloff from the landmark center
+        sum += a * g;
+    }
+    sum
+}
 
 /// Normalized terrain elevation 0..1 at surface direction `d` (continents, oceans, mountains).
 pub fn elevation01(d: Vec3) -> f32 {
-    fbm3(d * TERRAIN_FREQ + Vec3::splat(11.3))
+    (fbm3(d * TERRAIN_FREQ + Vec3::splat(11.3)) + terrain_features(d)).clamp(0.0, 1.0)
 }
 
 /// Terrain elevation in world units above the sea sphere (0 over ocean basins, up to ELEV_MAX on peaks).
@@ -188,13 +217,18 @@ pub fn rockiness(d: Vec3) -> f32 {
 /// flora thrives in warm, moist, low ground -> plants + the creatures that eat them cluster temperate/tropical.
 pub fn plant_habitability(d: Vec3) -> f32 {
     let e = elevation01(d);
-    if e < SEA_LEVEL - 0.10 {
-        return 0.0; // deep ocean: barren
+    if e < AQUATIC_FLOOR {
+        return 0.0; // abyssal deep ocean: barren (no light reaches the bottom)
     }
     let warm_ok = 0.45 + 0.55 * base_temperature(d); // poles support hardy (cold-tolerant) flora, not barren
     if e < SEA_LEVEL {
-        // shallow coastal water: aquatic flora (algae/seagrass) -> food for swimmers, a real aquatic niche
-        return (0.65 * warm_ok).clamp(0.0, 1.0);
+        // water column grows aquatic flora (plankton/algae/seagrass) -> a real food base for swimmers across
+        // the seas, richest in the shallows (coastal seagrass), thinning toward open water (plankton). Water
+        // moderates temperature, so aquatic flora is less polar-sensitive than land flora. Trade-off: open
+        // water feeds less than rich land, and swimmers pay the swim gene + are slow on land.
+        let shallow = ((e - AQUATIC_FLOOR) / (SEA_LEVEL - AQUATIC_FLOOR)).clamp(0.0, 1.0); // 0 open .. 1 coast
+        let water_warm = 0.7 + 0.3 * base_temperature(d);
+        return ((0.55 + 0.30 * shallow) * water_warm).clamp(0.0, 1.0);
     }
     let rock_ok = 1.0 - 0.9 * rockiness(d);
     let moist_ok = (moisture(d) / 0.35).clamp(0.0, 1.0);
@@ -306,6 +340,35 @@ pub fn rain_at(d: Vec3, tick: u32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Diagnostic (run: cargo test report_geography -- --nocapture): reports ocean/deep/mountain coverage so
+    // SEA_LEVEL can be tuned to ~50% ocean. The median elevation is the SEA_LEVEL giving exactly 50% ocean.
+    #[test]
+    fn report_geography() {
+        let n = 40000usize;
+        let golden = std::f32::consts::PI * (3.0 - 5f32.sqrt());
+        let dir = |i: usize| {
+            let y = 1.0 - (i as f32 + 0.5) / n as f32 * 2.0;
+            let r = (1.0 - y * y).max(0.0).sqrt();
+            let th = golden * i as f32;
+            Vec3::new(th.cos() * r, y, th.sin() * r)
+        };
+        let mut elev: Vec<f32> = (0..n).map(|i| elevation01(dir(i))).collect();
+        elev.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let median = elev[n / 2];
+        let frac_below = |t: f32| elev.iter().filter(|&&e| e < t).count() as f32 / n as f32;
+        let mountain = (0..n).filter(|&i| rockiness(dir(i)) > 0.2).count() as f32 / n as f32;
+        let hl = Vec3::from(HOMELAND_DIR).normalize();
+        println!(
+            "GEO: median={:.3} | ocean@sea{:.2}={:.1}% | deep(<{:.2})={:.1}% | mountain(rocky)={:.1}%",
+            median, SEA_LEVEL, 100.0 * frac_below(SEA_LEVEL), AQUATIC_FLOOR, 100.0 * frac_below(AQUATIC_FLOOR), 100.0 * mountain
+        );
+        println!(
+            "HOMELAND: elev01={:.3} (sea {:.2}, rock 0.72) temp={:.2} habitability={:.2} -> {}",
+            elevation01(hl), SEA_LEVEL, base_temperature(hl), plant_habitability(hl),
+            if elevation01(hl) > SEA_LEVEL && elevation01(hl) < 0.72 && plant_habitability(hl) > 0.4 { "GOOD land" } else { "BAD" }
+        );
+    }
 
     #[test]
     fn lonlat_roundtrip() {

@@ -25,11 +25,13 @@ impl Plugin for VizPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ShowSensors>()
             .init_resource::<Selected>()
-            .add_systems(Startup, (log_viz_help, spawn_stats_ui, spawn_world_stats_ui, spawn_clouds))
+            .init_resource::<ShowLegend>()
+            .add_systems(Startup, (log_viz_help, spawn_stats_ui, spawn_world_stats_ui, spawn_legend_ui, spawn_clouds, set_initial_speed))
             .add_systems(
                 Update,
                 (
                     restyle_creatures,
+                    add_creature_visuals,
                     toggle_sensors,
                     draw_sensors,
                     add_plant_visuals,
@@ -44,6 +46,7 @@ impl Plugin for VizPlugin {
                     update_stats,
                     update_world_stats,
                     time_controls,
+                    toggle_legend,
                     god_disturbances,
                     draw_selection,
                 ),
@@ -54,6 +57,50 @@ impl Plugin for VizPlugin {
 // Shared sphere mesh for plants (inserted by spawn_world_render).
 #[derive(Resource)]
 pub struct PlantMesh(pub Handle<Mesh>);
+
+// Shared creature capsule mesh (inserted by spawn_world_render) so add_creature_visuals can dress
+// creatures born mid-sim (spawn_creature adds no mesh) -> newborns + B-seeded creatures become visible.
+#[derive(Resource)]
+pub struct CreatureMesh(pub Handle<Mesh>);
+
+// Color + body-plan scale from a genome. Shared by add_creature_visuals (initial look) and
+// restyle_creatures (on genome change) so newborns look right immediately, not default-orange.
+fn creature_look(g: &Genome) -> (Color, Vec3) {
+    let mut dom = 0;
+    let mut best = g.expr0[0];
+    for t in 1..NFOOD {
+        if g.expr0[t] > best {
+            best = g.expr0[t];
+            dom = t;
+        }
+    }
+    let sat = 0.2 + 0.7 * g.rigidity; // pinned specialist = vivid, generalist = washed out
+    let hue = type_hue(dom) * (1.0 - g.swim) + 200.0 * g.swim; // swim shifts toward cyan
+    let girth = (0.7 + 0.06 * g.n_sensors() as f32) * (0.6 + 0.9 * g.size);
+    let sx = girth * (1.0 - 0.25 * g.swim);
+    let sy = girth * (0.7 + 1.6 * g.height) * (1.0 - 0.3 * g.swim);
+    let sz = girth * (1.0 + 0.8 * g.swim); // swim = flatter + longer (fish shape)
+    (Color::hsl(hue, sat, 0.55), Vec3::new(sx, sy, sz))
+}
+
+// Give any creature lacking a mesh its visuals (shared capsule + own genome-colored material). Covers
+// creatures BORN mid-sim and B-seeded ones (spawn_creature adds no render mesh). Without this they are
+// invisible while alive and only appear once dead (carrion gets its own mesh).
+fn add_creature_visuals(
+    mut commands: Commands,
+    mesh: Option<Res<CreatureMesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut q: Query<(Entity, &Genome, &mut Transform), (With<Creature>, Without<Mesh3d>)>,
+) {
+    let Some(mesh) = mesh else { return };
+    for (e, g, mut tf) in &mut q {
+        let (color, scale) = creature_look(g);
+        tf.scale = scale;
+        commands
+            .entity(e)
+            .insert((Mesh3d(mesh.0.clone()), MeshMaterial3d(materials.add(color))));
+    }
+}
 
 // Tree part meshes (inserted by spawn_world_render): a trunk + two canopy shapes.
 #[derive(Resource)]
@@ -282,7 +329,7 @@ fn fire_visuals(fire: Res<Fire>, mut gizmos: Gizmos) {
 pub struct ShowSensors(pub bool);
 
 fn log_viz_help() {
-    info!("viz: hue=diet, vividness=rigidity, size=sensors | G=sensor rays | SPACE=pause +/-=speed | B=seed life L=lightning K=cull");
+    info!("viz: TAB=orbit/walk | hue=diet, vividness=rigidity, size=sensors | G=sensor rays | SPACE=pause | 1-5=speed +/-=fine | B=seed life P=populate planet L=lightning K=cull | H=legend");
 }
 
 // Hue per dominant food/diet type, matching the food palette (green/purple/gold/cyan).
@@ -301,29 +348,11 @@ fn restyle_creatures(
     mut q: Query<(&Genome, &MeshMaterial3d<StandardMaterial>, &mut Transform), Changed<Genome>>,
 ) {
     for (g, mm, mut tf) in &mut q {
-        // dominant diet specialization -> hue
-        let mut dom = 0;
-        let mut best = g.expr0[0];
-        for t in 1..NFOOD {
-            if g.expr0[t] > best {
-                best = g.expr0[t];
-                dom = t;
-            }
-        }
-        // rigidity -> saturation: pinned specialist = vivid, flexible generalist = washed out.
-        // swim -> hue shifts toward cyan/blue (aquatic look); diet hue otherwise.
-        let sat = 0.2 + 0.7 * g.rigidity;
-        let hue = type_hue(dom) * (1.0 - g.swim) + 200.0 * g.swim;
+        let (color, scale) = creature_look(g); // hue=diet, sat=rigidity, swim=cyan + fish body plan
         if let Some(m) = mats.get_mut(&mm.0) {
-            m.base_color = Color::hsl(hue, sat, 0.55);
+            m.base_color = color;
         }
-        // body plan: girth from sensors, overall bulk from size, vertical stretch from height; swim
-        // flattens + elongates the body into a fish shape (longer along travel, lower + narrower).
-        let girth = (0.7 + 0.06 * g.n_sensors() as f32) * (0.6 + 0.9 * g.size);
-        let sx = girth * (1.0 - 0.25 * g.swim);
-        let sy = girth * (0.7 + 1.6 * g.height) * (1.0 - 0.3 * g.swim);
-        let sz = girth * (1.0 + 0.8 * g.swim);
-        tf.scale = Vec3::new(sx, sy, sz);
+        tf.scale = scale;
     }
 }
 
@@ -339,17 +368,26 @@ fn toggle_sensors(keys: Res<ButtonInput<KeyCode>>, mut show: ResMut<ShowSensors>
 // no balance constants changed. Uses no sim RNG (stays deterministic-safe).
 fn god_disturbances(
     keys: Res<ButtonInput<KeyCode>>,
+    gen: Res<GenState>,
     mut fire: ResMut<Fire>,
     gw: Res<GroundWater>,
-    mut creatures: Query<&mut Alive, With<Creature>>,
+    mut creatures: Query<(&Genome, &mut Alive), With<Creature>>,
     mut commands: Commands,
     mut rng: ResMut<crate::rng::Rng>,
 ) {
     if keys.just_pressed(KeyCode::KeyB) {
-        // "make more life!" -> seed a burst of fresh random creatures across the globe
+        // "make more life!" -> seed a burst of creatures cloned from the living pop (competent brains)
         const BURST: usize = 200;
-        crate::sim::seed_burst(&mut commands, &mut rng, BURST);
-        info!("god: seeded {BURST} new creatures");
+        let parents: Vec<Genome> = creatures.iter().filter(|(_, a)| a.0).map(|(g, _)| g.clone()).collect();
+        crate::sim::seed_burst(&mut commands, &mut rng, &parents, BURST);
+        info!("god: seeded {BURST} new creatures (clones of the living)");
+    }
+    if keys.just_pressed(KeyCode::KeyP) {
+        // populate the WHOLE planet: plants + trees + creatures, each in habitat it can survive (aquatic in
+        // sea, alpine in mountains, climate-matched). Fills every region instead of waiting for spread.
+        let parents: Vec<Genome> = creatures.iter().filter(|(_, a)| a.0).map(|(g, _)| g.clone()).collect();
+        crate::sim::seed_planet(&mut commands, &mut rng, &parents, gen.ntypes(), 300, 600, 120);
+        info!("god: seeded the whole planet (300 creatures, 600 plants, 120 trees)");
     }
     if keys.just_pressed(KeyCode::KeyL) {
         // ignite the driest non-ocean grid cell (most flammable fuel)
@@ -372,7 +410,7 @@ fn god_disturbances(
     if keys.just_pressed(KeyCode::KeyK) {
         let mut i = 0u32;
         let mut killed = 0u32;
-        for mut alive in &mut creatures {
+        for (_, mut alive) in &mut creatures {
             if alive.0 {
                 i += 1;
                 if i.is_multiple_of(3) {
@@ -385,8 +423,16 @@ fn god_disturbances(
     }
 }
 
-// God-controls: SPACE pauses/resumes the sim, +/- fast-forward / slow down. Drives Bevy's virtual clock,
-// which FixedUpdate advances from -> pausing/speeding it pauses/speeds the whole simulation, no sim change.
+// Start the visualizer at a calm, watchable pace so day/night + creature motion read clearly. The sim is
+// unchanged (same ticks); only how fast the virtual clock feeds FixedUpdate. Speed up with +/keys anytime.
+const VIEW_SPEED_DEFAULT: f32 = 0.35;
+fn set_initial_speed(mut vtime: ResMut<Time<Virtual>>) {
+    vtime.set_relative_speed(VIEW_SPEED_DEFAULT);
+}
+
+// Time god-controls: SPACE pause/resume, +/- halve/double, number keys 1-5 jump to a preset speed. Drives
+// Bevy's virtual clock that FixedUpdate advances from -> pausing/speeding it scales the whole sim, no sim
+// change. Range 0.1x (study a single creature) .. 16x (fast-forward evolution).
 fn time_controls(keys: Res<ButtonInput<KeyCode>>, mut vtime: ResMut<Time<Virtual>>) {
     if keys.just_pressed(KeyCode::Space) {
         if vtime.is_paused() {
@@ -397,6 +443,27 @@ fn time_controls(keys: Res<ButtonInput<KeyCode>>, mut vtime: ResMut<Time<Virtual
             info!("sim PAUSED");
         }
     }
+    // preset speeds on the number row (1=slowest .. 5=fast)
+    let preset = if keys.just_pressed(KeyCode::Digit1) {
+        Some(0.1)
+    } else if keys.just_pressed(KeyCode::Digit2) {
+        Some(0.35)
+    } else if keys.just_pressed(KeyCode::Digit3) {
+        Some(1.0)
+    } else if keys.just_pressed(KeyCode::Digit4) {
+        Some(4.0)
+    } else if keys.just_pressed(KeyCode::Digit5) {
+        Some(16.0)
+    } else {
+        None
+    };
+    if let Some(s) = preset {
+        if vtime.is_paused() {
+            vtime.unpause();
+        }
+        vtime.set_relative_speed(s);
+        info!("sim speed {s:.2}x");
+    }
     let cur = vtime.relative_speed();
     if keys.just_pressed(KeyCode::Equal) || keys.just_pressed(KeyCode::NumpadAdd) {
         let s = (cur * 2.0).min(16.0);
@@ -404,7 +471,7 @@ fn time_controls(keys: Res<ButtonInput<KeyCode>>, mut vtime: ResMut<Time<Virtual
         info!("sim speed {s:.2}x");
     }
     if keys.just_pressed(KeyCode::Minus) || keys.just_pressed(KeyCode::NumpadSubtract) {
-        let s = (cur * 0.5).max(0.25);
+        let s = (cur * 0.5).max(0.1);
         vtime.set_relative_speed(s);
         info!("sim speed {s:.2}x");
     }
@@ -441,6 +508,83 @@ fn spawn_world_stats_ui(mut commands: Commands) {
     ));
 }
 
+// --- legend overlay (H toggles a full panel explaining every HUD field + control) ---
+
+#[derive(Resource, Default)]
+struct ShowLegend(bool);
+
+#[derive(Component)]
+struct LegendText;
+
+const LEGEND: &str = "\
+EVOLVARIUM  -  legend   (press H to close)
+
+DASHBOARD (bottom-left)
+  speed       sim pace; 1x = real-time. PAUSED = stopped.
+  pop         creatures alive right now.
+  day         days elapsed (one sun rotation = a day).
+  trend       population over recent time (mini graph;
+              taller = more, scaled to the carrying cap).
+  temp avg    average heat preference. cold = polar-loving,
+              warm = equator-loving creatures.
+  longevity   average lifespan gene (high = long-lived).
+  metab       metabolism gene (high = frugal/slow,
+              low = fast but costly).
+  r/K         breeding style: low = many cheap young fast,
+              high = few well-provisioned young.
+  habitat     aquatic = swimmers, land = land-dwellers.
+  specialists creatures locked to one food type.
+
+HOW CREATURES LOOK
+  hue         what they eat (diet specialization).
+  vividness   how specialized (vivid) vs generalist (pale).
+  cyan + flat  swimmers (fish-shaped body).
+  size        bigger = more sensors / body size genes.
+
+CONTROLS
+  TAB         switch ORBIT (space) <-> WALK (ground)
+  ORBIT: right-drag rotate, scroll/W,S zoom, A/D spin,
+         Q/E tilt, left-click inspect, F follow
+  WALK:  WASD move, arrows or right-drag look,
+         Shift run (eye walks over the hills)
+  G  sensor rays   SPACE  pause/resume
+  1-5  speed presets (slow..fast)   + / -  fine speed
+  B  seed creatures    P  populate whole planet
+  L  lightning fire    K  cull    H  this legend
+  (P seeds plants+trees+creatures in every habitat)";
+
+fn spawn_legend_ui(mut commands: Commands) {
+    commands.spawn((
+        Text::new(LEGEND),
+        TextFont { font_size: 14.0, ..default() },
+        TextColor(Color::srgb(0.92, 0.96, 1.0)),
+        Node {
+            position_type: PositionType::Absolute,
+            top: Val::Px(40.0),
+            left: Val::Px(40.0),
+            padding: UiRect::all(Val::Px(14.0)),
+            ..default()
+        },
+        BackgroundColor(Color::srgba(0.02, 0.04, 0.08, 0.86)),
+        Visibility::Hidden,
+        LegendText,
+    ));
+}
+
+// H toggles the legend panel. Starts hidden; the top-left hint tells the player it exists.
+fn toggle_legend(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut show: ResMut<ShowLegend>,
+    mut q: Query<&mut Visibility, With<LegendText>>,
+) {
+    if keys.just_pressed(KeyCode::KeyH) {
+        show.0 = !show.0;
+        for mut v in &mut q {
+            *v = if show.0 { Visibility::Inherited } else { Visibility::Hidden };
+        }
+    }
+}
+
 // A unicode sparkline of a history series, scaled 0..max.
 fn sparkline(hist: &[u16], max: f32) -> String {
     const B: [char; 8] = ['\u{2581}', '\u{2582}', '\u{2583}', '\u{2584}', '\u{2585}', '\u{2586}', '\u{2587}', '\u{2588}'];
@@ -457,6 +601,7 @@ fn sparkline(hist: &[u16], max: f32) -> String {
 // "population over time" chart (M7) right in the HUD.
 fn update_world_stats(
     gen: Res<GenState>,
+    vtime: Res<Time<Virtual>>,
     creatures: Query<(&Genome, &Alive), With<Creature>>,
     mut text: Query<&mut Text, With<WorldStatsText>>,
     mut hist: Local<Vec<u16>>,
@@ -489,15 +634,20 @@ fn update_world_stats(
         }
     }
     let trend = sparkline(&hist, crate::sim::CREATURE_CAP as f32);
+    let speed = if vtime.is_paused() {
+        "PAUSED".to_string()
+    } else {
+        format!("{:.2}x", vtime.relative_speed())
+    };
     t.0 = format!(
-        "WORLD\npop        {n}\nday        {day}\ntrend      {trend}\ntemp avg   {:.2}  (cold {cold} / warm {warm})\nlongevity  {:.2}\nmetab      {:.2}\nr/K        {:.2}\nhabitat    aquatic {aq} / land {land}\nspecialists {spec}",
+        "WORLD\nspeed      {speed}\npop        {n}\nday        {day}\ntrend      {trend}\ntemp avg   {:.2}  (cold {cold} / warm {warm})\nlongevity  {:.2}\nmetab      {:.2}\nr/K        {:.2}\nhabitat    aquatic {aq} / land {land}\nspecialists {spec}",
         temp / nf, lng / nf, met / nf, par / nf
     );
 }
 
 fn spawn_stats_ui(mut commands: Commands) {
     commands.spawn((
-        Text::new("left-click a creature or plant to inspect"),
+        Text::new("press H for legend  -  left-click a creature or plant to inspect"),
         TextFont { font_size: 13.0, ..default() },
         TextColor(Color::WHITE),
         Node {

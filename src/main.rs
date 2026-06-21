@@ -133,6 +133,8 @@ fn setup_scene(
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     // planet: elevation-displaced, biome-vertex-colored globe. White base_color lets vertex colors show.
+    // NotShadowCaster: the big smooth globe must not cast (in walk mode it would self-shadow); it still
+    // RECEIVES, so trees/creatures drop real shadows on the land.
     commands.spawn((
         Mesh3d(meshes.add(terrain::build_globe(160))),
         MeshMaterial3d(materials.add(StandardMaterial {
@@ -141,6 +143,7 @@ fn setup_scene(
             ..default()
         })),
         Transform::IDENTITY,
+        bevy::light::NotShadowCaster,
     ));
     // ocean shell: a translucent blue sphere at sea level (land pokes above it, basins flood below)
     let sea_r = sphere::PLANET_R + sphere::SEA_LEVEL * sphere::ELEV_MAX;
@@ -153,11 +156,23 @@ fn setup_scene(
             ..default()
         })),
         Transform::IDENTITY,
+        bevy::light::NotShadowCaster,
     ));
     // sun (directional light; direction set per-frame by day_night_lighting) + soft ambient so the night
-    // side is not pitch black.
+    // side is not pitch black. shadows_enabled is toggled by camera::update_shadow_mode: OFF in orbit (the
+    // shadow-range boundary showed as an "eclipse" disc when zoomed), ON in walk mode (eye-level horizon is
+    // close so the range covers the whole view -> real shadows, no disc). Cascade tuned tight for ground
+    // scale (creatures ~0.5, trees ~3 units); globe+ocean are NotShadowCaster so only trees/creatures cast.
     commands.spawn((
-        DirectionalLight { shadows_enabled: true, illuminance: 11000.0, ..default() },
+        DirectionalLight { shadows_enabled: false, illuminance: 11000.0, shadow_normal_bias: 1.8, ..default() },
+        bevy::light::CascadeShadowConfigBuilder {
+            num_cascades: 4,
+            minimum_distance: 0.3,
+            maximum_distance: 130.0,
+            first_cascade_far_bound: 12.0,
+            overlap_proportion: 0.2,
+        }
+        .build(),
         Transform::from_xyz(1.0, 0.5, 0.0).looking_at(Vec3::ZERO, Vec3::Y),
         viz::SunLight,
     ));

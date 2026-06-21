@@ -55,6 +55,12 @@ pub const TURN_SPEED: f32 = 3.0; // rad/sec at full turn
 pub const CLIMB_COST: f32 = 1.2;
 pub const DESCEND_REFUND: f32 = 0.4;
 pub const ROCK_MOVE_COST: f32 = 9.0; // extra energy/sec moving over rocky highland (hard to cross)
+// Alpine gene (mountain niche, mirror of swim): high alpine relieves most rock-crossing cost (climber) but
+// a heavy mountain build wastes energy on flat ground. Mountains are only ~5% of the world, so in the
+// lowland majority alpine is pure cost -> it stays low on average + only rises in highland dwellers (a real
+// niche axis, self-limiting -> won't peg like armor did).
+pub const ALPINE_RELIEF: f32 = 0.85;    // fraction of rock-crossing cost removed at full alpine
+pub const ALPINE_FLAT_COST: f32 = 1.2;  // energy/sec penalty at full alpine on flat (non-rocky) ground
 pub const SENSE_COST: f32 = 0.012; // energy/sec per unit of total sensor range (long-range vision isn't free)
 pub const BRAIN_COST: f32 = 0.05; // energy/sec per hidden neuron: a bigger brain (more nodes) costs upkeep, so the NN grows only when the extra compute pays off -> brain size evolves to an interior optimum
 pub const EAT_RADIUS: f32 = 1.1;
@@ -136,6 +142,11 @@ pub const DETRITUS_NUTRIENT: f32 = 0.3; // dead vegetation: poor food fresh, rot
 pub const MOISTURE_TOLERANCE: f32 = 0.3; // mismatch under this is harmless
 pub const MOISTURE_KILL: f32 = 0.012; // per-tick death scale for mismatch beyond tolerance
 pub const HABITAT_KILL: f32 = 0.03; // per-tick death scale in poor sites (deep water / arid desert)
+// Drowning: a plant underwater needs the aquatic `wet` gene to survive. Mortality scales with submersion
+// (how far below sea level) x (1 - wet): land flora (low wet) drowns, aquatic flora (high wet) thrives ->
+// the wet gene splits land vs aquatic plants. Trees can't be aquatic at all (DROWN_TREE).
+pub const DROWN_KILL: f32 = 0.06;   // per-tick death scale for a non-aquatic plant fully submerged
+pub const DROWN_TREE: f32 = 0.5;    // per-tick death for a tree in water (trees are land-only, no kelp forests)
 pub const SEASON_FREQ: f32 = 0.4; // seasonal wet/dry oscillation speed (radians per generation)
 // Dynamic ground water (rain cycle): a wetness layer on TOP of the static terrain moisture. The sun
 // evaporates it (faster at noon), storms refill it. Rocky cells shed runoff (no gain); grassy cells

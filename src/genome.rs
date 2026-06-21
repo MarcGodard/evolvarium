@@ -60,6 +60,8 @@ pub struct Genome {
     pub metab: f32,          // 0..1 metabolic tempo: high = frugal (cheaper basal) but sluggish (slower top speed); low = fast (higher top speed) but costly to run. Default 0.5 = neutral (no change), so old saves are unchanged.
     #[serde(default = "half")]
     pub parental: f32,       // 0..1 r/K life-history: 0 = r-strategist (breed young + cheap + many small fragile young), 1 = K-strategist (breed late + costly + few well-provisioned young). Scales repro threshold/cost/birth-energy/maturity. Default 0.5 = current values (neutral), so old saves are unchanged.
+    #[serde(default = "zero")]
+    pub alpine: f32,         // 0..1 mountain adaptation: high = cheap rock/highland crossing (climber) but a heavy-build penalty on flat ground; low = lowland-light. Mirror of swim for mountains. Default 0 = neutral (no relief, no penalty), so old saves are unchanged.
 }
 
 // serde defaults for traits absent in old saves
@@ -68,6 +70,9 @@ fn half() -> f32 {
 }
 fn third() -> f32 {
     0.33
+}
+fn zero() -> f32 {
+    0.0
 }
 
 pub fn n_inputs(n_sensors: usize) -> usize {
@@ -112,6 +117,7 @@ impl Genome {
             longevity: rng.f32(),
             metab: rng.f32(),
             parental: rng.f32(),
+            alpine: rng.f32(), // founders span lowland..mountain builds -> a highland niche can emerge
         }
     }
 
@@ -137,6 +143,7 @@ impl Genome {
         c.longevity = pick(rng, a.longevity, b.longevity);
         c.metab = pick(rng, a.metab, b.metab);
         c.parental = pick(rng, a.parental, b.parental);
+        c.alpine = pick(rng, a.alpine, b.alpine);
         for i in 0..NFOOD {
             c.expr0[i] = pick(rng, a.expr0[i], b.expr0[i]);
         }
@@ -206,6 +213,9 @@ impl Genome {
         }
         if rng.f32() < rate {
             self.parental = (self.parental + rng.normal() * 0.12).clamp(0.0, 1.0);
+        }
+        if rng.f32() < rate {
+            self.alpine = (self.alpine + rng.normal() * 0.12).clamp(0.0, 1.0);
         }
         // structural: add / remove a sensor (and the matching input-weight columns)
         if rng.f32() < 0.06 && self.sensors.len() < MAX_SENSORS {

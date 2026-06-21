@@ -253,7 +253,7 @@ pub fn fire_step(
 // The founding homeland: all initial life starts within HOMELAND_CAP radians of this direction, then
 // spreads across the globe by reproduction/dispersal. (User: start them all in one area.)
 pub fn homeland_center() -> Vec3 {
-    Vec3::new(1.0, 0.35, 0.25).normalize()
+    Vec3::from(crate::sphere::HOMELAND_DIR).normalize()
 }
 pub const HOMELAND_CAP: f32 = 0.45; // ~26 deg cap: a continent-sized starting region
 
@@ -299,8 +299,8 @@ fn plant_spawn_pos(rng: &mut Rng, homeland: bool, offset: f32) -> Vec3 {
     };
     let mut d = crate::sphere::random_dir_in_cap(rng, center, cap);
     for _ in 0..8 {
-        if crate::sphere::elevation01(d) >= crate::sphere::SEA_LEVEL - 0.10 {
-            break; // land or shallow water is fine; only deep ocean is rejected
+        if crate::sphere::elevation01(d) >= crate::sphere::AQUATIC_FLOOR {
+            break; // land or any non-abyssal water is fine; only deep ocean is rejected
         }
         d = crate::sphere::random_dir_in_cap(rng, center, cap);
     }
@@ -389,14 +389,82 @@ fn spawn_creature(commands: &mut Commands, g: Genome, pos: Vec3, rng: &mut Rng, 
     ));
 }
 
-// God-control: drop a burst of `n` brand-new random creatures scattered over the land (kids' "make more
-// life!" button -> B in the render). Fresh random genomes, baseline provisioning, spread across the globe
-// so they pop up everywhere. Used by viz::god_disturbances.
-pub fn seed_burst(commands: &mut Commands, rng: &mut Rng, n: usize) {
+// God-control: drop a burst of `n` creatures scattered over the land (kids' "make more life!" button -> B
+// in the render). Clones of random LIVING creatures + a light mutation, so they have competent brains and
+// actually survive/behave (random genomes just flail at full thrust and die). Falls back to random genomes
+// if the world is empty. Baseline provisioning, spread planet-wide. Used by viz::god_disturbances.
+pub fn seed_burst(commands: &mut Commands, rng: &mut Rng, parents: &[Genome], n: usize) {
     for _ in 0..n {
-        let g = Genome::random(rng);
+        let g = if parents.is_empty() {
+            Genome::random(rng)
+        } else {
+            let idx = ((rng.f32() * parents.len() as f32) as usize).min(parents.len() - 1);
+            let mut c = parents[idx].clone();
+            c.mutate(rng, 0.1, 0.1); // light tweak so the burst is varied, not identical clones
+            c
+        };
         let pos = rand_pos(rng, CREATURE_Y); // any land, scattered planet-wide
         spawn_creature(commands, g, pos, rng, BIRTH_ENERGY);
+    }
+}
+
+// God-control: populate the WHOLE planet with plants + trees + creatures, each placed in habitat it can
+// live in (aquatic flora + swimmers in the sea, alpine creatures + land flora + trees on land, climate-
+// matched temp_pref). Lets you seed an empty/sparse world all over instead of waiting for spread. Render
+// god-control P. Counts are targets; ocean/land/abyss filtering retries a few times per item.
+pub fn seed_planet(commands: &mut Commands, rng: &mut Rng, parents: &[Genome], ntypes: u8, n_creatures: usize, n_plants: usize, n_trees: usize) {
+    use std::f32::consts::PI;
+    let whole = |rng: &mut Rng| crate::sphere::random_dir_in_cap(rng, Vec3::Y, PI); // uniform over the globe
+    // creatures: adapt each to where it lands so it survives there -> every region gets life
+    for _ in 0..n_creatures {
+        let mut g = if parents.is_empty() {
+            Genome::random(rng)
+        } else {
+            let idx = ((rng.f32() * parents.len() as f32) as usize).min(parents.len() - 1);
+            let mut c = parents[idx].clone();
+            c.mutate(rng, 0.1, 0.1);
+            c
+        };
+        let d = whole(rng);
+        if crate::sphere::is_ocean(d) {
+            g.swim = rng.range(0.7, 1.0); // swimmer
+            g.alpine = 0.0;
+        } else if crate::sphere::rockiness(d) > 0.4 {
+            g.alpine = rng.range(0.6, 1.0); // mountaineer
+            g.swim = 0.1;
+        } else {
+            g.swim = 0.1;
+        }
+        g.temp_pref = (crate::sphere::base_temperature(d) + rng.normal() * 0.1).clamp(0.0, 1.0); // climate match
+        spawn_creature(commands, g, crate::sphere::surface_pos(d, CREATURE_Y), rng, BIRTH_ENERGY);
+    }
+    // plants: aquatic flora (high wet) in water, land flora elsewhere; skip the barren abyss
+    for _ in 0..n_plants {
+        let mut d = whole(rng);
+        for _ in 0..6 {
+            if crate::sphere::elevation01(d) >= crate::sphere::AQUATIC_FLOOR {
+                break;
+            }
+            d = whole(rng);
+        }
+        let mut pg = PlantGenome::random(rng, ntypes);
+        if crate::sphere::is_ocean(d) {
+            pg.wet = rng.range(0.7, 1.0); // aquatic flora survives submersion
+        }
+        spawn_plant(commands, pg, rng.range(0.5, 1.3) * PLANT_START_MASS, crate::sphere::surface_pos(d, FOOD_Y));
+    }
+    // trees: land only + habitable ground
+    for _ in 0..n_trees {
+        let mut d = whole(rng);
+        for _ in 0..8 {
+            if !crate::sphere::is_ocean(d) && crate::sphere::plant_habitability(d) > 0.4 {
+                break;
+            }
+            d = whole(rng);
+        }
+        if !crate::sphere::is_ocean(d) {
+            spawn_tree(commands, rng.range(3.0, 9.0), crate::sphere::surface_pos(d, FOOD_Y), rng.f32() < 0.5, tree_genome(rng));
+        }
     }
 }
 
@@ -526,6 +594,9 @@ pub fn spawn_world_render(
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     let creature_mesh = meshes.add(Capsule3d::new(0.4, 0.8));
+    // shared creature mesh as a resource so viz::add_creature_visuals can dress creatures BORN mid-sim
+    // (spawn_creature adds no mesh) -> newborns + B-button creatures become visible, not just the seed pop.
+    commands.insert_resource(crate::viz::CreatureMesh(creature_mesh.clone()));
     // shared plant sphere mesh; viz::add_plant_visuals colors each plant by its genome
     commands.insert_resource(crate::viz::PlantMesh(meshes.add(Sphere::new(0.35))));
     commands.insert_resource(crate::viz::TreeMeshes {
@@ -634,6 +705,12 @@ pub fn plant_step(
         // marginal populations; light niches come from the day/night cycle, which is predictable + stable.)
         let lf = 0.35 + 0.65 * (1.0 - (light - g.light_pref).abs());
         if let Some(tree) = tree {
+            // trees are land-only: a tree standing in water drowns fast (no kelp/mangrove forests). Clears
+            // coastal seeds that landed in the sea + any tree left underwater by a rising sea level.
+            if crate::sphere::is_ocean(pdir) && rng.f32() < DROWN_TREE {
+                commands.entity(e).despawn();
+                continue;
+            }
             // fed-on this tick? (key present even for harmless branch-feeders, who do 0 mass damage).
             // Apply the recorded mass damage; a fruit tree grazed below TREE_MIN_MASS is over-eaten -> dies.
             let grazed = tree_bites.0.contains_key(&e);
@@ -659,10 +736,13 @@ pub fn plant_step(
             if (ambient || disperse) && tree_count + tree_births.len() < TREE_CAP {
                 let spread = if disperse { g.spread * TREE_EAT_SPREAD_MULT } else { g.spread };
                 let pos = disperse_pos(&mut rng, ppos, spread, FOOD_Y);
-                // child inherits the parent's full tree genome, mutated (trees evolve like plants)
-                let mut child = g.clone();
-                child.mutate_tree(&mut rng);
-                tree_births.push((pos, tree.edible, child));
+                // trees are land-only: drop seeds that landed in the sea (no ocean forests)
+                if !crate::sphere::is_ocean(pos.normalize_or_zero()) {
+                    // child inherits the parent's full tree genome, mutated (trees evolve like plants)
+                    let mut child = g.clone();
+                    child.mutate_tree(&mut rng);
+                    tree_births.push((pos, tree.edible, child));
+                }
                 st.mass *= PLANT_REPRO_FRAC; // budding a seed costs the parent mass either way
             }
             continue;
@@ -684,9 +764,13 @@ pub fn plant_step(
         // get stressed in drought (temporal selection on `wet`).
         let m = (crate::sphere::moisture(pdir) + 0.2 * season + WET_GAIN * water).clamp(0.0, 1.0);
         let stress = (m - g.wet).abs();
-        let hab = crate::sphere::plant_habitability(pdir); // 0 in ocean/desert/cold, 1 on good land
-        let p_mort =
-            MOISTURE_KILL * (stress - MOISTURE_TOLERANCE).max(0.0) + HABITAT_KILL * (0.3 - hab).max(0.0);
+        let hab = crate::sphere::plant_habitability(pdir); // 0 in deep ocean/desert/cold, 1 on good land
+        // drowning: underwater a plant needs the aquatic `wet` gene to live. submersion (depth below sea) x
+        // (1-wet) -> land flora (low wet) drowns, aquatic flora (high wet) thrives. Splits land vs aquatic.
+        let e01 = crate::sphere::elevation01(pdir);
+        let submersion = ((crate::sphere::SEA_LEVEL - e01) / crate::sphere::SEA_LEVEL).clamp(0.0, 1.0);
+        let drown = DROWN_KILL * submersion * (1.0 - g.wet);
+        let p_mort = MOISTURE_KILL * (stress - MOISTURE_TOLERANCE).max(0.0) + HABITAT_KILL * (0.3 - hab).max(0.0) + drown;
         if rng.f32() < p_mort {
             commands.entity(e).despawn();
             detritus.push((g.clone(), st.mass, tf.translation));
@@ -1003,7 +1087,8 @@ pub fn live_step(
             + SIZE_BASAL * genome.size // bigger body costs more just to maintain
             + MOVE_COST * (1.0 + SIZE_MOVE * genome.size) * thrust * thrust // more mass to push
             + BITE_COST * genome.bite
-            + ROCK_MOVE_COST * rock * thrust.abs()
+            + ROCK_MOVE_COST * rock * thrust.abs() * (1.0 - ALPINE_RELIEF * genome.alpine) // alpine climbers cross rock cheaply
+            + ALPINE_FLAT_COST * genome.alpine * (1.0 - rock) // heavy mountain build wastes energy on flat ground
             + SENSE_COST * sense_range
             + BRAIN_COST * genome.net.ih.len() as f32 // bigger brain = more upkeep
             + HEIGHT_COST * genome.height
@@ -1323,6 +1408,10 @@ pub fn generation_step(
             let mut lng = 0.0;
             let mut met = 0.0;
             let mut par = 0.0;
+            let mut alp = 0.0; // mean alpine (mountain adaptation)
+            let mut sw = 0.0; // mean swim (aquatic adaptation)
+            let mut aq = 0u32; // count of aquatic creatures (swim > 0.6) -> fish niche size
+            let mut hi = 0u32; // count of highland creatures (alpine > 0.5) -> mountain niche size
             let mut abslat = 0.0; // mean |latitude| of the population (0 equator .. ~1.57 pole) -> spread check
             for (t, en, fit, _h, _a, g, _b, diet, _l) in cq.iter() {
                 e += en.0;
@@ -1335,6 +1424,10 @@ pub fn generation_step(
                 lng += g.longevity;
                 met += g.metab;
                 par += g.parental;
+                alp += g.alpine;
+                sw += g.swim;
+                if g.swim > 0.6 { aq += 1; }
+                if g.alpine > 0.5 { hi += 1; }
                 abslat += crate::sphere::dir_to_lonlat(t.translation.normalize_or_zero()).1.abs();
             }
             let plant_n = pq.iter().len().max(1);
@@ -1343,8 +1436,8 @@ pub fn generation_step(
             let avg_qual: f32 = pq.iter().map(|(g, _)| g.quality).sum::<f32>() / plant_n as f32;
             let avg_wet: f32 = pq.iter().map(|(g, _)| g.wet).sum::<f32>() / plant_n as f32;
             info!(
-                "t {:>6} | pop {:>3} | energy {:.1} | life-fit {:.1} | age {:.0} | sens {:.1} | bite {:.2} | rig {:.2} | temp {:.2} lng {:.2} met {:.2} par {:.2} lat {:.2} | def {:.2} nut {:.2} qual {:.2} wet {:.2} | plants {} | soil {:.2} | rain {:.2} fire {:.3}",
-                gen.tick, pop, e / n, f / n, age / n, sens / n, bite / n, rig / n, temp / n, lng / n, met / n, par / n, abslat / n, avg_def, avg_nut, avg_qual, avg_wet, plant_n, soil.avg(), weather.rain, fire.avg()
+                "t {:>6} | pop {:>3} | energy {:.1} | life-fit {:.1} | age {:.0} | sens {:.1} | bite {:.2} | rig {:.2} | temp {:.2} lng {:.2} met {:.2} par {:.2} lat {:.2} | swim {:.2} alp {:.2} aq {} hi {} | def {:.2} nut {:.2} qual {:.2} wet {:.2} | plants {} | soil {:.2} | rain {:.2} fire {:.3}",
+                gen.tick, pop, e / n, f / n, age / n, sens / n, bite / n, rig / n, temp / n, lng / n, met / n, par / n, abslat / n, sw / n, alp / n, aq, hi, avg_def, avg_nut, avg_qual, avg_wet, plant_n, soil.avg(), weather.rain, fire.avg()
             );
             // Track the best healthy snapshot for --save. Score = pop, gated on well-fed (avg energy >= 30)
             // so we never bank a starving crowd. Captured only when saving (snapshot clone is not free).

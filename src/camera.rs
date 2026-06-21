@@ -1,6 +1,12 @@
-// Orbit camera for the planet. DRAG (hold right mouse) to rotate around the globe, SCROLL to zoom, WASD/QE
-// as a keyboard fallback. LEFT-click selects a creature/plant; F follows the selection. Render mode only.
-use crate::viz::Selected;
+// Two camera modes for the planet (TAB switches), render mode only.
+//   ORBIT (default): drag right-mouse to rotate the globe, scroll/W,S to zoom, A/D spin, Q/E tilt. Left-
+//     click selects a creature/plant; F follows it. Shadows OFF here (the directional shadow range painted
+//     an "eclipse" disc when zoomed).
+//   WALK: a true ground walk -- the eye rides a fixed height above the terrain (climbs hills, never flies).
+//     WASD move (W/S forward+back, A/D strafe), arrows or right-drag look, Shift run. Shadows ON here: at
+//     eye level the horizon is close so the shadow range covers the whole view -> real tree/creature
+//     shadows, no disc.
+use crate::viz::{Selected, SunLight};
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
 use bevy::prelude::*;
 
@@ -8,13 +14,37 @@ pub struct OrbitCameraPlugin;
 
 impl Plugin for OrbitCameraPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, (spawn_camera, log_controls))
-            .add_systems(Update, (orbit_drag, orbit_keys, zoom, apply_orbit, follow_camera).chain());
+        app.init_resource::<CameraMode>()
+            .add_systems(Startup, (spawn_camera, log_controls))
+            .add_systems(
+                Update,
+                (
+                    toggle_mode,
+                    orbit_drag,
+                    orbit_keys,
+                    zoom,
+                    walk_look,
+                    walk_move,
+                    apply_orbit,
+                    apply_walk,
+                    follow_camera,
+                    update_shadow_mode,
+                )
+                    .chain(),
+            );
     }
 }
 
 fn log_controls() {
-    info!("camera: DRAG (right-mouse) orbit | SCROLL zoom | WASD/QE orbit+zoom | LEFT-CLICK select | F follow | ESC release");
+    info!("camera: TAB = orbit/walk | ORBIT: right-drag rotate, scroll zoom, click select, F follow | WALK: WASD move, arrows/right-drag look, Shift run");
+}
+
+// Which camera is active. Orbit = space view; Walk = ground view (with real shadows).
+#[derive(Resource, Default, Clone, Copy, PartialEq, Eq)]
+pub enum CameraMode {
+    #[default]
+    Orbit,
+    Walk,
 }
 
 // Orbit state: the camera sits on a sphere of radius `dist` around the planet center, aimed inward.
@@ -25,12 +55,26 @@ pub struct OrbitCam {
     pub dist: f32,
 }
 
+// Walk state: stand on a surface point (`dir`, unit), face compass `yaw`, look up/down with `pitch`. The
+// eye height above the terrain is fixed -> you walk over hills, never fly.
+#[derive(Component)]
+pub struct WalkCam {
+    pub dir: Vec3,
+    pub yaw: f32,
+    pub pitch: f32,
+}
+
 const MIN_DIST: f32 = 95.0; // just above the surface (planet radius ~80 + terrain)
 const MAX_DIST: f32 = 420.0;
+const WALK_EYE: f32 = 2.5; // eye height above the terrain surface (true walk: rides elevation)
+const WALK_SPEED: f32 = 14.0; // walk speed (units/sec); Shift runs
+const WALK_TURN: f32 = 1.6; // keyboard look speed (rad/sec)
+const PITCH_LIMIT: f32 = 1.3;
 
 fn spawn_camera(mut commands: Commands) {
     // start framed on the homeland (where the founding population lives)
-    let (lon, lat) = crate::sphere::dir_to_lonlat(crate::sim::homeland_center());
+    let hl = crate::sim::homeland_center();
+    let (lon, lat) = crate::sphere::dir_to_lonlat(hl);
     commands.spawn((
         Camera3d::default(),
         Transform::default(),
@@ -39,17 +83,56 @@ fn spawn_camera(mut commands: Commands) {
         // soft ambient (per-camera in 0.18) so the planet's night side is not pitch black
         AmbientLight { brightness: 220.0, ..default() },
         OrbitCam { yaw: lon, pitch: lat.clamp(-1.3, 1.3), dist: 230.0 },
+        WalkCam { dir: hl.normalize_or_zero(), yaw: 0.0, pitch: 0.0 },
     ));
 }
 
+// TAB toggles orbit <-> walk. Entering walk: drop onto the surface point the orbit camera was over, facing
+// north, level. Entering either mode cancels follow.
+fn toggle_mode(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut mode: ResMut<CameraMode>,
+    mut selected: ResMut<Selected>,
+    mut q: Query<(&OrbitCam, &mut WalkCam)>,
+) {
+    if !keys.just_pressed(KeyCode::Tab) {
+        return;
+    }
+    *mode = match *mode {
+        CameraMode::Orbit => {
+            if let Ok((orbit, mut walk)) = q.single_mut() {
+                // the surface point under the orbit camera = its position direction
+                walk.dir = Vec3::new(
+                    orbit.pitch.cos() * orbit.yaw.cos(),
+                    orbit.pitch.sin(),
+                    orbit.pitch.cos() * orbit.yaw.sin(),
+                )
+                .normalize_or_zero();
+                walk.yaw = 0.0;
+                walk.pitch = 0.0;
+            }
+            selected.follow = false;
+            info!("camera: WALK mode (WASD move, arrows/right-drag look, Shift run, TAB to orbit)");
+            CameraMode::Walk
+        }
+        CameraMode::Walk => {
+            info!("camera: ORBIT mode");
+            CameraMode::Orbit
+        }
+    };
+}
+
+// --- orbit mode ---
+
 // Hold right mouse + move to orbit. No cursor lock (a globe orbit reads better as a drag).
 fn orbit_drag(
+    mode: Res<CameraMode>,
     buttons: Res<ButtonInput<MouseButton>>,
     motion: Res<AccumulatedMouseMotion>,
     selected: Res<Selected>,
     mut q: Query<&mut OrbitCam>,
 ) {
-    if selected.follow || !buttons.pressed(MouseButton::Right) {
+    if *mode != CameraMode::Orbit || selected.follow || !buttons.pressed(MouseButton::Right) {
         return;
     }
     let Ok(mut cam) = q.single_mut() else { return };
@@ -58,8 +141,8 @@ fn orbit_drag(
 }
 
 // Keyboard fallback: A/D orbit longitude, W/S zoom in/out, Q/E tilt latitude. Shift = faster.
-fn orbit_keys(keys: Res<ButtonInput<KeyCode>>, time: Res<Time>, selected: Res<Selected>, mut q: Query<&mut OrbitCam>) {
-    if selected.follow {
+fn orbit_keys(mode: Res<CameraMode>, keys: Res<ButtonInput<KeyCode>>, time: Res<Time>, selected: Res<Selected>, mut q: Query<&mut OrbitCam>) {
+    if *mode != CameraMode::Orbit || selected.follow {
         return;
     }
     let Ok(mut cam) = q.single_mut() else { return };
@@ -74,8 +157,8 @@ fn orbit_keys(keys: Res<ButtonInput<KeyCode>>, time: Res<Time>, selected: Res<Se
 }
 
 // Scroll wheel zooms in/out.
-fn zoom(scroll: Res<AccumulatedMouseScroll>, selected: Res<Selected>, mut q: Query<&mut OrbitCam>) {
-    if selected.follow || scroll.delta.y == 0.0 {
+fn zoom(mode: Res<CameraMode>, scroll: Res<AccumulatedMouseScroll>, selected: Res<Selected>, mut q: Query<&mut OrbitCam>) {
+    if *mode != CameraMode::Orbit || selected.follow || scroll.delta.y == 0.0 {
         return;
     }
     let Ok(mut cam) = q.single_mut() else { return };
@@ -83,9 +166,9 @@ fn zoom(scroll: Res<AccumulatedMouseScroll>, selected: Res<Selected>, mut q: Que
 }
 
 // Place the camera from (yaw, pitch, dist) around the planet center, looking inward.
-fn apply_orbit(selected: Res<Selected>, mut q: Query<(&mut Transform, &OrbitCam)>) {
-    if selected.follow {
-        return; // follow_camera owns the transform while following
+fn apply_orbit(mode: Res<CameraMode>, selected: Res<Selected>, mut q: Query<(&mut Transform, &OrbitCam)>) {
+    if *mode != CameraMode::Orbit || selected.follow {
+        return; // walk owns the transform in walk mode; follow_camera owns it while following
     }
     let Ok((mut t, cam)) = q.single_mut() else { return };
     let dir = Vec3::new(cam.pitch.cos() * cam.yaw.cos(), cam.pitch.sin(), cam.pitch.cos() * cam.yaw.sin());
@@ -93,13 +176,80 @@ fn apply_orbit(selected: Res<Selected>, mut q: Query<(&mut Transform, &OrbitCam)
     t.look_at(Vec3::ZERO, Vec3::Y);
 }
 
-// Follow the selected entity (toggle with F): keep a fixed offset and track it. Stops if the target dies.
+// --- walk mode ---
+
+// Move along the surface (never up/down): W/S forward+back along heading, A/D strafe. Arrows turn/look,
+// Shift runs. Movement is a great-circle step so you stay glued to the planet.
+fn walk_move(mode: Res<CameraMode>, keys: Res<ButtonInput<KeyCode>>, time: Res<Time>, mut q: Query<&mut WalkCam>) {
+    if *mode != CameraMode::Walk {
+        return;
+    }
+    let Ok(mut w) = q.single_mut() else { return };
+    let dt = time.delta_secs();
+    let boost = if keys.pressed(KeyCode::ShiftLeft) { 2.5 } else { 1.0 };
+    let dist = WALK_SPEED * dt * boost;
+    use std::f32::consts::FRAC_PI_2;
+    if keys.pressed(KeyCode::KeyW) { w.dir = crate::sphere::step(w.dir, w.yaw, dist).0; }
+    if keys.pressed(KeyCode::KeyS) { w.dir = crate::sphere::step(w.dir, w.yaw, -dist).0; }
+    if keys.pressed(KeyCode::KeyA) { w.dir = crate::sphere::step(w.dir, w.yaw - FRAC_PI_2, dist).0; }
+    if keys.pressed(KeyCode::KeyD) { w.dir = crate::sphere::step(w.dir, w.yaw + FRAC_PI_2, dist).0; }
+    if keys.pressed(KeyCode::ArrowLeft) { w.yaw -= WALK_TURN * dt; }
+    if keys.pressed(KeyCode::ArrowRight) { w.yaw += WALK_TURN * dt; }
+    if keys.pressed(KeyCode::ArrowUp) { w.pitch = (w.pitch + WALK_TURN * dt).clamp(-PITCH_LIMIT, PITCH_LIMIT); }
+    if keys.pressed(KeyCode::ArrowDown) { w.pitch = (w.pitch - WALK_TURN * dt).clamp(-PITCH_LIMIT, PITCH_LIMIT); }
+}
+
+// Right-drag to look around (yaw + pitch) in walk mode.
+fn walk_look(mode: Res<CameraMode>, buttons: Res<ButtonInput<MouseButton>>, motion: Res<AccumulatedMouseMotion>, mut q: Query<&mut WalkCam>) {
+    if *mode != CameraMode::Walk || !buttons.pressed(MouseButton::Right) {
+        return;
+    }
+    let Ok(mut w) = q.single_mut() else { return };
+    w.yaw += motion.delta.x * 0.005;
+    w.pitch = (w.pitch - motion.delta.y * 0.005).clamp(-PITCH_LIMIT, PITCH_LIMIT);
+}
+
+// Build the walk transform: eye = a fixed height above the terrain at `dir` (local up = radial), looking
+// along the heading tangent tilted by pitch. Riding `surface_pos` means the eye climbs/descends with hills.
+fn apply_walk(mode: Res<CameraMode>, mut q: Query<(&mut Transform, &WalkCam)>) {
+    if *mode != CameraMode::Walk {
+        return;
+    }
+    let Ok((mut t, w)) = q.single_mut() else { return };
+    let d = w.dir.normalize_or_zero();
+    let up = d; // local up = straight away from the planet center
+    let eye = crate::sphere::surface_pos(d, WALK_EYE);
+    let tangent = crate::sphere::heading_tangent(d, w.yaw);
+    let forward = (tangent * w.pitch.cos() + up * w.pitch.sin()).normalize_or_zero();
+    t.translation = eye;
+    t.look_to(forward, up);
+}
+
+// --- shared ---
+
+// Shadows ON only in walk mode (close horizon -> the shadow range covers the view, no eclipse disc); OFF in
+// orbit (the range boundary showed as a disc when zoomed). Runs on mode change + once at startup.
+fn update_shadow_mode(mode: Res<CameraMode>, mut lights: Query<&mut DirectionalLight, With<SunLight>>) {
+    if !mode.is_changed() {
+        return;
+    }
+    let walk = *mode == CameraMode::Walk;
+    for mut l in &mut lights {
+        l.shadows_enabled = walk;
+    }
+}
+
+// Follow the selected entity (toggle with F, orbit mode): keep a fixed offset and track it. Stops if dead.
 fn follow_camera(
+    mode: Res<CameraMode>,
     keys: Res<ButtonInput<KeyCode>>,
     mut selected: ResMut<Selected>,
     targets: Query<&GlobalTransform>,
     mut cam: Query<&mut Transform, With<OrbitCam>>,
 ) {
+    if *mode != CameraMode::Orbit {
+        return;
+    }
     let Ok(mut cam_tf) = cam.single_mut() else { return };
     if keys.just_pressed(KeyCode::KeyF) {
         if let Some(e) = selected.entity {
