@@ -176,10 +176,37 @@ fn setup_scene(
     // sea surface = the waterline reference at PLANET_R: land (elevation >= 0) pokes above, ocean floor
     // (elevation < 0, signed bathymetry) sinks below -> the shell meets the globe exactly at the coast.
     let sea_r = sphere::PLANET_R;
+    // Sea surface with baked per-vertex ice: cold polar ocean freezes to OPAQUE white pack ice, warmer seas
+    // stay translucent blue. base_color = WHITE so each vertex color carries BOTH hue and alpha (ice opaque,
+    // open water see-through). Latitude-driven (base_temperature), baked once at spawn -> no per-frame cost.
+    let mut sea_mesh = Sphere::new(sea_r).mesh().ico(6).unwrap();
+    if let Some(bevy::mesh::VertexAttributeValues::Float32x3(pos)) =
+        sea_mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+    {
+        let water = Color::srgba(0.07, 0.26, 0.44, 0.62).to_linear().to_f32_array();
+        let ice = Color::srgba(0.90, 0.93, 0.97, 1.0).to_linear().to_f32_array();
+        let cols: Vec<[f32; 4]> = pos
+            .iter()
+            .map(|p| {
+                let d = Vec3::from_array(*p).normalize_or_zero();
+                // freeze ramps in below temp 0.30 (sea holds heat -> onset a touch warmer than land ice),
+                // solid pack ice by ~0.12. smoothstep -> soft floe edge, not a hard ring.
+                let f = ((0.30 - sphere::base_temperature(d)) / 0.18).clamp(0.0, 1.0);
+                let f = f * f * (3.0 - 2.0 * f);
+                [
+                    water[0] + (ice[0] - water[0]) * f,
+                    water[1] + (ice[1] - water[1]) * f,
+                    water[2] + (ice[2] - water[2]) * f,
+                    water[3] + (ice[3] - water[3]) * f,
+                ]
+            })
+            .collect();
+        sea_mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, cols);
+    }
     commands.spawn((
-        Mesh3d(meshes.add(Sphere::new(sea_r).mesh().ico(6).unwrap())),
+        Mesh3d(meshes.add(sea_mesh)),
         MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgba(0.07, 0.26, 0.44, 0.62),
+            base_color: Color::WHITE, // vertex colors carry water blue / ice white (+ alpha)
             alpha_mode: AlphaMode::Blend,
             perceptual_roughness: 0.04, // glossy -> sharp sun specular glint
             reflectance: 0.6,

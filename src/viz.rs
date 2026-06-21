@@ -7,7 +7,7 @@ use bevy::prelude::*;
 
 use crate::components::{Alive, Creature, DietState, Energy, Fitness, Food, Grass, Heading, Rot, Tree};
 use crate::genome::{master_expression, Genome, NFOOD, NUTRIENTS};
-use crate::plant::{plant_color, PlantGenome, PlantState};
+use crate::plant::{flower_color, form, plant_color, PlantGenome, PlantState};
 use crate::sim::{grid_cell_surface, Fire, GenState, GroundWater, ROT_GONE};
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
@@ -90,9 +90,16 @@ impl Plugin for VizPlugin {
     }
 }
 
-// Shared sphere mesh for plants (inserted by spawn_world_render).
+// Per-form plant mesh library (inserted by spawn_world_render): one silhouette per plant::form so the
+// flora reads as a real botanical mix (ferns, reeds, cacti, lily pads, kelp, ...) instead of identical
+// balls. `forms` is indexed by the genome's `form` byte; flower/berry/cap are shared embellishment meshes.
 #[derive(Resource)]
-pub struct PlantMesh(pub Handle<Mesh>);
+pub struct PlantForms {
+    pub forms: Vec<Handle<Mesh>>, // indexed by plant::form::*
+    pub flower: Handle<Mesh>,     // bloom blob (flowering plants)
+    pub berry: Handle<Mesh>,      // fruit blob (fruiting bushes)
+    pub cap: Handle<Mesh>,        // mushroom cap
+}
 
 // Shared creature capsule mesh (inserted by spawn_world_render) so add_creature_visuals can dress
 // creatures born mid-sim (spawn_creature adds no mesh) -> newborns + B-seeded creatures become visible.
@@ -152,40 +159,103 @@ pub struct TreeMeshes {
 // (hue=kind, brightness=nutrient, warmth=defense). Covers initial plants AND new offspring.
 fn add_plant_visuals(
     mut commands: Commands,
-    mesh: Option<Res<PlantMesh>>,
+    forms: Option<Res<PlantForms>>,
     trees: Option<Res<TreeMeshes>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     q: Query<(Entity, &PlantGenome, Option<&Tree>), (With<Food>, Without<Mesh3d>, Without<Grass>)>, // grass has its own visuals (add_grass_visuals)
 ) {
-    let Some(mesh) = mesh else { return };
+    let Some(forms) = forms else { return };
     for (e, g, tree) in &q {
-        match (tree, &trees) {
-            // tree = a brown trunk (this entity) + a green canopy child (cone evergreen / round fruit)
-            (Some(t), Some(tm)) => {
-                commands.entity(e).insert((
-                    Mesh3d(tm.trunk.clone()),
-                    MeshMaterial3d(materials.add(Color::srgb(0.40, 0.26, 0.13))),
-                ));
-                let (canopy, color) = if t.edible {
-                    (tm.broadleaf.clone(), Color::srgb(0.20, 0.60, 0.16))
-                } else {
-                    (tm.conifer.clone(), Color::srgb(0.06, 0.30, 0.18))
-                };
-                let child = commands
+        // tree = a brown trunk (this entity) + a canopy child. Fruit trees get a round broadleaf crown
+        // (greener + a hint of the genome's leaf hue), evergreens a dark cone. Trees ignore `form`.
+        if let (Some(t), Some(tm)) = (tree, &trees) {
+            commands.entity(e).insert((
+                Mesh3d(tm.trunk.clone()),
+                MeshMaterial3d(materials.add(Color::srgb(0.40, 0.26, 0.13))),
+            ));
+            let (canopy, color) = if t.edible {
+                (tm.broadleaf.clone(), plant_color(g))
+            } else {
+                (tm.conifer.clone(), Color::srgb(0.06, 0.30, 0.18))
+            };
+            let child = commands
+                .spawn((Mesh3d(canopy), MeshMaterial3d(materials.add(color)), Transform::from_xyz(0.0, 2.2, 0.0)))
+                .id();
+            commands.entity(e).add_child(child);
+            // a flowering (blossom) fruit tree gets a ring of bloom blobs in its crown
+            if t.edible && g.flower > 0.4 {
+                let fmat = materials.add(flower_color(g));
+                for k in 0..5 {
+                    let a = k as f32 * 1.2566; // 72 deg apart
+                    let c = commands
+                        .spawn((
+                            Mesh3d(forms.flower.clone()),
+                            MeshMaterial3d(fmat.clone()),
+                            Transform::from_xyz(0.9 * a.cos(), 2.4, 0.9 * a.sin()).with_scale(Vec3::splat(1.6)),
+                        ))
+                        .id();
+                    commands.entity(e).add_child(c);
+                }
+            }
+            continue;
+        }
+        // --- regular plant: pick the silhouette by form, color the foliage by genome ---
+        let fi = (g.form as usize).min(forms.forms.len().saturating_sub(1));
+        let leafy = matches!(
+            g.form,
+            form::FERN | form::REED | form::KELP | form::ROSETTE | form::LILYPAD | form::GROUNDCOVER | form::MOSS
+        );
+        let mat = materials.add(StandardMaterial {
+            base_color: plant_color(g),
+            perceptual_roughness: 0.9,
+            double_sided: leafy, // thin leaf/frond/disc meshes render from both faces
+            cull_mode: if leafy { None } else { Some(bevy::render::render_resource::Face::Back) },
+            ..default()
+        });
+        commands.entity(e).insert((Mesh3d(forms.forms[fi].clone()), MeshMaterial3d(mat)));
+        // bloom child for a flowering plant (placed near the top of the unit mesh, in local space)
+        if g.flower > 0.25 && !matches!(g.form, form::KELP | form::MOSS) {
+            let top = match g.form {
+                form::FLOWER_STALK | form::REED => 1.0,
+                form::SHRUB => 0.6,
+                form::LILYPAD | form::GROUNDCOVER | form::ROSETTE => 0.1,
+                _ => 0.7,
+            };
+            let child = commands
+                .spawn((
+                    Mesh3d(forms.flower.clone()),
+                    MeshMaterial3d(materials.add(flower_color(g))),
+                    Transform::from_xyz(0.0, top, 0.0).with_scale(Vec3::splat(0.5 + 0.9 * g.flower)),
+                ))
+                .id();
+            commands.entity(e).add_child(child);
+        }
+        // berry children for a fruiting land bush (red clusters); skip aquatic/flat forms
+        if g.fruiting > 0.3 && matches!(g.form, form::SHRUB | form::HERB | form::FLOWER_STALK) {
+            let berry = if g.toxicity > 0.5 { Color::srgb(0.25, 0.0, 0.35) } else { Color::srgb(0.7, 0.06, 0.16) };
+            let bmat = materials.add(berry);
+            for k in 0..3 {
+                let a = k as f32 * 2.0944; // 120 deg
+                let c = commands
                     .spawn((
-                        Mesh3d(canopy),
-                        MeshMaterial3d(materials.add(color)),
-                        Transform::from_xyz(0.0, 2.2, 0.0),
+                        Mesh3d(forms.berry.clone()),
+                        MeshMaterial3d(bmat.clone()),
+                        Transform::from_xyz(0.22 * a.cos(), 0.45, 0.22 * a.sin()),
                     ))
                     .id();
-                commands.entity(e).add_child(child);
+                commands.entity(e).add_child(c);
             }
-            // plain plant: shared sphere, colored by genome
-            _ => {
-                commands
-                    .entity(e)
-                    .insert((Mesh3d(mesh.0.clone()), MeshMaterial3d(materials.add(plant_color(g)))));
-            }
+        }
+        // mushroom cap on top of the stem
+        if g.form == form::MUSHROOM {
+            let c = commands
+                .spawn((
+                    Mesh3d(forms.cap.clone()),
+                    MeshMaterial3d(materials.add(plant_color(g))),
+                    Transform::from_xyz(0.0, 0.55, 0.0).with_scale(Vec3::new(1.0, 0.6, 1.0)),
+                ))
+                .id();
+            commands.entity(e).add_child(c);
         }
     }
 }
@@ -227,13 +297,37 @@ fn size_plants(mut q: Query<(&PlantState, &PlantGenome, &mut Transform, Option<&
             tf.scale = Vec3::splat(s);
             tf.rotation = rot;
             tf.translation = base + up * (1.5 * s); // trunk base rests on the surface
+            continue;
+        }
+        // per-form scale (girth, height) + lift so each silhouette sits on the surface. girth grows with
+        // mass + bushiness; height comes from the height gene. Custom clump/disc meshes have base at y=0
+        // (lift=0); centered primitives lift by half their height. droop slightly squashes the height.
+        let girth = (0.2 + 0.12 * st.mass).clamp(0.2, 1.1);
+        let bushy = 0.7 + 0.6 * g.bushiness;
+        let tall = (1.0 + 1.4 * g.height) * (1.0 - 0.3 * g.droop);
+        // (sx, sy, sz, lift_in_local_units) per form. lift = local distance from origin to the mesh base.
+        let (sx, sy, sz, lift) = match g.form {
+            form::SHRUB => (girth * bushy * 1.4, girth * bushy * 1.2, girth * bushy * 1.4, 0.5),
+            form::GROUNDCOVER => (girth * bushy * 1.7, girth * 0.35, girth * bushy * 1.7, 0.4),
+            form::MOSS => (girth * bushy * 1.5, girth * 0.22, girth * bushy * 1.5, 0.35),
+            form::FERN => (0.55 + 0.45 * bushy, 0.6 + 0.7 * g.height, 0.55 + 0.45 * bushy, 0.0),
+            form::SUCCULENT => (0.35 + 0.3 * girth, 0.5 + 0.8 * g.height, 0.35 + 0.3 * girth, 0.53),
+            form::REED => (0.3 + 0.25 * bushy, 1.0 + 1.6 * g.height, 0.3 + 0.25 * bushy, 0.0),
+            form::FLOWER_STALK => (0.6 + 0.4 * girth, 0.6 + 1.0 * g.height, 0.6 + 0.4 * girth, 0.5),
+            form::ROSETTE => (0.6 + 0.5 * bushy, 0.35 + 0.35 * g.height, 0.6 + 0.5 * bushy, 0.0),
+            form::LILYPAD => (0.6 + 0.7 * girth, 1.0, 0.6 + 0.7 * girth, 0.0),
+            form::KELP => (0.4 + 0.3 * bushy, 1.4 + 2.2 * g.height, 0.4 + 0.3 * bushy, 0.0),
+            form::MUSHROOM => (0.5 + 0.4 * girth, 0.5 + 0.6 * g.height, 0.5 + 0.4 * girth, 0.25),
+            // HERB + fallback: the classic small sphere, stretched by the height gene
+            _ => (girth, girth * tall, girth, 0.35),
+        };
+        tf.scale = Vec3::new(sx, sy, sz);
+        tf.rotation = rot;
+        // a lily pad floats ON the water surface (~PLANET_R) rather than resting on the seabed below it.
+        if g.form == form::LILYPAD {
+            tf.translation = up * (crate::sphere::PLANET_R + 0.08);
         } else {
-            // sphere mesh radius 0.35; girth from mass, modest vertical stretch from the height gene
-            let girth = (0.2 + 0.1 * st.mass).clamp(0.2, 1.0);
-            let tall = 1.0 + 1.4 * g.height; // taller plants = harder for short creatures to reach
-            tf.scale = Vec3::new(girth, girth * tall, girth);
-            tf.rotation = rot;
-            tf.translation = base + up * (0.35 * girth * tall); // base rooted on the surface (no float)
+            tf.translation = base + up * (lift * sy); // mesh base rooted on the terrain (no float)
         }
     }
 }
@@ -286,6 +380,76 @@ pub fn grass_tuft_mesh() -> Mesh {
             base, base + 1, base + 3, base, base + 3, base + 2, // lower quad
             base + 2, base + 3, base + 4, // tip triangle
         ]);
+    }
+    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+    mesh.insert_indices(Indices::U32(indices));
+    mesh
+}
+
+// A clump of BROAD blades/fronds rooted at y=0, arcing up to a pointed tip (~unit height). One generator,
+// reused for the fern / reed / kelp / rosette forms (size_plants stretches each differently). Up-facing
+// normals catch the overhead sun; the material is double-sided so both faces show. Params: blades=count,
+// hw=base half-width, foot=clump footprint radius, curve=tip arc-over, lean=outward lean (rosette spreads
+// flat near the ground, reed stands straight up).
+pub fn frond_clump_mesh(blades: usize, hw: f32, foot: f32, curve: f32, lean: f32) -> Mesh {
+    let mut positions: Vec<[f32; 3]> = Vec::new();
+    let mut normals: Vec<[f32; 3]> = Vec::new();
+    let mut uvs: Vec<[f32; 2]> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+    for k in 0..blades {
+        let t = k as f32;
+        let a = t * 2.39996; // golden angle: even heading spread around the clump
+        let (sa, ca) = a.sin_cos();
+        let r = foot * (0.3 + 0.7 * ((t * 1.7).sin().abs())); // root offset from center (footprint)
+        let (ox, oz) = (r * ca, r * sa);
+        let h = 0.8 + 0.4 * ((t * 0.9).cos().abs()); // per-frond height variation
+        // profile: base -> mid -> pointed tip, leaning outward (lean) and arcing over (curve)
+        let prof = [
+            [-hw, 0.0, 0.0],
+            [hw, 0.0, 0.0],
+            [-hw * 0.6, 0.55 * h, lean * 0.5 + curve * 0.45],
+            [hw * 0.6, 0.55 * h, lean * 0.5 + curve * 0.45],
+            [0.0, h, lean + curve],
+        ];
+        let base = positions.len() as u32;
+        for (vi, p) in prof.iter().enumerate() {
+            let x = p[0] * ca + p[2] * sa + ox;
+            let z = -p[0] * sa + p[2] * ca + oz;
+            positions.push([x, p[1], z]);
+            normals.push([0.0, 1.0, 0.0]);
+            uvs.push([if vi % 2 == 0 { 0.0 } else { 1.0 }, p[1] / h.max(0.001)]);
+        }
+        indices.extend_from_slice(&[base, base + 1, base + 3, base, base + 3, base + 2, base + 2, base + 3, base + 4]);
+    }
+    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+    mesh.insert_indices(Indices::U32(indices));
+    mesh
+}
+
+// A flat round pad of unit radius on the XZ plane (y=0), normals up. Lily pad / flat mat. A small missing
+// wedge (notch) gives the classic lily-pad silhouette.
+pub fn disc_mesh(segs: usize) -> Mesh {
+    let mut positions: Vec<[f32; 3]> = vec![[0.0, 0.0, 0.0]];
+    let mut normals: Vec<[f32; 3]> = vec![[0.0, 1.0, 0.0]];
+    let mut uvs: Vec<[f32; 2]> = vec![[0.5, 0.5]];
+    let mut indices: Vec<u32> = Vec::new();
+    let notch = 0.5_f32; // radians of missing wedge (the lily-pad cleft)
+    let span = std::f32::consts::TAU - notch;
+    for i in 0..=segs {
+        let a = notch * 0.5 + span * (i as f32 / segs as f32);
+        let (s, c) = a.sin_cos();
+        positions.push([c, 0.0, s]);
+        normals.push([0.0, 1.0, 0.0]);
+        uvs.push([0.5 + 0.5 * c, 0.5 + 0.5 * s]);
+        if i < segs {
+            indices.extend_from_slice(&[0, (i + 1) as u32, (i + 2) as u32]);
+        }
     }
     let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
@@ -427,11 +591,12 @@ pub fn noon_offset(d: Vec3, tick: u32) -> i64 {
     (want - have).rem_euclid(crate::sphere::DAY_TICKS as i64)
 }
 
-// Rain streaks (immediate-mode gizmos, no entities). Wherever it is currently raining (cloud-driven,
-// sampled on a lat/lon grid), draw a scatter of drops that visibly FALL: each drop's height cycles down the
-// tick clock + wraps, so the streak animates instead of hanging static. Heavier rain (rain_at) = more drops,
-// longer streaks, brighter. Each streak is a gradient line: faded motion-tail up top, bright drop head at
-// the bottom. Deterministic (tick clock + hashed jitter, no per-frame RNG) -> reproducible.
+// Precip streaks (immediate-mode gizmos, no entities). Wherever it is currently raining (cloud-driven,
+// sampled on a lat/lon grid), draw a scatter that visibly FALLS: height cycles down the tick clock + wraps,
+// so it animates instead of hanging static. WARM cells -> blue rain streaks (gradient line: faded motion-tail
+// up top, bright drop head at the bottom; heavier rain = more drops, longer, brighter). COLD cells (below the
+// ice-cap onset) -> white snow: slower fall, lazy horizontal sway, soft dots, no tail. Deterministic (tick
+// clock + hashed jitter, no per-frame RNG) -> reproducible.
 fn rain_visuals(gen: Res<GenState>, mut gizmos: Gizmos) {
     use std::f32::consts::{FRAC_PI_2, PI, TAU};
     let (rows, cols) = (44, 88);
@@ -440,8 +605,12 @@ fn rain_visuals(gen: Res<GenState>, mut gizmos: Gizmos) {
     // back+forth instead of falling. FALL_SPEED*FALL_SPAN cycle = whole ticks, and the tick is wrapped to an
     // exact multiple of that cycle -> seamless wrap + no f32 precision drift on long runs.
     const FALL_SPAN: f32 = 9.0; // drop travel distance (surface .. top of streak)
-    const FALL_SPEED: f32 = 0.25; // units per tick
-    let t = (gen.tick % 180_000) as f32; // 180000 = 5000 * (FALL_SPAN/FALL_SPEED) -> phase identical across wrap
+    const FALL_SPEED: f32 = 0.25; // rain: units per tick
+    const SNOW_SPEED: f32 = 0.10; // snow drifts down ~2.5x slower than rain
+    const SNOW_TEMP: f32 = 0.34; // below this the same falling precip renders as snow (matches the ice-cap onset)
+    // 180000 = 5000*(FALL_SPAN/FALL_SPEED) = 2000*(FALL_SPAN/SNOW_SPEED): exact multiple of BOTH fall cycles,
+    // so rain AND snow phase identically across the wrap (seamless) with no f32 precision drift on long runs.
+    let t = (gen.tick % 180_000) as f32;
     for j in 0..rows {
         for i in 0..cols {
             let lat = -FRAC_PI_2 + PI * (j as f32 + 0.5) / rows as f32;
@@ -453,6 +622,28 @@ fn rain_visuals(gen: Res<GenState>, mut gizmos: Gizmos) {
             }
             let (east, north) = crate::sphere::tangent_frame(d);
             let base = crate::sphere::surface_pos(d, 0.0);
+            // cold cells get snow: white drifting flakes (slow fall + side-sway, soft dots, no motion tail);
+            // warmer cells keep the bright blue rain streaks. Threshold tracks the visible ice cap.
+            if crate::sphere::base_temperature(d) < SNOW_TEMP {
+                let flakes = 2 + (r * 5.0) as usize; // heavier snow = denser scatter (2..7)
+                for k in 0..flakes {
+                    let seed = ((j * cols + i) * 8 + k) as u32;
+                    let ph = hash01(seed ^ 0xC3) * TAU; // per-flake sway phase
+                    // slow descent on the shared seamless clock, plus a lazy back-and-forth horizontal drift
+                    let fall =
+                        FALL_SPAN - ((t * SNOW_SPEED + hash01(seed ^ 0xAA) * FALL_SPAN) % FALL_SPAN);
+                    let sway = east * (t * 0.04 + ph).sin() * 1.2 + north * (t * 0.03 + ph).cos() * 0.8;
+                    let foot = base
+                        + east * (hash01(seed) - 0.5) * 4.0
+                        + north * (hash01(seed ^ 0x55) - 0.5) * 4.0
+                        + sway;
+                    let p = foot + d * (fall + 0.5);
+                    let flake = Color::srgba(0.93, 0.95, 1.0, (0.40 + 0.40 * r).min(0.85));
+                    // a tiny soft dot: short segment along up (no fading tail -> reads as a flake, not a streak)
+                    gizmos.line(p, p + d * 0.25, flake);
+                }
+                continue;
+            }
             let drops = 1 + (r * 4.0) as usize; // heavier downpour scatters more drops (1..5)
             for k in 0..drops {
                 let seed = ((j * cols + i) * 8 + k) as u32;

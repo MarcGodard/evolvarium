@@ -201,7 +201,12 @@ pub fn is_ocean(d: Vec3) -> bool {
 /// point also warms locally (day side warmer) once a tick is supplied via `solar_warmth`.
 pub fn base_temperature(d: Vec3) -> f32 {
     let (_lon, lat) = dir_to_lonlat(d);
-    let by_lat = lat.cos(); // 1 at equator, 0 at poles
+    let c = lat.cos(); // 1 at equator, 0 at poles
+    // Extra polar chill: ramps in ONLY at high latitude (cos < ~0.55, i.e. |lat| > ~57 deg) so the temperate
+    // + tropical band stays as-warm (population unaffected), but the high latitudes drop faster -> a deeper,
+    // wider frozen zone. Quadratic: gentle at the edge, strongest at the pole.
+    let polar = ((0.55 - c) / 0.55).clamp(0.0, 1.0); // 0 below ~57 deg .. 1 at the pole
+    let by_lat = c - 0.45 * polar * polar;
     let lapse = elevation(d).max(0.0) / ELEV_MAX * 0.4; // high ground is colder (ocean depth: no lapse)
     (by_lat - lapse).clamp(0.0, 1.0)
 }
@@ -270,8 +275,8 @@ pub fn fuel(d: Vec3) -> f32 {
     }
     // frozen ground (the polar ice cap) carries no DRY fuel -> never burns. plant_habitability keeps a floor
     // at the poles (cold-niche flora stays alive), but snow-covered tundra does not carry fire, so gate fuel
-    // to 0 across the same temperature band the biome paints as ice (temp < 0.25). Keeps the ice cap a
-    // firebreak, separate from the habitability floor that feeds the cold niche.
+    // to 0 across the deep-cold core (temp < 0.25). The biome frosts a bit wider (temp < 0.34), so the frost
+    // edge (0.25..0.34) is tundra that still carries sparse fuel; the solid ice core stays a firebreak.
     let cold_ok = (base_temperature(d) / 0.25).clamp(0.0, 1.0); // 0 at the frozen pole .. 1 by the ice edge
     plant_habitability(d) * cold_ok // land only: ~0 on rock/desert/ice, high in lush temperate/tropical
 }
@@ -293,7 +298,13 @@ pub fn biome_color_with_moisture(d: Vec3, m: f32) -> [f32; 3] {
     let temp = base_temperature(d);
     if is_ocean(d) {
         let depth = ((SEA_LEVEL - elevation01(d)) / SEA_LEVEL).clamp(0.0, 1.0);
-        return lerp3([0.13, 0.40, 0.60], [0.02, 0.09, 0.28], depth);
+        let mut c = lerp3([0.13, 0.40, 0.60], [0.02, 0.09, 0.28], depth);
+        // sea ice: cold polar ocean freezes to pale pack ice, thickening toward the pole. The translucent
+        // ocean shell tints over this, so a pale seabed reads as icy pale-blue polar water.
+        if temp < 0.30 {
+            c = lerp3(c, [0.86, 0.90, 0.94], (0.30 - temp) / 0.30);
+        }
+        return c;
     }
     let elev = (elevation(d) / ELEV_MAX).clamp(0.0, 1.0);
     let mut c = lerp3([0.20, 0.55, 0.22], [0.48, 0.40, 0.26], elev);
@@ -306,8 +317,9 @@ pub fn biome_color_with_moisture(d: Vec3, m: f32) -> [f32; 3] {
     if m < 0.35 {
         c = lerp3(c, [0.80, 0.72, 0.45], (0.35 - m) / 0.35);
     }
-    if temp < 0.25 {
-        c = lerp3(c, [0.95, 0.96, 0.98], (0.25 - temp) / 0.25);
+    // polar ice cap: wider onset (temp < 0.34) + bright snow white. Frosts in at the edge, full ice at the pole.
+    if temp < 0.34 {
+        c = lerp3(c, [0.95, 0.96, 0.98], (0.34 - temp) / 0.34);
     }
     c
 }
