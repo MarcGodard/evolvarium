@@ -37,7 +37,11 @@ live in `config.rs`; the live conversion plan is `SPHERE-PLAN.md`.
 - [ ] Reproductive r/K cluster (breed-threshold / offspring-investment / fecundity / age-at-maturity as
       genes). HIGH value (drives life-history speciation) but touches reproduction balance -> do it when no
       long seed is mid-run, and re-tune carefully.
-- [ ] Armor (predation defense vs speed/upkeep) — adds a predator-prey dimension beyond bite.
+- [~] Armor (predation defense vs speed/upkeep) — TRIED + REVERTED (2026-06-21). Across 3 cost/protection
+      settings armor always pegged high (0.7-0.93): avoiding predation death outweighs the cost, so it's a
+      near-free defense (violates "everything a trade-off"), it suppresses the carnivore niche, and it
+      shifts the equilibrium up to ~100-117 (toward the cap). Revisit only with a fundamentally different
+      design (e.g. armor type-specific, or predation made a much larger/uncapped mortality source).
 - [ ] Smell sensor (long-range, no type info, cheap). NOTE: changes the NN input shape -> invalidates saved
       brains; gate it / migrate, and regenerate the seed.
 - [ ] Metabolic-efficiency on digestion, vision acuity, etc. (lower priority).
