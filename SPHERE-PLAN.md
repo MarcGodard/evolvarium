@@ -26,10 +26,17 @@ random storms. Earth-like proportions (stylized so moon stays framed).
       surface fire glow, all on the sphere. Plants/trees orient outward (grow from the surface); creatures
       stand on the surface (sim sets it). Camera starts in space over the homeland, faster fly speed.
       Builds clean; render binary starts without panic.
+- [x] **Thermal niche**: temp_pref gene + TEMP_COST (poles harsh) -> latitudinal spread (commit 80fcadc).
+- [x] **Lifespans**: senescence was off in continuous (creatures immortal) -> enabled; real life cycle (ed493cc).
+- [x] **Proportions + clouds**: trees shrunk (~2-4 units, no longer poke into clouds); clouds are now solid
+      translucent puff entities on a shell above the trees, not wireframe gizmos (ed493cc).
+- [x] **Navigation**: orbit camera (drag to rotate, scroll zoom) replaces free-fly (7ce9635).
 - [ ] **Cleanup**: the old flat `terrain.rs` helpers (build_mesh/height/moisture/rockiness/cloud_shade/
       WATER_LEVEL) + `config` storm consts are now unused (warnings) -> prune in a follow-up.
-- [ ] **Re-tune balance** if needed (already healthy ~70-90; revisit after more genes).
-- [ ] **Polish**: nicer clouds (shell mesh vs gizmos), star background, sun billboard, axial-tilt seasons.
+- [ ] **More genes** (genetics review): reproductive r/K cluster, lifespan/senescence gene, metabolic
+      efficiency, etc. Add as evolvable axes.
+- [ ] **Bite arms race**: bite still pins ~1.0 (cosmetic now, pop stable) -- could pull to an interior optimum.
+- [ ] **Polish**: star background, sun billboard, axial-tilt seasons, nicer creature look.
 
 ## Sim conversion checklist (next ticks)
 
