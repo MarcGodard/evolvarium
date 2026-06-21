@@ -746,46 +746,48 @@ pub fn live_step(
         }
         let pos = ct.translation;
 
-        // nearest non-eaten food (index into foods)
+        // SINGLE pass over foods (perf): compute the global nearest (for approach/eat) AND each evolvable
+        // sensor's nearest-food-in-cone together, so atan2 runs once per in-range food instead of once per
+        // food per sensor. Bit-identical to the old separate passes (same ascending-index order +
+        // strict-< tie-breaking; nearest scans all foods, sensors only those within range).
+        let n_s = genome.sensors.len();
+        let max_range = genome.sensors.iter().map(|s| s.range).fold(0.0f32, f32::max);
         let mut best: Option<(usize, f32)> = None;
+        let mut sd = vec![f32::INFINITY; n_s]; // nearest dist per sensor
+        let mut skind = vec![0u8; n_s]; // food kind that nearest sensor-food is
         for (i, f) in foods.iter().enumerate() {
             if eaten.contains(&f.0) {
                 continue;
             }
-            let d2 = pos.distance_squared(f.1);
+            let to = f.1 - pos;
+            let d2 = to.length_squared();
             if best.map_or(true, |(_, bd2)| d2 < bd2) {
-                best = Some((i, d2));
+                best = Some((i, d2)); // global nearest considers ALL foods
+            }
+            let dist = d2.sqrt();
+            if dist > max_range {
+                continue; // no sensor can see it -> skip the atan2 + cone tests
+            }
+            let bearing = wrap_angle(to.x.atan2(to.z) - head.0);
+            for (si, s) in genome.sensors.iter().enumerate() {
+                if dist <= s.range && dist < sd[si] && wrap_angle(bearing - s.angle).abs() <= CONE_HALF {
+                    sd[si] = dist;
+                    skind[si] = f.2.kind;
+                }
             }
         }
         let cur_dist = best.map(|(_, d2)| d2.sqrt()).unwrap_or(f32::INFINITY);
 
-        // build inputs from the EVOLVABLE sensors: each is a directional eye (angle + range) that
-        // reports nearest food in its cone. The GA decides how many sensors and where they point.
-        let mut input: Vec<f32> = Vec::with_capacity(genome.sensors.len() * SIG_PER_SENSOR + GLOBAL_INPUTS);
-        for s in &genome.sensors {
-            let mut sd = f32::INFINITY;
-            let mut skind = 0u8;
-            for f in &foods {
-                if eaten.contains(&f.0) {
-                    continue;
-                }
-                let to = f.1 - pos;
-                let dist = to.length();
-                if dist > s.range {
-                    continue;
-                }
-                let bearing = wrap_angle(to.x.atan2(to.z) - head.0);
-                if wrap_angle(bearing - s.angle).abs() <= CONE_HALF && dist < sd {
-                    sd = dist;
-                    skind = f.2.kind;
-                }
-            }
-            if sd.is_finite() {
-                input.push(1.0 / (1.0 + sd)); // inv-distance in this sensor's cone
+        // build inputs from the EVOLVABLE sensors: each is a directional eye that reports nearest food
+        // in its cone (+ what type). The GA decides how many sensors + where they point.
+        let mut input: Vec<f32> = Vec::with_capacity(n_s * SIG_PER_SENSOR + GLOBAL_INPUTS);
+        for si in 0..n_s {
+            if sd[si].is_finite() {
+                input.push(1.0 / (1.0 + sd[si])); // inv-distance in this sensor's cone
                 let sig = if gen.diet {
-                    diet.expr[skind as usize] // readiness to digest what this eye sees
+                    diet.expr[skind[si] as usize] // readiness to digest what this eye sees
                 } else {
-                    (skind as f32 / (ntypes.max(2) - 1) as f32) * 2.0 - 1.0 // food type
+                    (skind[si] as f32 / (ntypes.max(2) - 1) as f32) * 2.0 - 1.0 // food type
                 };
                 input.push(sig);
             } else {
