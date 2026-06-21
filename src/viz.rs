@@ -184,7 +184,7 @@ fn add_plant_visuals(
                 // conifer cones are open shells: draw double-sided so the hollow shows the dark-green inner
                 // face (no see-through to the trunk/sky), and the spine cone fills the core.
                 let m = materials.add(StandardMaterial {
-                    base_color: Color::srgb(0.06, 0.30, 0.18),
+                    base_color: Color::srgb(0.10, 0.40, 0.24), // ~10% lighter forest green (was 0.06,0.30,0.18)
                     perceptual_roughness: 0.9,
                     double_sided: true,
                     cull_mode: None,
