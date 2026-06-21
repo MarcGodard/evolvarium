@@ -16,6 +16,7 @@ mod persist;
 mod plant;
 mod rng;
 mod sim;
+mod snapshot;
 mod sphere;
 mod terrain;
 mod viz;
@@ -54,6 +55,14 @@ fn main() {
     if !headless && load.is_none() && !args.iter().any(|a| a == "--no-load") && std::path::Path::new(DEFAULT_SEED).exists() {
         load = Some(DEFAULT_SEED.to_string());
     }
+    // --shots[=PREFIX]: headless CPU snapshot of the planet (several views -> PNG) then exit. Auto-loads
+    // the showcase seed (a living world) if no --load given. --shot-tick=N picks when to capture.
+    let shots = args.iter().any(|a| a == "--shots" || a.starts_with("--shots="));
+    let shot_prefix = args.iter().find_map(|a| a.strip_prefix("--shots=").map(String::from)).unwrap_or_else(|| "shot".into());
+    let shot_tick = args.iter().find_map(|a| a.strip_prefix("--shot-tick=").and_then(|s| s.parse::<u32>().ok())).unwrap_or(3000);
+    if shots && headless && load.is_none() && std::path::Path::new(DEFAULT_SEED).exists() {
+        load = Some(DEFAULT_SEED.to_string());
+    }
 
     let mut app = App::new();
     app.insert_resource(rng::Rng::seed(seed));
@@ -76,6 +85,8 @@ fn main() {
         load,
     });
 
+    app.insert_resource(snapshot::ShotCfg { enabled: shots, at_tick: shot_tick, prefix: shot_prefix });
+
     if headless {
         // No window/render. Spin flat-out; each Update = one constant-dt sim step (fast-forward).
         // LogPlugin separately (MinimalPlugins omits it).
@@ -84,7 +95,7 @@ fn main() {
             .add_systems(Startup, sim::spawn_world_headless)
             .add_systems(
                 Update,
-                (sim::weather_step, sim::fire_step, sim::live_step, sim::predation_step, sim::plant_step, sim::rot_step, sim::generation_step).chain(),
+                (snapshot::snapshot_capture, sim::weather_step, sim::fire_step, sim::live_step, sim::predation_step, sim::plant_step, sim::rot_step, sim::generation_step).chain(),
             );
     } else {
         // Real-time visuals: step in FixedUpdate at the sim rate so sim-time = wall-time.

@@ -10,10 +10,20 @@ random storms. Earth-like proportions (stylized so moon stays framed).
 - [x] **Geometry foundation** (`src/sphere.rs`, tested): lat/lon <-> 3D, tangent frame, great-circle `step`,
       `surface_dist`, seamless 3D-fBm terrain (`elevation`, `is_ocean`), `base_temperature` (cold poles +
       lapse rate), `moisture` (latitude belts + coastal), `sun_dir`/`moon_dir`/`daylight_at`. 5 unit tests green.
-- [ ] **Sim conversion** (`src/sim.rs`): the big one.
-- [ ] **Render** (`src/viz.rs`, `src/terrain.rs`, `src/camera.rs`).
-- [ ] **Clouds + cloud-rain** (`src/sphere.rs` cloud field + `src/sim.rs` weather).
-- [ ] **Re-tune balance** on the new geometry (carrying capacity changes).
+- [x] **Sim conversion** (`src/sim.rs`): DONE. Movement = great-circle (`sphere::step`); localized homeland
+      spawn (`homeland_pos`, all initial life in one cap, spreads via `disperse_pos`); terrain/moisture/
+      rockiness/habitability sampled on the sphere; positional day/night (`daylight_at` per creature+plant);
+      grids (soil/water/fire/food) indexed by lon/lat (`grid_uv`, `cell_center` -> Vec3). Headless STABLE:
+      pop ~70-90, energy ~35-42, no crash to the floor (the flat-world balance bug is gone on the sphere).
+- [x] **Clouds + cloud-rain** (`sphere::cloud_cover`/`rain_at` + `weather_step`): rain is now local +
+      cloud-driven (no global storms), ~10% of thick cloud is rain-bearing.
+- [x] **Snapshot system** (`src/snapshot.rs`, `--shots`): headless CPU ray-tracer -> PNG (globe/homeland/
+      farside/pole views). No GPU needed. Lets the world be inspected offline. VERIFIED (planet + oceans +
+      localized life + herds visible).
+- [ ] **Live render** (`src/main.rs` setup_scene, `src/viz.rs`, `src/camera.rs`): convert `cargo run` to a
+      globe mesh + ocean sphere + orbiting sun/moon + cloud shell + orbit camera. Until then the live window
+      still draws the OLD flat terrain (creatures now orbit it) -- next step. (Snapshots already show the globe.)
+- [ ] **Re-tune balance** if needed (already healthy; revisit after live render + more genes).
 
 ## Sim conversion checklist (next ticks)
 

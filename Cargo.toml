@@ -13,6 +13,9 @@ bevy = "0.18"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# Headless CPU snapshot renderer (--shots): ray-trace the planet to PNG, no GPU needed. PNG encode only.
+image = { version = "0.25", default-features = false, features = ["png"] }
+
 # Bevy build-speed profile (deps optimized, our crate fast to recompile).
 [profile.dev]
 opt-level = 1

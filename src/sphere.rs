@@ -172,6 +172,43 @@ pub fn moisture(d: Vec3) -> f32 {
     (0.45 * coastal + 0.35 * patch + 0.20 * belt).clamp(0.0, 1.0)
 }
 
+/// World position sitting `offset` above the terrain surface at direction `d` (d need not be unit).
+pub fn surface_pos(d: Vec3, offset: f32) -> Vec3 {
+    let d = d.normalize_or_zero();
+    d * (PLANET_R + elevation(d) + offset)
+}
+
+/// Rockiness 0..1 at `d`: 0 on low/mid ground, ramps to 1 on the highest peaks (hard to cross, few plants).
+pub fn rockiness(d: Vec3) -> f32 {
+    const ROCK_START: f32 = 0.72;
+    ((elevation01(d) - ROCK_START) / (1.0 - ROCK_START)).clamp(0.0, 1.0)
+}
+
+/// Plant habitability 0..1 at `d`: 0 in ocean, reduced on rock, in drought, and in the cold (poles). Land
+/// flora thrives in warm, moist, low ground -> plants + the creatures that eat them cluster temperate/tropical.
+pub fn plant_habitability(d: Vec3) -> f32 {
+    if is_ocean(d) {
+        return 0.0;
+    }
+    let rock_ok = 1.0 - 0.9 * rockiness(d);
+    let moist_ok = (moisture(d) / 0.35).clamp(0.0, 1.0);
+    let warm_ok = 0.25 + 0.75 * base_temperature(d); // cold poles are sparse, not barren
+    (rock_ok * moist_ok * warm_ok).clamp(0.0, 1.0)
+}
+
+/// Sample a random surface direction inside a "homeland" cap: within `cap_rad` radians of `center`.
+/// Used to start the population LOCALIZED in one region (it then spreads). cap_rad = PI = whole globe.
+pub fn random_dir_in_cap(rng: &mut crate::rng::Rng, center: Vec3, cap_rad: f32) -> Vec3 {
+    let center = center.normalize_or_zero();
+    // uniform in a spherical cap: cos(theta) in [cos(cap_rad), 1], azimuth uniform
+    let cos_min = cap_rad.cos();
+    let cos_t = cos_min + (1.0 - cos_min) * rng.f32();
+    let sin_t = (1.0 - cos_t * cos_t).max(0.0).sqrt();
+    let phi = rng.f32() * std::f32::consts::TAU;
+    let (east, north) = tangent_frame(center);
+    (center * cos_t + (east * phi.cos() + north * phi.sin()) * sin_t).normalize()
+}
+
 // ---------- sun + moon ----------
 
 /// Sun direction (unit) at `tick`: the planet spins about its tilted axis, so the sun sweeps longitudes
@@ -219,10 +256,22 @@ pub fn cloud_cover(d: Vec3, tick: u32) -> f32 {
     ((n - CLOUD_COVER) / (1.0 - CLOUD_COVER)).clamp(0.0, 1.0)
 }
 
-/// Does it rain at `d` this tick? Rain comes ONLY from thick clouds: cover must exceed CLOUD_RAIN_MIN and a
-/// per-cell roll must land under RAIN_CHANCE (~10%). `roll` is the caller's per-cell uniform random in 0..1.
-pub fn rains_at(d: Vec3, tick: u32, roll: f32) -> bool {
-    cloud_cover(d, tick) > CLOUD_RAIN_MIN && roll < RAIN_CHANCE
+/// Rain intensity 0..1 at `d`,`tick`. Rain comes ONLY from clouds: it can rain solely where cloud cover is
+/// thick (> CLOUD_RAIN_MIN), and within that only ~RAIN_CHANCE (10%) of the area is rain-bearing (a separate
+/// slow-drifting mask) -> rain falls in scattered, moving cells under the heaviest clouds, not everywhere.
+pub fn rain_at(d: Vec3, tick: u32) -> f32 {
+    let cover = cloud_cover(d, tick);
+    if cover <= CLOUD_RAIN_MIN {
+        return 0.0;
+    }
+    let a = tick as f32 * CLOUD_SPEED * 0.7; // rain bands drift a touch slower than the clouds
+    let (s, c) = (a.sin(), a.cos());
+    let rot = Vec3::new(c * d.x - s * d.z, d.y, s * d.x + c * d.z);
+    let mask = fbm3(rot * (CLOUD_FREQ * 1.7) + Vec3::splat(71.2));
+    if mask < 1.0 - RAIN_CHANCE {
+        return 0.0; // cloudy but not raining here
+    }
+    cover // rain as heavy as the cloud is thick
 }
 
 #[cfg(test)]

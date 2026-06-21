@@ -11,9 +11,17 @@ use crate::rng::Rng;
 // Tuning constants live in config.rs; re-exported so existing `sim::FOO` refs still resolve.
 pub use crate::config::*;
 
-// Global daylight: 0 at midnight .. 1 at noon, cycling on the tick clock.
+// Global daylight: 0 at midnight .. 1 at noon, cycling on the tick clock. (Spherical world uses the
+// POSITIONAL sphere::daylight_at per creature/plant; this global form remains for whole-world stats/logs.)
 pub fn daylight(tick: u32) -> f32 {
     0.5 - 0.5 * (tick as f32 / DAY_TICKS as f32 * std::f32::consts::TAU).cos()
+}
+
+// Map a 3D sphere position to pseudo-planar grid coords in [-WORLD_HALF, WORLD_HALF] (longitude -> u,
+// latitude -> v) so the existing 2D fertility/water/fire/food grids can index the globe by lon/lat.
+fn grid_uv(pos: Vec3) -> (f32, f32) {
+    let (lon, lat) = crate::sphere::dir_to_lonlat(pos.normalize_or_zero());
+    (lon / std::f32::consts::PI * WORLD_HALF, lat / std::f32::consts::FRAC_PI_2 * WORLD_HALF)
 }
 
 #[derive(Resource)]
@@ -49,17 +57,18 @@ impl Soil {
     pub fn new() -> Self {
         Soil { cell: vec![0.0; SOIL_RES * SOIL_RES] }
     }
-    fn index(x: f32, z: f32) -> usize {
+    fn index(pos: Vec3) -> usize {
+        let (u, v) = grid_uv(pos);
         let to_cell = |w: f32| {
             (((w + WORLD_HALF) / (2.0 * WORLD_HALF)) * SOIL_RES as f32).clamp(0.0, (SOIL_RES - 1) as f32) as usize
         };
-        to_cell(z) * SOIL_RES + to_cell(x)
+        to_cell(v) * SOIL_RES + to_cell(u)
     }
-    fn add(&mut self, x: f32, z: f32, amt: f32) {
-        self.cell[Self::index(x, z)] += amt;
+    fn add(&mut self, pos: Vec3, amt: f32) {
+        self.cell[Self::index(pos)] += amt;
     }
-    fn get(&self, x: f32, z: f32) -> f32 {
-        self.cell[Self::index(x, z)]
+    fn get(&self, pos: Vec3) -> f32 {
+        self.cell[Self::index(pos)]
     }
     fn decay(&mut self) {
         for c in &mut self.cell {
@@ -89,11 +98,14 @@ pub struct GroundWater {
     pub cell: Vec<f32>,
 }
 
-// World coord of a grid cell's center (inverse of Soil::index): lets weather sample terrain per cell.
-fn cell_center(c: usize) -> (f32, f32) {
+// Surface position of a grid cell's center (inverse of Soil::index): lets weather sample terrain per cell.
+fn cell_center(c: usize) -> Vec3 {
     let (cx, cz) = (c % SOIL_RES, c / SOIL_RES);
-    let to_world = |k: usize| ((k as f32 + 0.5) / SOIL_RES as f32) * 2.0 * WORLD_HALF - WORLD_HALF;
-    (to_world(cx), to_world(cz))
+    let to_uv = |k: usize| ((k as f32 + 0.5) / SOIL_RES as f32) * 2.0 * WORLD_HALF - WORLD_HALF;
+    let (u, v) = (to_uv(cx), to_uv(cz));
+    let lon = u / WORLD_HALF * std::f32::consts::PI;
+    let lat = v / WORLD_HALF * std::f32::consts::FRAC_PI_2;
+    crate::sphere::lonlat_to_pos(lon, lat, 0.0) // dir * PLANET_R; callers sample fields by direction
 }
 
 // Food spatial grid (perf): bin foods into FGRID^2 cells so a creature scans only nearby cells instead
@@ -104,19 +116,25 @@ const NEAR_QUERY: f32 = 24.0;
 fn fcell(w: f32) -> usize {
     (((w + WORLD_HALF) / (2.0 * WORLD_HALF)) * FGRID as f32).clamp(0.0, (FGRID - 1) as f32) as usize
 }
+// Food-grid cell (lon, lat bins) for a 3D sphere position.
+fn fcell_uv(pos: Vec3) -> (usize, usize) {
+    let (u, v) = grid_uv(pos);
+    (fcell(u), fcell(v))
+}
 
 impl GroundWater {
     pub fn new() -> Self {
         GroundWater { cell: vec![0.0; SOIL_RES * SOIL_RES] }
     }
-    fn index(x: f32, z: f32) -> usize {
+    fn index(pos: Vec3) -> usize {
+        let (u, v) = grid_uv(pos);
         let to_cell = |w: f32| {
             (((w + WORLD_HALF) / (2.0 * WORLD_HALF)) * SOIL_RES as f32).clamp(0.0, (SOIL_RES - 1) as f32) as usize
         };
-        to_cell(z) * SOIL_RES + to_cell(x)
+        to_cell(v) * SOIL_RES + to_cell(u)
     }
-    pub fn get(&self, x: f32, z: f32) -> f32 {
-        self.cell[Self::index(x, z)]
+    pub fn get(&self, pos: Vec3) -> f32 {
+        self.cell[Self::index(pos)]
     }
     pub fn avg(&self) -> f32 {
         self.cell.iter().sum::<f32>() / self.cell.len() as f32
@@ -126,27 +144,28 @@ impl GroundWater {
 // --- weather (rain cycle): advance rainfall + update the ground-water grid (sun dries, rain refills) ---
 pub fn weather_step(
     gen: Res<GenState>,
-    mut rng: ResMut<Rng>,
     mut weather: ResMut<Weather>,
     mut gw: ResMut<GroundWater>,
 ) {
     let dt = DT;
-    let light = daylight(gen.tick);
-    // storm onset: occasionally a downpour begins (random peak intensity -> some storms are heavy);
-    // rain decays between storms so the land swings wet -> dry over time.
-    if rng.f32() < P_STORM {
-        weather.rain = (weather.rain + rng.range(0.4, 1.0)).min(1.0);
-    }
-    weather.rain = (weather.rain - RAIN_DECAY * dt).max(0.0);
-    let rain = weather.rain;
+    let tick = gen.tick;
+    // Rain is now LOCAL + cloud-driven: each cell wets only when a rain-bearing cloud drifts over it (sun
+    // dries it the rest of the time). No global storms. weather.rain = the peak rain anywhere (for lightning
+    // gating + logs); local rain per cell drives the ground water + viz.
+    let mut peak = 0.0f32;
     for c in 0..gw.cell.len() {
-        let (cx, cz) = cell_center(c);
-        let absorb = 1.0 - crate::terrain::rockiness(cx, cz); // rocky sheds runoff, grassy soaks it up
+        let cpos = cell_center(c);
+        let d = cpos.normalize_or_zero();
+        let rain = crate::sphere::rain_at(d, tick);
+        let light = crate::sphere::daylight_at(d, tick);
+        let absorb = 1.0 - crate::sphere::rockiness(cpos); // rocky sheds runoff, grassy soaks it up
         let w = gw.cell[c];
         let add = rain * absorb * RAIN_RATE * dt;
         let evap = EVAP * (0.2 + 0.8 * light) * w * dt; // sun dries the ground; fastest at noon
         gw.cell[c] = (w + add - evap).clamp(0.0, 1.0);
+        peak = peak.max(rain);
     }
+    weather.rain = peak;
 }
 
 // Fire grid (lightning-ignited wildfires): per-cell burn intensity 0..1. Shares the soil/ground-water
@@ -160,8 +179,8 @@ impl Fire {
     pub fn new() -> Self {
         Fire { cell: vec![0.0; SOIL_RES * SOIL_RES] }
     }
-    pub fn get(&self, x: f32, z: f32) -> f32 {
-        self.cell[GroundWater::index(x, z)]
+    pub fn get(&self, pos: Vec3) -> f32 {
+        self.cell[GroundWater::index(pos)]
     }
     pub fn avg(&self) -> f32 {
         self.cell.iter().sum::<f32>() / self.cell.len() as f32
@@ -188,8 +207,7 @@ pub fn fire_step(
         let mut driest = f32::INFINITY;
         for _ in 0..12 {
             let c = (rng.f32() * (n * n) as f32) as usize % (n * n);
-            let (cx, cz) = cell_center(c);
-            let w = gw.get(cx, cz);
+            let w = gw.get(cell_center(c));
             if w < driest {
                 driest = w;
                 best = c;
@@ -208,10 +226,10 @@ pub fn fire_step(
         if f <= 0.02 {
             continue;
         }
-        let (cx, cz) = cell_center(c);
-        let wet = gw.get(cx, cz);
+        let cpos = cell_center(c);
+        let wet = gw.get(cpos);
         fire.cell[c] = (f - (FIRE_DECAY + FIRE_DOUSE * wet) * dt).max(0.0); // decay + rain douses
-        soil.add(cx, cz, FIRE_ASH * f * dt); // ash enriches the burned ground
+        soil.add(cpos, FIRE_ASH * f * dt); // ash enriches the burned ground
         // spread to the 4 orthogonal neighbours that are dry enough to catch
         let (cxi, czi) = (c % n, c / n);
         let mut nbrs = [usize::MAX; 4];
@@ -221,18 +239,50 @@ pub fn fire_step(
         if czi > 0 { nbrs[k] = (czi - 1) * n + cxi; k += 1; }
         if czi < n - 1 { nbrs[k] = (czi + 1) * n + cxi; k += 1; }
         for &ni in &nbrs[..k] {
-            let (wx, wz) = cell_center(ni);
-            if gw.get(wx, wz) < FIRE_WET_MAX {
+            if gw.get(cell_center(ni)) < FIRE_WET_MAX {
                 fire.cell[ni] = (fire.cell[ni] + FIRE_SPREAD * f * dt).min(1.0);
             }
         }
     }
 }
 
-fn rand_pos(rng: &mut Rng, y: f32) -> Vec3 {
-    let x = rng.range(-WORLD_HALF, WORLD_HALF);
-    let z = rng.range(-WORLD_HALF, WORLD_HALF);
-    Vec3::new(x, y + crate::terrain::height(x, z), z) // sit on the terrain surface (P3)
+// The founding homeland: all initial life starts within HOMELAND_CAP radians of this direction, then
+// spreads across the globe by reproduction/dispersal. (User: start them all in one area.)
+pub fn homeland_center() -> Vec3 {
+    Vec3::new(1.0, 0.35, 0.25).normalize()
+}
+pub const HOMELAND_CAP: f32 = 0.45; // ~26 deg cap: a continent-sized starting region
+
+// A random LAND surface position in the founding homeland, sitting `offset` above the terrain (initial spawn).
+fn homeland_pos(rng: &mut Rng, offset: f32) -> Vec3 {
+    let mut d = crate::sphere::random_dir_in_cap(rng, homeland_center(), HOMELAND_CAP);
+    for _ in 0..8 {
+        if !crate::sphere::is_ocean(d) {
+            break;
+        }
+        d = crate::sphere::random_dir_in_cap(rng, homeland_center(), HOMELAND_CAP);
+    }
+    crate::sphere::surface_pos(d, offset)
+}
+
+// Offspring position: a great-circle hop of up to `spread` from the parent in a random direction, placed
+// on the surface. Replaces the old flat x,z box offset; this is how plants/trees/creatures spread the globe.
+fn disperse_pos(rng: &mut Rng, parent: Vec3, spread: f32, offset: f32) -> Vec3 {
+    let heading = rng.range(-std::f32::consts::PI, std::f32::consts::PI);
+    let (d, _h) = crate::sphere::step(parent, heading, rng.range(0.0, spread.max(0.001)));
+    crate::sphere::surface_pos(d, offset)
+}
+
+// A random LAND surface position anywhere on the globe, sitting `offset` above the terrain (dispersal/reseed).
+fn rand_pos(rng: &mut Rng, offset: f32) -> Vec3 {
+    let mut d = crate::sphere::random_dir_in_cap(rng, Vec3::Y, std::f32::consts::PI);
+    for _ in 0..8 {
+        if !crate::sphere::is_ocean(d) {
+            break;
+        }
+        d = crate::sphere::random_dir_in_cap(rng, Vec3::Y, std::f32::consts::PI);
+    }
+    crate::sphere::surface_pos(d, offset)
 }
 
 fn diet_state(g: &Genome) -> DietState {
@@ -241,7 +291,7 @@ fn diet_state(g: &Genome) -> DietState {
 
 // Spawn carrion (meat) at a spot: a Food entity with the Rot clock. Used by death + predation kills.
 fn spawn_carrion(commands: &mut Commands, pos: Vec3, mass: f32) {
-    let p = Vec3::new(pos.x, FOOD_Y + crate::terrain::height(pos.x, pos.z), pos.z);
+    let p = crate::sphere::surface_pos(pos, FOOD_Y); // carrion lies on the surface at the death spot
     commands.spawn((
         Food,
         PlantState { mass, age: 0 },
@@ -339,7 +389,7 @@ pub fn spawn_world_headless(mut commands: Commands, mut rng: ResMut<Rng>, mut ge
         gen.generation = WARMUP_GENS;
     }
     for g in genomes {
-        let p = rand_pos(&mut rng, CREATURE_Y);
+        let p = homeland_pos(&mut rng, CREATURE_Y); // founding pop starts in one region, then spreads
         let h = rng.range(-std::f32::consts::PI, std::f32::consts::PI);
         let brain = Brain { net: g.net.clone(), prev_dist: f32::INFINITY };
         let mut diet = diet_state(&g);
@@ -364,13 +414,13 @@ pub fn spawn_world_headless(mut commands: Commands, mut rng: ResMut<Rng>, mut ge
     match &snap {
         Some(s) if !s.plants.is_empty() => {
             for sp in &s.plants {
-                let p = rand_pos(&mut rng, FOOD_Y);
+                let p = homeland_pos(&mut rng, FOOD_Y);
                 spawn_plant(&mut commands, sp.g.clone(), sp.mass, p);
             }
         }
         _ => {
             for _ in 0..FOOD {
-                let p = rand_pos(&mut rng, FOOD_Y);
+                let p = homeland_pos(&mut rng, FOOD_Y);
                 let pg = PlantGenome::random(&mut rng, ntypes);
                 spawn_plant(&mut commands, pg, rng.range(0.3, 1.4) * PLANT_START_MASS, p); // varied mass desyncs the food supply
             }
@@ -379,15 +429,15 @@ pub fn spawn_world_headless(mut commands: Commands, mut rng: ResMut<Rng>, mut ge
     spawn_trees(&mut commands, &mut rng);
 }
 
-// Scatter the initial trees (half tall fruit trees, half uneatable evergreens) on habitable land.
+// Scatter the initial trees (half tall fruit trees, half uneatable evergreens) on habitable homeland.
 fn spawn_trees(commands: &mut Commands, rng: &mut Rng) {
     for i in 0..N_TREES {
-        let mut p = rand_pos(rng, FOOD_Y);
+        let mut p = homeland_pos(rng, FOOD_Y);
         for _ in 0..6 {
-            if crate::terrain::plant_habitability(p.x, p.z, 0.0) > 0.4 {
+            if crate::sphere::plant_habitability(p.normalize_or_zero()) > 0.4 {
                 break;
             }
-            p = rand_pos(rng, FOOD_Y);
+            p = homeland_pos(rng, FOOD_Y);
         }
         // alternate fruit tree / evergreen; each gets a fresh evolvable genome (evolves from here)
         let g = tree_genome(rng);
@@ -425,7 +475,7 @@ pub fn spawn_world_render(
         gen.generation = WARMUP_GENS;
     }
     for g in genomes {
-        let p = rand_pos(&mut rng, CREATURE_Y);
+        let p = homeland_pos(&mut rng, CREATURE_Y); // founding pop starts in one region, then spreads
         let h = rng.range(-std::f32::consts::PI, std::f32::consts::PI);
         let brain = Brain { net: g.net.clone(), prev_dist: f32::INFINITY };
         let mut diet = diet_state(&g);
@@ -454,13 +504,13 @@ pub fn spawn_world_render(
     match &snap {
         Some(s) if !s.plants.is_empty() => {
             for sp in &s.plants {
-                let p = rand_pos(&mut rng, FOOD_Y);
+                let p = homeland_pos(&mut rng, FOOD_Y);
                 spawn_plant(&mut commands, sp.g.clone(), sp.mass, p);
             }
         }
         _ => {
             for _ in 0..FOOD {
-                let p = rand_pos(&mut rng, FOOD_Y);
+                let p = homeland_pos(&mut rng, FOOD_Y);
                 let pg = PlantGenome::random(&mut rng, ntypes);
                 spawn_plant(&mut commands, pg, rng.range(0.3, 1.4) * PLANT_START_MASS, p); // varied mass desyncs the food supply
             }
@@ -483,7 +533,6 @@ pub fn plant_step(
     soil.decay(); // fertility leaches / is taken up over time
     // season drifts on the global tick clock (advances in both modes; generation is frozen in continuous)
     let season = (gen.tick as f32 / GEN_TICKS as f32 * SEASON_FREQ).sin(); // -1 dry .. +1 wet
-    let light = daylight(gen.tick); // 0 night .. 1 noon: plants grow best near their light_pref
     let mut plant_count = q.iter().filter(|(.., t)| t.is_none()).count();
     let tree_count = q.iter().filter(|(.., t)| t.is_some()).count();
     let tree_positions: Vec<Vec3> = q.iter().filter_map(|(_, _, _, tf, t)| t.map(|_| tf.translation)).collect();
@@ -491,18 +540,20 @@ pub fn plant_step(
     let mut tree_births: Vec<(Vec3, bool, PlantGenome)> = Vec::new(); // (pos, edible, child genome)
     let mut detritus: Vec<(PlantGenome, f32, Vec3)> = Vec::new(); // moisture-killed plants -> poison
     for (e, mut st, g, tf, tree) in &mut q {
-        let (px, pz) = (tf.translation.x, tf.translation.z);
+        let ppos = tf.translation;
+        let pdir = ppos.normalize_or_zero();
         // wildfire: a plant/tree in a strongly-burning cell burns up (despawn). fire_step already laid
         // down ash fertility here, so burned ground regrows richer.
-        if fire.get(px, pz) > FIRE_KILL {
+        if fire.get(ppos) > FIRE_KILL {
             commands.entity(e).despawn();
             if tree.is_none() {
                 plant_count = plant_count.saturating_sub(1);
             }
             continue;
         }
-        let fert = soil.get(px, pz);
-        let water = gw.get(px, pz); // dynamic rain-fed ground water at this spot
+        let light = crate::sphere::daylight_at(pdir, gen.tick); // positional day/night at this plant
+        let fert = soil.get(ppos);
+        let water = gw.get(ppos); // dynamic rain-fed ground water at this spot
         // fertility AND rain-watered ground both speed growth (rain visibly greens the land)
         let boost = (1.0 + FERT_GROWTH * (fert / FERT_CAP).min(1.0)) * (1.0 + WET_GROWTH * water);
         // light factor: growth peaks when daylight matches this plant's light_pref (sun vs shade species).
@@ -534,11 +585,7 @@ pub fn plant_step(
             let disperse = mature && tree.edible && grazed && rng.f32() < P_TREE_EAT_DISPERSE; // seed carried off
             if (ambient || disperse) && tree_count + tree_births.len() < TREE_CAP {
                 let spread = if disperse { g.spread * TREE_EAT_SPREAD_MULT } else { g.spread };
-                let off = Vec3::new(rng.range(-spread, spread), 0.0, rng.range(-spread, spread));
-                let mut pos = tf.translation + off;
-                pos.x = pos.x.clamp(-WORLD_HALF, WORLD_HALF);
-                pos.z = pos.z.clamp(-WORLD_HALF, WORLD_HALF);
-                pos.y = FOOD_Y + crate::terrain::height(pos.x, pos.z);
+                let pos = disperse_pos(&mut rng, ppos, spread, FOOD_Y);
                 // child inherits the parent's full tree genome, mutated (trees evolve like plants)
                 let mut child = g.clone();
                 child.mutate_tree(&mut rng);
@@ -554,7 +601,7 @@ pub fn plant_step(
             st.mass = (st.mass - bite).max(0.0);
             if st.mass < PLANT_MIN_MASS {
                 commands.entity(e).despawn();
-                soil.add(px, pz, DEATH_FERT * 0.3); // a consumed plant returns some nutrients to the ground
+                soil.add(ppos, DEATH_FERT * 0.3); // a consumed plant returns some nutrients to the ground
                 plant_count = plant_count.saturating_sub(1);
                 continue;
             }
@@ -562,15 +609,15 @@ pub fn plant_step(
         // mortality from moisture mismatch OR a poor site (deep water / desert). Effective moisture =
         // static terrain moisture + rain-fed ground water -> wet-liking plants thrive after a downpour,
         // get stressed in drought (temporal selection on `wet`).
-        let m = (crate::terrain::moisture(px, pz, season) + WET_GAIN * water).clamp(0.0, 1.0);
+        let m = (crate::sphere::moisture(pdir) + 0.2 * season + WET_GAIN * water).clamp(0.0, 1.0);
         let stress = (m - g.wet).abs();
-        let hab = crate::terrain::plant_habitability(px, pz, season); // 0 in water/desert, 1 on good land
+        let hab = crate::sphere::plant_habitability(pdir); // 0 in ocean/desert/cold, 1 on good land
         let p_mort =
             MOISTURE_KILL * (stress - MOISTURE_TOLERANCE).max(0.0) + HABITAT_KILL * (0.3 - hab).max(0.0);
         if rng.f32() < p_mort {
             commands.entity(e).despawn();
             detritus.push((g.clone(), st.mass, tf.translation));
-            soil.add(px, pz, DEATH_FERT * 0.3); // a dead plant enriches the ground where it falls
+            soil.add(ppos, DEATH_FERT * 0.3); // a dead plant enriches the ground where it falls
             plant_count = plant_count.saturating_sub(1);
             continue;
         }
@@ -583,11 +630,7 @@ pub fn plant_step(
         {
             let mut child = g.clone();
             child.mutate(&mut rng);
-            let off = Vec3::new(rng.range(-g.spread, g.spread), 0.0, rng.range(-g.spread, g.spread));
-            let mut pos = tf.translation + off;
-            pos.x = pos.x.clamp(-WORLD_HALF, WORLD_HALF);
-            pos.z = pos.z.clamp(-WORLD_HALF, WORLD_HALF);
-            pos.y = FOOD_Y + crate::terrain::height(pos.x, pos.z);
+            let pos = disperse_pos(&mut rng, ppos, g.spread, FOOD_Y);
             births.push((child, pos));
             st.mass *= PLANT_REPRO_FRAC;
         }
@@ -687,7 +730,7 @@ pub fn predation_step(
         if killed.contains(&e) {
             alive.0 = false;
             spawn_carrion(&mut commands, t.translation, CARRION_MASS * 0.5); // predator already ate some
-            soil.add(t.translation.x, t.translation.z, DEATH_FERT); // death enriches the ground here
+            soil.add(t.translation, DEATH_FERT); // death enriches the ground here
             if continuous_live {
                 commands.entity(e).despawn();
             }
@@ -706,7 +749,7 @@ pub fn rot_step(
         rot.age += 1;
         st.mass = (st.mass - CARRION_MASS / ROT_GONE as f32).max(0.0); // decompose: less to scavenge
         if rot.age >= ROT_GONE {
-            soil.add(tf.translation.x, tf.translation.z, DECOMP_FERT * g.nutrient); // return nutrients
+            soil.add(tf.translation, DECOMP_FERT * g.nutrient); // return nutrients
             commands.entity(e).despawn(); // fully decomposed
         }
     }
@@ -731,7 +774,7 @@ pub fn live_step(
     let mut pop = cq.iter().count(); // live population (for the continuous-mode reproduction cap)
     // continuous birth/death is active only AFTER the generational warm-up (see WARMUP_GENS)
     let live_continuous = gen.continuous && gen.generation >= WARMUP_GENS;
-    let light = daylight(gen.tick); // current daylight: creatures pay for being far from their light_pref
+    // (daylight is now POSITIONAL: computed per-creature from its location, see `light` inside the loop)
     // snapshot: (entity, pos, genome, mass, rot_age, tree). rot_age=Some -> carrion; tree=Some(edible) ->
     // a tree (edible fruit tree if true, uneatable evergreen if false); else a living plant.
     let foods: Vec<(Entity, Vec3, PlantGenome, f32, Option<u32>, Option<bool>)> = fq
@@ -751,7 +794,8 @@ pub fn live_step(
     // bin food indices into the spatial grid (built once per tick)
     let mut fgrid: Vec<Vec<u32>> = vec![Vec::new(); FGRID * FGRID];
     for (i, f) in foods.iter().enumerate() {
-        fgrid[fcell(f.1.z) * FGRID + fcell(f.1.x)].push(i as u32);
+        let (fu, fv) = fcell_uv(f.1);
+        fgrid[fv * FGRID + fu].push(i as u32);
     }
 
     for (entity, mut ct, mut energy, mut fit, mut head, mut alive, genome, mut brain, mut diet, mut loco) in &mut cq {
@@ -773,12 +817,19 @@ pub fn live_step(
         let mut best: Option<(usize, f32)> = None;
         let mut sd = vec![f32::INFINITY; n_s]; // nearest dist per sensor
         let mut skind = vec![0u8; n_s]; // food kind that nearest sensor-food is
-        let r = max_range.max(NEAR_QUERY);
-        let (cx0, cx1) = (fcell(pos.x - r), fcell(pos.x + r));
-        let (cz0, cz1) = (fcell(pos.z - r), fcell(pos.z + r));
-        for cz in cz0..=cz1 {
-            for cx in cx0..=cx1 {
-                for &fi in &fgrid[cz * FGRID + cx] {
+        let _r = max_range.max(NEAR_QUERY);
+        // scan a neighborhood of food-grid (lon/lat) cells around this creature. SPAN cells each way covers
+        // the sensor + near-query radius at this grid resolution. (Longitude does not wrap here + pole cells
+        // are narrow -> a minor perception approximation near the date line/poles; food is dense, so fine.)
+        const SPAN: usize = 3;
+        let (pu, pv) = fcell_uv(pos);
+        let (cu0, cu1) = (pu.saturating_sub(SPAN), (pu + SPAN).min(FGRID - 1));
+        let (cv0, cv1) = (pv.saturating_sub(SPAN), (pv + SPAN).min(FGRID - 1));
+        let pdir = pos.normalize_or_zero();
+        let (east, north) = crate::sphere::tangent_frame(pdir);
+        for cv in cv0..=cv1 {
+            for cu in cu0..=cu1 {
+                for &fi in &fgrid[cv * FGRID + cu] {
                     let i = fi as usize;
                     let f = &foods[i];
                     if eaten.contains(&f.0) {
@@ -791,9 +842,10 @@ pub fn live_step(
                     }
                     let dist = d2.sqrt();
                     if dist > max_range {
-                        continue; // out of every sensor's range -> skip the atan2 + cone tests
+                        continue; // out of every sensor's range -> skip the bearing + cone tests
                     }
-                    let bearing = wrap_angle(to.x.atan2(to.z) - head.0);
+                    // bearing in the local tangent frame: 0 = north (toward +Y pole), +pi/2 = east
+                    let bearing = wrap_angle(to.dot(east).atan2(to.dot(north)) - head.0);
                     for (si, s) in genome.sensors.iter().enumerate() {
                         if dist <= s.range && dist < sd[si] && wrap_angle(bearing - s.angle).abs() <= CONE_HALF {
                             sd[si] = dist;
@@ -804,6 +856,9 @@ pub fn live_step(
             }
         }
         let cur_dist = best.map(|(_, d2)| d2.sqrt()).unwrap_or(f32::INFINITY);
+        // positional day/night: daylight depends on WHERE on the globe this creature is (the lit half faces
+        // the sun, terminator sweeps as the planet spins) -> light niches now also vary by location.
+        let light = crate::sphere::daylight_at(pdir, gen.tick);
 
         // build inputs from the EVOLVABLE sensors: each is a directional eye that reports nearest food
         // in its cone (+ what type). The GA decides how many sensors + where they point.
@@ -836,28 +891,27 @@ pub fn live_step(
         let move_thrust = thrust * (1.0 - FATIGUE_DRAG * diet.fatigue);
         // aquatic factor at this spot: 1 in water / wet lowland, 0 on high dry ground. Swimmers move
         // faster here (fins) and pay a penalty on dry land (see metabolism) -> a wetland/fish niche.
-        let wet_here = ((SWIM_WET_LEVEL - crate::terrain::height(pos.x, pos.z)) / SWIM_WET_LEVEL).clamp(0.0, 1.0);
+        // aquatic factor at this spot: 1 in ocean / wet lowland, 0 on high dry ground (low elevation = wet)
+        let h0 = crate::sphere::elevation(pdir);
+        let wet_here = ((SWIM_WET_LEVEL - h0) / SWIM_WET_LEVEL).clamp(0.0, 1.0);
         let speed = MOVE_SPEED * (1.0 + SWIM_SPEED * genome.swim * wet_here);
 
-        // act
+        // act: turn, then take a great-circle step along the heading over the planet surface
         head.0 = wrap_angle(head.0 + turn * TURN_SPEED * dt);
-        let dir = Vec3::new(head.0.sin(), 0.0, head.0.cos());
-        let mut np = pos + dir * (move_thrust * speed * dt);
-        np.x = np.x.clamp(-WORLD_HALF, WORLD_HALF);
-        np.z = np.z.clamp(-WORLD_HALF, WORLD_HALF);
-        // ride the terrain; pay for elevation change (P3): uphill costs, downhill partially refunds
-        let h0 = crate::terrain::height(pos.x, pos.z);
-        let h1 = crate::terrain::height(np.x, np.z);
-        np.y = CREATURE_Y + h1;
+        let (nd, nh) = crate::sphere::step(pos, head.0, move_thrust * speed * dt);
+        head.0 = nh; // heading parallel-transported into the new tangent frame
+        let np = crate::sphere::surface_pos(nd, CREATURE_Y); // ride the terrain surface
+        // pay for elevation change (P3): uphill costs, downhill partially refunds
+        let h1 = crate::sphere::elevation(nd);
         let dh = h1 - h0;
         energy.0 -= if dh > 0.0 { CLIMB_COST * dh } else { DESCEND_REFUND * dh };
         loco.path += np.distance(pos); // accumulate 3D distance walked (diagnostic)
         ct.translation = np;
-        ct.rotation = Quat::from_rotation_y(head.0);
+        ct.rotation = Quat::from_rotation_arc(Vec3::Y, nd); // stand upright on the sphere (long axis = surface normal)
 
         // metabolism: basal + movement (convex in speed) + bite upkeep + rocky crossing + vision upkeep.
         // Longer/more sensors see farther but cost energy (SENSE_COST x total range) -> range is a trade-off.
-        let rock = crate::terrain::rockiness(np.x, np.z);
+        let rock = crate::sphere::rockiness(nd);
         let sense_range: f32 = genome.sensors.iter().map(|s| s.range).sum();
         energy.0 -= (BASAL_COST
             + SIZE_BASAL * genome.size // bigger body costs more just to maintain
@@ -874,7 +928,7 @@ pub fn live_step(
         // fatigue dynamics: exertion (thrust) accrues debt; idling (low thrust) sheds it. Clamped 0..1.
         diet.fatigue = (diet.fatigue + (FATIGUE_GAIN * thrust - FATIGUE_REST * (1.0 - thrust)) * dt).clamp(0.0, 1.0);
         // wildfire: standing in fire burns energy fast (deadly to anything caught in a blaze)
-        let here_fire = fire.get(np.x, np.z);
+        let here_fire = fire.get(np);
         if here_fire > 0.05 {
             energy.0 -= FIRE_DAMAGE * here_fire * dt;
         }
@@ -989,12 +1043,7 @@ pub fn live_step(
                             // endozoochory (13): grazing a living plant may disperse a mutated offspring
                             let mut child = pg.clone();
                             child.mutate(&mut rng);
-                            let off =
-                                Vec3::new(rng.range(-pg.spread, pg.spread), 0.0, rng.range(-pg.spread, pg.spread));
-                            let mut sp = np + off;
-                            sp.x = sp.x.clamp(-WORLD_HALF, WORLD_HALF);
-                            sp.z = sp.z.clamp(-WORLD_HALF, WORLD_HALF);
-                            sp.y = FOOD_Y + crate::terrain::height(sp.x, sp.z);
+                            let sp = disperse_pos(&mut rng, np, pg.spread, FOOD_Y); // seed carried + dropped nearby
                             spawn_plant(&mut commands, child, PLANT_START_MASS, sp);
                         }
                     }
@@ -1058,11 +1107,7 @@ pub fn live_step(
             energy.0 -= REPRO_COST;
             let mut child = genome.clone();
             child.mutate(&mut rng, MUT_RATE, MUT_STD);
-            let off = Vec3::new(rng.range(-2.0, 2.0), 0.0, rng.range(-2.0, 2.0));
-            let mut cp = ct.translation + off;
-            cp.x = cp.x.clamp(-WORLD_HALF, WORLD_HALF);
-            cp.z = cp.z.clamp(-WORLD_HALF, WORLD_HALF);
-            cp.y = CREATURE_Y + crate::terrain::height(cp.x, cp.z);
+            let cp = disperse_pos(&mut rng, ct.translation, 2.0, CREATURE_Y); // child appears beside the parent
             spawn_creature(&mut commands, child, cp, &mut rng);
             pop += 1;
         }
@@ -1071,7 +1116,7 @@ pub fn live_step(
         // rots into poison (rot_step). Closes part of the nutrient loop: death feeds the food web (P3).
         if !alive.0 {
             spawn_carrion(&mut commands, ct.translation, CARRION_MASS);
-            soil.add(ct.translation.x, ct.translation.z, DEATH_FERT); // death enriches the ground here
+            soil.add(ct.translation, DEATH_FERT); // death enriches the ground here
             // continuous (post-warmup): the corpse entity is gone (became carrion). Generational mode
             // and the warm-up keep it (Alive=false) to be recycled into the next generation.
             if live_continuous {
