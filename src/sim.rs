@@ -496,7 +496,9 @@ pub fn plant_step(
         let water = gw.get(px, pz); // dynamic rain-fed ground water at this spot
         // fertility AND rain-watered ground both speed growth (rain visibly greens the land)
         let boost = (1.0 + FERT_GROWTH * (fert / FERT_CAP).min(1.0)) * (1.0 + WET_GROWTH * water);
-        // light factor: growth peaks when daylight matches this plant's light_pref (sun vs shade species)
+        // light factor: growth peaks when daylight matches this plant's light_pref (sun vs shade species).
+        // (Clouds are visual-only -- folding their dimming into growth reduced average food enough to tip
+        // marginal populations; light niches come from the day/night cycle, which is predictable + stable.)
         let lf = 0.35 + 0.65 * (1.0 - (light - g.light_pref).abs());
         if let Some(tree) = tree {
             // fed-on this tick? (key present even for harmless branch-feeders, who do 0 mass damage).
@@ -840,7 +842,7 @@ pub fn live_step(
             + SENSE_COST * sense_range
             + BRAIN_COST * genome.net.ih.len() as f32 // bigger brain = more upkeep
             + HEIGHT_COST * genome.height
-            + LIGHT_COST * (light - genome.light_pref).abs()
+            + LIGHT_COST * (light - genome.light_pref).abs() // global daylight (clouds don't perturb the creature cost: unpredictable local light destabilized populations)
             + SWIM_LAND_COST * genome.swim * (1.0 - wet_here) // fins are a liability on dry land
             + STRESS_COST * diet.fatigue)
             * dt;

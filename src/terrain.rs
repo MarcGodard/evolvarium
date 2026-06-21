@@ -69,6 +69,19 @@ fn fbm(x: f32, z: f32) -> f32 {
     sum / 0.9375 // normalize (0.5+0.25+0.125+0.0625) to ~0..1
 }
 
+// Drifting clouds: a scrolling noise field of patchy shade 0..1 (0 full sun, up to CLOUD_MAX_SHADE under
+// a cloud). Deterministic fn of (x,z,tick) so headless + render agree. Dims LOCAL light -> couples to
+// plant + creature light sensitivity (shade-lovers gain under clouds, sun-lovers lose), and is drawn in viz.
+const CLOUD_SCALE: f32 = 0.016; // spatial frequency of cloud patches
+const CLOUD_SPEED: f32 = 0.03;  // wind drift in world units per tick
+const CLOUD_COVER: f32 = 0.6;   // noise threshold (higher = sparser clouds)
+pub const CLOUD_MAX_SHADE: f32 = 0.2; // max local light reduction under a cloud (gentle: stronger dimming cut plant growth enough to lower carrying capacity + tip marginal populations)
+pub fn cloud_shade(x: f32, z: f32, tick: u32) -> f32 {
+    let t = tick as f32 * CLOUD_SPEED;
+    let n = fbm((x + t) * CLOUD_SCALE, z * CLOUD_SCALE); // scrolls with the wind
+    ((n - CLOUD_COVER) / (1.0 - CLOUD_COVER)).clamp(0.0, 1.0) * CLOUD_MAX_SHADE
+}
+
 // A meandering river: 1 along a winding centerline, falling to 0 past the bank. Carves the channel low
 // so water flows as a river rather than round pools. Centerline winds in world coords (z varies x).
 fn river(x: f32, z: f32) -> f32 {

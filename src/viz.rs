@@ -30,6 +30,7 @@ impl Plugin for VizPlugin {
                     day_night_lighting,
                     rain_visuals,
                     fire_visuals,
+                    cloud_visuals,
                     hide_dead,
                     color_carrion,
                     pick_on_click,
@@ -176,6 +177,27 @@ fn rain_visuals(gen: Res<GenState>, weather: Res<Weather>, mut gizmos: Gizmos) {
         let phase = (hx + hz) * 40.0;
         let y = 28.0 - ((fall + phase) % 30.0); // fall from y~28 down, wrapping
         gizmos.line(Vec3::new(x, y + streak, z), Vec3::new(x, y, z), col);
+    }
+}
+
+// Drifting clouds: sample the cloud-shade field on a coarse grid and draw translucent puffs at altitude
+// where it's cloudy. They scroll with the wind (same deterministic field the sim uses to dim local light).
+fn cloud_visuals(gen: Res<GenState>, mut gizmos: Gizmos) {
+    let span = crate::sim::WORLD_HALF;
+    let step = 13.0;
+    let y = 30.0; // cloud altitude
+    let mut x = -span;
+    while x <= span {
+        let mut z = -span;
+        while z <= span {
+            let s = crate::terrain::cloud_shade(x, z, gen.tick);
+            if s > 0.12 {
+                let a = (0.15 + 0.5 * s).min(0.6);
+                gizmos.sphere(Vec3::new(x, y, z), 5.0 * s + 2.5, Color::srgba(0.85, 0.86, 0.92, a));
+            }
+            z += step;
+        }
+        x += step;
     }
 }
 
