@@ -282,7 +282,7 @@ fn fire_visuals(fire: Res<Fire>, mut gizmos: Gizmos) {
 pub struct ShowSensors(pub bool);
 
 fn log_viz_help() {
-    info!("viz: hue=diet, vividness=rigidity, size=sensors | G=sensor rays | SPACE=pause +/-=speed | L=lightning K=cull");
+    info!("viz: hue=diet, vividness=rigidity, size=sensors | G=sensor rays | SPACE=pause +/-=speed | B=seed life L=lightning K=cull");
 }
 
 // Hue per dominant food/diet type, matching the food palette (green/purple/gold/cyan).
@@ -342,7 +342,15 @@ fn god_disturbances(
     mut fire: ResMut<Fire>,
     gw: Res<GroundWater>,
     mut creatures: Query<&mut Alive, With<Creature>>,
+    mut commands: Commands,
+    mut rng: ResMut<crate::rng::Rng>,
 ) {
+    if keys.just_pressed(KeyCode::KeyB) {
+        // "make more life!" -> seed a burst of fresh random creatures across the globe
+        const BURST: usize = 200;
+        crate::sim::seed_burst(&mut commands, &mut rng, BURST);
+        info!("god: seeded {BURST} new creatures");
+    }
     if keys.just_pressed(KeyCode::KeyL) {
         // ignite the driest non-ocean grid cell (most flammable fuel)
         let mut best = 0usize;

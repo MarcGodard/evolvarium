@@ -51,14 +51,19 @@ live in `config.rs`; the live conversion plan is `SPHERE-PLAN.md`.
       (cold 52 / warm 50, aquatic 52 / land 75). `cargo run -- --load=evolved-diverse.json` to view it.
 - [x] Feed all niches: polar flora floor raised (66b1d03) + shallow-water aquatic flora (this commit), so
       cold + coastal/aquatic regions now have food. Base stays stable (~70). NECESSARY but NOT sufficient.
-- [x] REPRODUCTIVE ISOLATION via sexual reproduction (`--sexual`, default off): offspring = crossover of two
-      nearby genetically-similar parents (assortative mate choice) + mutation, asexual fallback if no mate.
-      Genome::crossover (structure from one parent, scalar traits + diet uniform-crossed). VERIFIED: sustains
-      a stable pop (seed5 min39/mean71/max98) AND assortative mating slows reconvergence -> cold niche held
-      25 (vs 6 asexual) over 10 gens. Speciation payoff is real for cold; aquatic still 0 (coastal food too
-      sparse -> niche-area problem, not a mating one). `cargo run -- --sexual` to watch speciation.
+- [x] REPRODUCTIVE ISOLATION via two-parent mating (`--mating`, default off; `--sexual` kept as alias):
+      offspring = crossover of two nearby genetically-similar parents (assortative mate choice) + mutation,
+      single-parent budding fallback if no mate. Genome::crossover (structure from one parent, scalar traits
+      + diet uniform-crossed). VERIFIED: sustains a stable pop (seed5 min39/mean71/max98) AND assortative
+      mating slows reconvergence -> cold niche held 25 (vs 6 budding) over 10 gens. Speciation payoff is real
+      for cold; aquatic still 0 (coastal food too sparse -> niche-area problem, not a mating one).
+      `cargo run -- --mating` to watch speciation.
+- [x] Render god-control: B = seed a burst of 200 fresh random creatures across the globe ("make more life!"
+      button, kid-friendly). viz::god_disturbances -> sim::seed_burst. Joins L=lightning, K=cull.
+- [x] Render fix: cascade shadows tuned for our scale (4 cascades, max 520, first bound 18) so the sun light
+      + shadows stay crisp when zoomed to creature level (default single huge cascade went fully shadowed).
 - [ ] Stronger diversity: widen aquatic habitat (more shallow-water flora) so the fish niche has the food to
-      persist even with sexual isolation; consider making --sexual the default once seeds are re-evolved under it.
+      persist even with mating isolation; consider making --mating the default once seeds are re-evolved under it.
 - [ ] Visual polish: nicer creature meshes per niche, axial-tilt seasons, atmosphere rim/haze.
 - [ ] Scale-up toward thousands of creatures (original spec headline) via density-invariant rebalance —
       big, do cautiously in validated steps.

@@ -34,7 +34,7 @@ pub struct GenState {
     pub save: Option<String>, // --save=PATH: write survivors at headless run end (BACKLOG P2)
     pub load: Option<String>, // --load=PATH: resume from a saved population instead of random
     pub diverse: bool,        // --diverse: hand-seed niche-adapted creatures across the globe (multi-niche showcase)
-    pub sexual: bool,         // --sexual: offspring = crossover of two nearby genetically-similar parents (assortative -> speciation); else asexual budding
+    pub mating: bool,         // --mating: offspring = crossover of two nearby genetically-similar parents (assortative -> speciation); else single-parent budding
 }
 
 impl GenState {
@@ -387,6 +387,17 @@ fn spawn_creature(commands: &mut Commands, g: Genome, pos: Vec3, rng: &mut Rng, 
         Locomotion { start: pos, path: 0.0 },
         Transform::from_translation(pos),
     ));
+}
+
+// God-control: drop a burst of `n` brand-new random creatures scattered over the land (kids' "make more
+// life!" button -> B in the render). Fresh random genomes, baseline provisioning, spread across the globe
+// so they pop up everywhere. Used by viz::god_disturbances.
+pub fn seed_burst(commands: &mut Commands, rng: &mut Rng, n: usize) {
+    for _ in 0..n {
+        let g = Genome::random(rng);
+        let pos = rand_pos(rng, CREATURE_Y); // any land, scattered planet-wide
+        spawn_creature(commands, g, pos, rng, BIRTH_ENERGY);
+    }
 }
 
 // A fresh (founding) tree genome: rich, tall, slow, with some branches. defense ~1 is irrelevant to
@@ -853,9 +864,9 @@ pub fn live_step(
         .filter(|(_, _, _, _, _, a, _, _, _, _)| a.0)
         .map(|(e, t, _, _, _, _, g, _, _, _)| (e, t.translation, signature(g)))
         .collect();
-    // sexual mode: a pool of (entity, pos, signature, genome) so a breeding creature can find a nearby
-    // genetically-similar MATE to cross with. Built only when --sexual (cloning genomes isn't free).
-    let mate_pool: Vec<(Entity, Vec3, [f32; 8], Genome)> = if gen.sexual {
+    // mating mode: a pool of (entity, pos, signature, genome) so a breeding creature can find a nearby
+    // genetically-similar MATE to cross with. Built only when --mating (cloning genomes isn't free).
+    let mate_pool: Vec<(Entity, Vec3, [f32; 8], Genome)> = if gen.mating {
         cq.iter()
             .filter(|(_, _, _, _, _, a, _, _, _, _)| a.0)
             .map(|(e, t, _, _, _, _, g, _, _, _)| (e, t.translation, signature(g), g.clone()))
@@ -1185,9 +1196,9 @@ pub fn live_step(
             && rng.f32() < P_REPRO_CREATURE * (1.0 - pop as f32 / CREATURE_CAP as f32)
         {
             energy.0 -= REPRO_COST * (0.7 + 0.6 * k); // K-parents spend more per child
-            // sexual mode: cross with the nearest genetically-similar mate (assortative -> reproductive
-            // isolation/speciation); fall back to asexual budding if no compatible mate is nearby.
-            let mut child = if gen.sexual {
+            // mating mode: cross with the nearest genetically-similar mate (assortative -> reproductive
+            // isolation/speciation); fall back to single-parent budding if no compatible mate is nearby.
+            let mut child = if gen.mating {
                 let my_sig = signature(genome);
                 let r2 = SOCIAL_RADIUS * SOCIAL_RADIUS;
                 let mate = mate_pool

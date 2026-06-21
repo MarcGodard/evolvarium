@@ -92,7 +92,9 @@ fn main() {
         save,
         load,
         diverse,
-        sexual: args.iter().any(|a| a == "--sexual"),
+        // --mating: two-parent breeding (assortative mate choice + crossover) instead of single-parent
+        // budding. Kid-friendly name; --sexual kept as a back-compat alias.
+        mating: args.iter().any(|a| a == "--mating" || a == "--sexual"),
     });
 
     app.insert_resource(snapshot::ShotCfg { enabled: shots, at_tick: shot_tick, prefix: shot_prefix });
@@ -153,9 +155,20 @@ fn setup_scene(
         Transform::IDENTITY,
     ));
     // sun (directional light; direction set per-frame by day_night_lighting) + soft ambient so the night
-    // side is not pitch black.
+    // side is not pitch black. Cascade shadows tuned for our scale: planet R~80, creatures ~0.5 units.
+    // Default one-cascade config spreads its shadow map over a huge frustum, so zoomed to creature level
+    // the depth precision collapses + the surface reads as fully shadowed (sun "disappears"). Pack several
+    // tight cascades within ~520 units so close-up shadows stay crisp at every zoom.
     commands.spawn((
         DirectionalLight { shadows_enabled: true, illuminance: 11000.0, ..default() },
+        bevy::light::CascadeShadowConfigBuilder {
+            num_cascades: 4,
+            minimum_distance: 0.5,
+            maximum_distance: 520.0,
+            first_cascade_far_bound: 18.0,
+            overlap_proportion: 0.2,
+        }
+        .build(),
         Transform::from_xyz(1.0, 0.5, 0.0).looking_at(Vec3::ZERO, Vec3::Y),
         viz::SunLight,
     ));

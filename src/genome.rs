@@ -119,7 +119,7 @@ impl Genome {
         self.sensors.len()
     }
 
-    // Sexual recombination (--sexual mode). Body STRUCTURE (sensors + brain net/plast) comes from parent
+    // Two-parent recombination (--mating mode). Body STRUCTURE (sensors + brain net/plast) comes from parent
     // `a` (variable-topology nets can't be crossed cell-by-cell), while the scalar trait genes + diet
     // expression are uniform-crossed from both parents. The caller mutates the result. With assortative
     // mate choice (only similar kin mate) this gives reproductive isolation -> speciation.
