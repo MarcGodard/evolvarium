@@ -1068,14 +1068,12 @@ pub fn live_step(
         // mortality from the diet model (aging + disease). In continuous mode death is otherwise
         // starvation-driven (density-dependent), which regulates the population logistically.
         if gen.diet {
-            // aging only in generational mode (fixed lifespan -> ~95 plateau). In continuous it would
-            // sync-kill the warm-up cohort; there death is starvation + disease (density-regulated).
-            let aging = if gen.continuous {
-                0.0
-            } else {
-                let age_frac = diet.age as f32 / AGE_SCALE;
-                AGE_HAZARD * (age_frac / (age_frac + 1.0))
-            };
+            // senescence (both modes now): old-age hazard rises with age toward a ceiling, so creatures
+            // have a real finite lifespan instead of living forever if well-fed. Ages are staggered (warmup
+            // desync + spread-out births) so this does NOT sync-kill a cohort. Turnover keeps the gene pool
+            // flowing (old die, young replace) -> a true life cycle to watch.
+            let age_frac = diet.age as f32 / AGE_SCALE;
+            let aging = AGE_HAZARD * (age_frac / (age_frac + 1.0));
             let p_death = (aging + DISEASE_K * diet.g) * dt;
             if rng.f32() < p_death {
                 alive.0 = false; // old-age / disease death

@@ -23,7 +23,7 @@ impl Plugin for VizPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ShowSensors>()
             .init_resource::<Selected>()
-            .add_systems(Startup, (log_viz_help, spawn_stats_ui))
+            .add_systems(Startup, (log_viz_help, spawn_stats_ui, spawn_clouds))
             .add_systems(
                 Update,
                 (
@@ -35,7 +35,7 @@ impl Plugin for VizPlugin {
                     day_night_lighting,
                     rain_visuals,
                     fire_visuals,
-                    cloud_visuals,
+                    update_clouds,
                     hide_dead,
                     color_carrion,
                     pick_on_click,
@@ -131,14 +131,16 @@ fn size_plants(mut q: Query<(&PlantState, &PlantGenome, &mut Transform, Option<&
         let base = crate::sphere::surface_pos(up, 0.0); // foot on the terrain surface
         let rot = Quat::from_rotation_arc(Vec3::Y, up); // grow outward from the planet, not world-up
         if tree.is_some() {
-            let s = (0.9 + 0.28 * st.mass).clamp(0.9, 4.5);
+            // trees stay small relative to the planet (was up to ~13 units on an 80-radius world, which
+            // poked into the clouds). Now a tree is ~2-4 units tall.
+            let s = (0.35 + 0.12 * st.mass).clamp(0.35, 1.1);
             tf.scale = Vec3::splat(s);
             tf.rotation = rot;
             tf.translation = base + up * (1.5 * s); // trunk base rests on the surface
         } else {
-            // sphere mesh radius 0.35; girth from mass, vertical stretch from the height gene
-            let girth = (0.25 + 0.13 * st.mass).clamp(0.25, 1.6);
-            let tall = 1.0 + 2.0 * g.height; // taller plants = harder for short creatures to reach
+            // sphere mesh radius 0.35; girth from mass, modest vertical stretch from the height gene
+            let girth = (0.2 + 0.1 * st.mass).clamp(0.2, 1.0);
+            let tall = 1.0 + 1.4 * g.height; // taller plants = harder for short creatures to reach
             tf.scale = Vec3::new(girth, girth * tall, girth);
             tf.rotation = rot;
             tf.translation = base + up * (0.35 * girth * tall); // base rooted on the surface (no float)
@@ -187,23 +189,69 @@ fn rain_visuals(gen: Res<GenState>, mut gizmos: Gizmos) {
     }
 }
 
-// Drifting clouds: translucent puffs on a shell above the planet wherever the cloud field is thick. The
-// field scrolls with the wind (same deterministic cloud_cover the sim uses for rain) -> clouds move around.
-fn cloud_visuals(gen: Res<GenState>, mut gizmos: Gizmos) {
+// Drifting clouds as solid translucent puffs (not wireframe). A fixed grid of flattened white spheres
+// rides a shell well above the tallest trees; each frame its opacity + size track the cloud field, which
+// scrolls with the wind -> clouds form, drift, and dissolve. CLOUD_ALT clears the terrain + trees.
+#[derive(Component)]
+struct CloudPuff {
+    dir: Vec3,
+}
+
+fn cloud_alt() -> f32 {
+    crate::sphere::PLANET_R + crate::sphere::ELEV_MAX + 10.0
+}
+
+fn spawn_clouds(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
     use std::f32::consts::{FRAC_PI_2, PI, TAU};
-    let r = crate::sphere::PLANET_R + crate::sphere::ELEV_MAX + 6.0;
-    let (rows, cols) = (26, 52);
+    let mesh = meshes.add(Sphere::new(1.0).mesh().ico(2).unwrap());
+    let alt = cloud_alt();
+    let (rows, cols) = (16, 32);
     for j in 0..rows {
         for i in 0..cols {
-            let lat = -FRAC_PI_2 + PI * (j as f32 + 0.5) / rows as f32;
+            let lat = -FRAC_PI_2 * 0.92 + (PI * 0.92) * (j as f32 + 0.5) / rows as f32; // skip the exact poles
             let lon = -PI + TAU * (i as f32 + 0.5) / cols as f32;
-            let d = crate::sphere::lonlat_to_pos(lon, lat, 0.0).normalize();
-            let c = crate::sphere::cloud_cover(d, gen.tick);
-            if c > 0.25 {
-                let a = (0.10 + 0.45 * c).min(0.5);
-                gizmos.sphere(d * r, 3.0 + 5.0 * c, Color::srgba(0.9, 0.92, 0.96, a));
-            }
+            let dir = crate::sphere::lonlat_to_pos(lon, lat, 0.0).normalize();
+            let mat = materials.add(StandardMaterial {
+                base_color: Color::srgba(0.95, 0.96, 1.0, 0.0),
+                alpha_mode: AlphaMode::Blend,
+                ..default()
+            });
+            commands.spawn((
+                Mesh3d(mesh.clone()),
+                MeshMaterial3d(mat),
+                Transform::from_translation(dir * alt),
+                Visibility::Hidden,
+                CloudPuff { dir },
+            ));
         }
+    }
+}
+
+fn update_clouds(
+    gen: Res<GenState>,
+    mut mats: ResMut<Assets<StandardMaterial>>,
+    mut q: Query<(&CloudPuff, &MeshMaterial3d<StandardMaterial>, &mut Visibility, &mut Transform)>,
+) {
+    for (puff, mm, mut vis, mut tf) in &mut q {
+        let c = crate::sphere::cloud_cover(puff.dir, gen.tick);
+        if c < 0.18 {
+            if *vis != Visibility::Hidden {
+                *vis = Visibility::Hidden;
+            }
+            continue;
+        }
+        if *vis != Visibility::Inherited {
+            *vis = Visibility::Inherited;
+        }
+        if let Some(m) = mats.get_mut(&mm.0) {
+            m.base_color = Color::srgba(0.95, 0.96, 1.0, (0.18 + 0.5 * c).min(0.7));
+        }
+        let s = 7.0 + 11.0 * c; // thicker cloud = bigger puff
+        tf.scale = Vec3::new(s, s * 0.45, s); // flattened like a cloud
     }
 }
 
