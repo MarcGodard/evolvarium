@@ -3,7 +3,7 @@
 use bevy::prelude::*;
 use std::collections::{HashMap, HashSet};
 
-use crate::components::{Alive, Brain, Creature, DietState, Energy, Ferment, Fitness, Food, Heading, Locomotion, Rot, Tree};
+use crate::components::{Alive, Brain, Creature, DietState, Energy, Ferment, Fitness, Food, Grass, Heading, Locomotion, Rot, Tree};
 use crate::genome::{forward, learn, master_expression, Genome, CONE_HALF, GLOBAL_INPUTS, NFOOD, NUTRIENTS, SIG_PER_SENSOR};
 use crate::plant::{PlantGenome, PlantState, P_REPRO, PLANT_CAP, PLANT_MIN};
 use crate::rng::Rng;
@@ -144,11 +144,83 @@ impl GroundWater {
     }
 }
 
+// Slow climate-memory grid (geological): per-cell long-term moisture 0..1. GroundWater is fast (wets on
+// rain, dries in hours); Climate is slow -> it low-pass-filters the drifting rain-propensity target over
+// MONTHS, so persistently-dry regions drift to desert + persistently-wet regions to lush, and the wet belt
+// migrates over years. Drives plant growth/mortality (sim) + globe recolor (render). Same SOIL_RES grid.
+#[derive(Resource)]
+pub struct Climate {
+    pub cell: Vec<f32>,
+}
+
+impl Climate {
+    pub fn new() -> Self {
+        // seed each cell at its STATIC moisture baseline so the world starts exactly as it looks today
+        // (no cold-start shock); climate then diverges from here as the rain-propensity anomaly drifts.
+        let cell = (0..SOIL_RES * SOIL_RES)
+            .map(|c| crate::sphere::moisture(cell_center(c).normalize_or_zero()))
+            .collect();
+        Climate { cell }
+    }
+    pub fn get(&self, pos: Vec3) -> f32 {
+        self.cell[GroundWater::index(pos)]
+    }
+    // Bilinear-sampled climate moisture at direction `d` (longitude wraps, latitude clamps at the poles).
+    // Smooths the coarse 32x32 grid -> the globe recolor shows soft biome edges, not blocky cells.
+    pub fn sample(&self, d: Vec3) -> f32 {
+        let (u, v) = grid_uv(d);
+        let n = SOIL_RES as i32;
+        let fx = ((u + WORLD_HALF) / (2.0 * WORLD_HALF)) * SOIL_RES as f32 - 0.5; // cell centers at +0.5
+        let fy = ((v + WORLD_HALF) / (2.0 * WORLD_HALF)) * SOIL_RES as f32 - 0.5;
+        let (x0, y0) = (fx.floor(), fy.floor());
+        let (tx, ty) = (fx - x0, fy - y0);
+        let wrapx = |i: i32| (((i % n) + n) % n) as usize; // longitude wraps
+        let clampy = |j: i32| j.clamp(0, n - 1) as usize; // latitude clamps at poles
+        let (x0i, x1i) = (wrapx(x0 as i32), wrapx(x0 as i32 + 1));
+        let (y0i, y1i) = (clampy(y0 as i32), clampy(y0 as i32 + 1));
+        let at = |cx: usize, cy: usize| self.cell[cy * SOIL_RES + cx];
+        let top = at(x0i, y0i) * (1.0 - tx) + at(x1i, y0i) * tx;
+        let bot = at(x0i, y1i) * (1.0 - tx) + at(x1i, y1i) * tx;
+        top * (1.0 - ty) + bot * ty
+    }
+    pub fn avg(&self) -> f32 {
+        self.cell.iter().sum::<f32>() / self.cell.len() as f32
+    }
+    // Driest/wettest cell (0..1) -- for headless logging the desert/forest spread.
+    pub fn range(&self) -> (f32, f32) {
+        let mut lo = 1.0f32;
+        let mut hi = 0.0f32;
+        for &v in &self.cell {
+            lo = lo.min(v);
+            hi = hi.max(v);
+        }
+        (lo, hi)
+    }
+    // Fraction of LAND cells that are arid (climate moisture below `thr`) -> desert coverage. Watching this
+    // climb/fall over a long run shows deserts forming + rainforests greening as the climate drifts.
+    pub fn land_arid_frac(&self, thr: f32) -> f32 {
+        let mut land = 0u32;
+        let mut arid = 0u32;
+        for (c, &v) in self.cell.iter().enumerate() {
+            let d = cell_center(c).normalize_or_zero();
+            if crate::sphere::is_ocean(d) {
+                continue;
+            }
+            land += 1;
+            if v < thr {
+                arid += 1;
+            }
+        }
+        if land == 0 { 0.0 } else { arid as f32 / land as f32 }
+    }
+}
+
 // --- weather (rain cycle): advance rainfall + update the ground-water grid (sun dries, rain refills) ---
 pub fn weather_step(
     gen: Res<GenState>,
     mut weather: ResMut<Weather>,
     mut gw: ResMut<GroundWater>,
+    mut climate: ResMut<Climate>,
 ) {
     let dt = DT;
     let tick = gen.tick;
@@ -169,6 +241,15 @@ pub fn weather_step(
         peak = peak.max(rain);
     }
     weather.rain = peak;
+    // slow climate memory: relax each cell toward its drifting long-run target on a months time constant.
+    // CLIMATE_RATE * dt is tiny per tick -> the grid integrates rainfall-propensity over many days, so
+    // regions turn to desert / rainforest gradually + the wet belt migrates as the target anomaly rotates.
+    for c in 0..climate.cell.len() {
+        let d = cell_center(c).normalize_or_zero();
+        let target = crate::sphere::climate_target(d, tick);
+        let cur = climate.cell[c];
+        climate.cell[c] = (cur + (target - cur) * CLIMATE_RATE * dt).clamp(0.0, 1.0);
+    }
 }
 
 // Fire grid (lightning-ignited wildfires): per-cell burn intensity 0..1. Shares the soil/ground-water
@@ -201,10 +282,10 @@ pub fn fire_step(
     mut soil: ResMut<Soil>,
 ) {
     let _ = gen;
-    // Fire DISABLED for now: the flammability model still lets fire appear where it shouldn't (over ocean +
-    // the polar ice cap). Turned off until the weather/flammability pass is solid. Clear any active fire and
-    // skip all ignition + spread. Flip FIRE_ENABLED to re-enable wildfire. (Lightning god-control L too.)
-    const FIRE_ENABLED: bool = false;
+    // Fire flammability fixed: ocean carries no fuel (is_ocean -> 0) and the polar ice cap is now a firebreak
+    // (sphere::fuel gates to 0 across the ice-temperature band), so ignition + spread stay on vegetated,
+    // non-frozen land only. Flip FIRE_ENABLED to false to disable wildfire (also kills the L god-control).
+    const FIRE_ENABLED: bool = true;
     if !FIRE_ENABLED {
         if fire.cell.iter().any(|&f| f > 0.0) {
             fire.cell.iter_mut().for_each(|f| *f = 0.0);
@@ -213,9 +294,10 @@ pub fn fire_step(
     }
     let dt = DT;
     let n = SOIL_RES;
-    // Min flammable vegetation for a cell to ignite/carry fire. Oceans, bare rock + barren desert have ~0
-    // fuel, so they never burn and act as natural firebreaks (a strike there fizzles; fire can't cross them).
-    const FUEL_MIN: f32 = 0.30;
+    // Min flammable vegetation for a cell to ignite/carry fire. Oceans, bare rock + barren desert + the ice
+    // cap have ~0 fuel, so they never burn and act as natural firebreaks (a strike there fizzles; fire can't
+    // cross them). Raised so only solidly-vegetated land carries fire -> more firebreaks, fires stay local.
+    const FUEL_MIN: f32 = 0.45;
     // lightning: during a storm, occasionally strike VEGETATED, currently-dry ground (storms hit land; wet
     // ground, water, rock + desert won't catch). Sample a few cells, strike the one with the most dry fuel.
     if weather.rain > LIGHTNING_RAIN && rng.f32() < P_LIGHTNING {
@@ -258,9 +340,12 @@ pub fn fire_step(
         if czi < n - 1 { nbrs[k] = (czi + 1) * n + cxi; k += 1; }
         for &ni in &nbrs[..k] {
             let npos = cell_center(ni);
-            // spread only into flammable, dry-enough land; water/rock/desert/wet ground are firebreaks
-            if crate::sphere::fuel(npos.normalize_or_zero()) > FUEL_MIN && gw.get(npos) < FIRE_WET_MAX {
-                fire.cell[ni] = (fire.cell[ni] + FIRE_SPREAD * f * dt).min(1.0);
+            // spread only into flammable, dry-enough land; water/rock/desert/ice/wet ground are firebreaks.
+            // spread rate scales with the NEIGHBOR's fuel density: lush forest catches fast, sparse scrub
+            // barely carries fire -> fires stay confined to dense vegetation instead of racing everywhere.
+            let fuel_n = crate::sphere::fuel(npos.normalize_or_zero());
+            if fuel_n > FUEL_MIN && gw.get(npos) < FIRE_WET_MAX {
+                fire.cell[ni] = (fire.cell[ni] + FIRE_SPREAD * f * fuel_n * dt).min(1.0);
             }
         }
     }
@@ -571,6 +656,33 @@ fn spawn_plant(commands: &mut Commands, g: PlantGenome, mass: f32, pos: Vec3) {
     ));
 }
 
+// Spawn one grass tuft (lesser food). Carries the Grass marker so grass_step owns its lifecycle (not
+// plant_step) + its own cap. Unlike plants, oriented to the surface normal so blades stand up on the
+// sphere (add_grass_visuals, render mode, gives the shared tuft mesh).
+fn spawn_grass(commands: &mut Commands, g: PlantGenome, mass: f32, pos: Vec3) {
+    let up = pos.normalize_or_zero();
+    commands.spawn((
+        Food,
+        Grass,
+        PlantState { mass, age: 0 },
+        g,
+        Transform::from_translation(pos).with_rotation(Quat::from_rotation_arc(Vec3::Y, up)),
+    ));
+}
+
+// Whole-planet: grass blankets ALL plant-capable land worldwide (not just the homeland). Rejection samples
+// the full sphere until a non-ocean spot with plant_habitability > GRASS_HAB_MIN ("soil capable of plants").
+fn grass_pos(rng: &mut Rng) -> Vec3 {
+    let mut d = crate::sphere::random_dir_in_cap(rng, Vec3::Y, std::f32::consts::PI);
+    for _ in 0..8 {
+        if !crate::sphere::is_ocean(d) && crate::sphere::plant_habitability(d) > GRASS_HAB_MIN {
+            break;
+        }
+        d = crate::sphere::random_dir_in_cap(rng, Vec3::Y, std::f32::consts::PI);
+    }
+    crate::sphere::surface_pos(d, FOOD_Y)
+}
+
 // --- spawn ---
 
 // Headless: components only, no render assets (absent under MinimalPlugins).
@@ -629,12 +741,17 @@ pub fn spawn_world_headless(mut commands: Commands, mut rng: ResMut<Rng>, mut ge
         }
     }
     spawn_trees(&mut commands, &mut rng, gen.diverse);
+    // start the turf half-full; grass_step tops it up to GRASS_CAP from here.
+    for _ in 0..GRASS_CAP / 2 {
+        spawn_grass(&mut commands, PlantGenome::grass(&mut rng), GRASS_START_MASS, grass_pos(&mut rng));
+    }
 }
 
-// Scatter the initial trees (half tall fruit trees, half uneatable evergreens) on habitable land. global=true
-// (diverse mode) spreads them worldwide; else they cluster in the homeland with the founding population.
-fn spawn_trees(commands: &mut Commands, rng: &mut Rng, global: bool) {
-    let tree_pos = |rng: &mut Rng| if global { rand_pos(rng, FOOD_Y) } else { homeland_pos(rng, FOOD_Y) };
+// Scatter the initial trees (half tall fruit trees, half uneatable evergreens) on habitable land. Always
+// WHOLE-PLANET now: trees seed worldwide (then ambient reproduction fills toward TREE_CAP globally), so the
+// planet -- not just the homeland -- grows forests. (`_global` kept for the call sites.)
+fn spawn_trees(commands: &mut Commands, rng: &mut Rng, _global: bool) {
+    let tree_pos = |rng: &mut Rng| rand_pos(rng, FOOD_Y);
     for i in 0..N_TREES {
         let mut p = tree_pos(rng);
         for _ in 0..6 {
@@ -668,6 +785,16 @@ pub fn spawn_world_render(
         broadleaf: meshes.add(Sphere::new(1.3)),
         conifer: meshes.add(Cone { radius: 1.2, height: 3.2 }),
     });
+    // shared grass tuft mesh + one green material for ALL tufts (grass is ubiquitous; size_grass scales
+    // each tuft's length by local soil). Double-sided so the thin blades show from both faces.
+    commands.insert_resource(crate::viz::GrassMesh(meshes.add(crate::viz::grass_tuft_mesh())));
+    commands.insert_resource(crate::viz::GrassMaterial(materials.add(StandardMaterial {
+        base_color: Color::srgb(0.24, 0.52, 0.18),
+        perceptual_roughness: 0.95,
+        double_sided: true,
+        cull_mode: None,
+        ..default()
+    })));
 
     // --load resumes a saved population; otherwise a random founding pop. Positions re-randomized.
     let snap = gen.load.as_deref().and_then(crate::persist::load_snapshot);
@@ -725,6 +852,79 @@ pub fn spawn_world_render(
         }
     }
     spawn_trees(&mut commands, &mut rng, gen.diverse);
+    // start the turf half-full; grass_step tops it up to GRASS_CAP from here.
+    for _ in 0..GRASS_CAP / 2 {
+        spawn_grass(&mut commands, PlantGenome::grass(&mut rng), GRASS_START_MASS, grass_pos(&mut rng));
+    }
+}
+
+// --- grass: lesser ground cover. Own lifecycle + cap (kept off PLANT_CAP). Grazed (via tree_bites,
+// set in live_step), killed by fire/drown/poor-soil so it persists only on plant-capable land, regrows,
+// and refills toward GRASS_CAP each tick -> ubiquitous turf + a thin fallback food. Runs BEFORE plant_step
+// (which clears tree_bites) so grass consumes its own grazing bites first. ---
+pub fn grass_step(
+    mut commands: Commands,
+    mut rng: ResMut<Rng>,
+    gen: Res<GenState>,
+    mut soil: ResMut<Soil>,
+    gw: Res<GroundWater>,
+    fire: Res<Fire>,
+    tree_bites: Res<TreeBites>,
+    mut q: Query<(Entity, &mut PlantState, &PlantGenome, &Transform), (With<Grass>, Without<Rot>)>,
+) {
+    let season = (gen.tick as f32 / GEN_TICKS as f32 * SEASON_FREQ).sin();
+    let mut count = q.iter().count();
+    for (e, mut st, g, tf) in &mut q {
+        let ppos = tf.translation;
+        let pdir = ppos.normalize_or_zero();
+        // wildfire burns the tuft up: its (small) biomass becomes ash on top of the cell's per-tick ash
+        // -> burned turf regrows richer. Low factor since grass is a lesser plant.
+        if fire.get(ppos) > FIRE_KILL {
+            soil.add(ppos, FIRE_BURN_ASH * st.mass * 0.5);
+            commands.entity(e).despawn();
+            count = count.saturating_sub(1);
+            continue;
+        }
+        // grazing: a creature ate this tuft this tick (recorded in live_step). High regrow = small bites,
+        // but graze it below GRASS_MIN_MASS and it is gone (refill reseeds turf elsewhere).
+        if let Some(&bite) = tree_bites.0.get(&e) {
+            st.mass = (st.mass - bite).max(0.0);
+            if st.mass < GRASS_MIN_MASS {
+                commands.entity(e).despawn();
+                soil.add(ppos, DEATH_FERT * 0.3);
+                count = count.saturating_sub(1);
+                continue;
+            }
+        }
+        // mortality off plant-capable soil: dry/wet mismatch, poor site (rock/desert/cold), or submerged.
+        // Keeps grass confined to the band where plants can grow. Dead grass just vanishes (no detritus).
+        let water = gw.get(ppos);
+        let m = (crate::sphere::moisture(pdir) + 0.2 * season + WET_GAIN * water).clamp(0.0, 1.0);
+        let stress = (m - g.wet).abs();
+        let hab = crate::sphere::plant_habitability(pdir);
+        let e01 = crate::sphere::elevation01(pdir);
+        let submersion = ((crate::sphere::SEA_LEVEL - e01) / crate::sphere::SEA_LEVEL).clamp(0.0, 1.0);
+        let drown = DROWN_KILL * submersion * (1.0 - g.wet);
+        let p_mort = MOISTURE_KILL * (stress - MOISTURE_TOLERANCE).max(0.0) + HABITAT_KILL * (0.3 - hab).max(0.0) + drown;
+        if rng.f32() < p_mort {
+            commands.entity(e).despawn();
+            count = count.saturating_sub(1);
+            continue;
+        }
+        // grow/regrow: same drivers as plants (soil fertility + rain + light match), capped at maturity.
+        let light = crate::sphere::daylight_at(pdir, gen.tick);
+        let fert = soil.get(ppos);
+        let boost = (1.0 + FERT_GROWTH * (fert / FERT_CAP).min(1.0)) * (1.0 + WET_GROWTH * water);
+        let lf = 0.35 + 0.65 * (1.0 - (light - g.light_pref).abs());
+        st.mass = (st.mass + g.growth_rate() * boost * hab * lf * DT).min(g.maturity);
+        st.age += 1;
+    }
+    // refill toward the target density: blankets plant-capable ground + replaces grazed/burned tufts.
+    let mut spawned = 0;
+    while count + spawned < GRASS_CAP {
+        spawn_grass(&mut commands, PlantGenome::grass(&mut rng), GRASS_START_MASS, grass_pos(&mut rng));
+        spawned += 1;
+    }
 }
 
 // --- plants: grow, reproduce (disperse mutated offspring), reseed if the web nearly collapses (13) ---
@@ -734,9 +934,10 @@ pub fn plant_step(
     gen: Res<GenState>,
     mut soil: ResMut<Soil>,
     gw: Res<GroundWater>,
+    climate: Res<Climate>,
     fire: Res<Fire>,
     mut tree_bites: ResMut<TreeBites>,
-    mut q: Query<(Entity, &mut PlantState, &PlantGenome, &Transform, Option<&Tree>), Without<Rot>>, // not carrion
+    mut q: Query<(Entity, &mut PlantState, &PlantGenome, &Transform, Option<&Tree>), (Without<Rot>, Without<Grass>)>, // not carrion, not grass (grass_step owns grass)
 ) {
     soil.decay(); // fertility leaches / is taken up over time
     // season drifts on the global tick clock (advances in both modes; generation is frozen in continuous)
@@ -751,9 +952,12 @@ pub fn plant_step(
     for (e, mut st, g, tf, tree) in &mut q {
         let ppos = tf.translation;
         let pdir = ppos.normalize_or_zero();
-        // wildfire: a plant/tree in a strongly-burning cell burns up (despawn). fire_step already laid
-        // down ash fertility here, so burned ground regrows richer.
+        // wildfire: a plant/tree in a strongly-burning cell burns up (despawn). fire_step lays down ash
+        // fertility per tick; ON BURN-UP the plant's own biomass also becomes ash -> extra soil nutrients
+        // where it burned (x mass; trees deposit ~3x, bigger biomass). Burned ground regrows richer.
         if fire.get(ppos) > FIRE_KILL {
+            let biomass = if tree.is_some() { 3.0 } else { 1.0 };
+            soil.add(ppos, FIRE_BURN_ASH * st.mass * biomass);
             commands.entity(e).despawn();
             if tree.is_none() {
                 plant_count = plant_count.saturating_sub(1);
@@ -831,11 +1035,15 @@ pub fn plant_step(
             }
         }
         // mortality from moisture mismatch OR a poor site (deep water / desert). Effective moisture =
-        // static terrain moisture + rain-fed ground water -> wet-liking plants thrive after a downpour,
-        // get stressed in drought (temporal selection on `wet`).
-        let m = (crate::sphere::moisture(pdir) + 0.2 * season + WET_GAIN * water).clamp(0.0, 1.0);
+        // slow CLIMATE moisture (long-term, drifts -> deserts/rainforests form) + season + rain-fed ground
+        // water -> wet-liking plants thrive after a downpour, get stressed in drought, AND whole regions
+        // dry to desert / green to forest over years as climate drifts (temporal + geological selection).
+        let clim = crate::sphere::moisture(pdir) * (1.0 - CLIMATE_VEG) + climate.get(ppos) * CLIMATE_VEG;
+        let m = (clim + 0.2 * season + WET_GAIN * water).clamp(0.0, 1.0);
         let stress = (m - g.wet).abs();
-        let hab = crate::sphere::plant_habitability(pdir); // 0 in deep ocean/desert/cold, 1 on good land
+        // habitability uses the SAME slow climate moisture, so a region drying out loses its plant base
+        // (desertifies) and a wetting region gains one (reforests). Ocean/thermal branches are unaffected.
+        let hab = crate::sphere::plant_habitability_with_moisture(pdir, clim); // 0 in deep ocean/desert/cold, 1 on good land
         // drowning: underwater a plant needs the aquatic `wet` gene to live. submersion (depth below sea) x
         // (1-wet) -> land flora (low wet) drowns, aquatic flora (high wet) thrives. Splits land vs aquatic.
         let e01 = crate::sphere::elevation01(pdir);
@@ -1009,7 +1217,7 @@ pub fn live_step(
     mut tree_bites: ResMut<TreeBites>,
     mut soil: ResMut<Soil>,
     fire: Res<Fire>,
-    fq: Query<(Entity, &Transform, &PlantState, &PlantGenome, Option<&Rot>, Option<&Tree>, Option<&Ferment>), (With<Food>, Without<Creature>)>,
+    fq: Query<(Entity, &Transform, &PlantState, &PlantGenome, Option<&Rot>, Option<&Tree>, Option<&Ferment>, Option<&Grass>), (With<Food>, Without<Creature>)>,
 ) {
     let dt = DT;
     let ntypes = gen.ntypes();
@@ -1020,10 +1228,10 @@ pub fn live_step(
     // snapshot: (entity, pos, genome, mass, rot_age, tree, ferment_toxic). rot_age=Some + ferment=None ->
     // animal carrion (meat); rot_age=Some + ferment=Some -> fermenting plant matter (fruit/detritus);
     // tree=Some(edible) -> a tree; else a living plant.
-    let foods: Vec<(Entity, Vec3, PlantGenome, f32, Option<u32>, Option<bool>, Option<f32>)> = fq
+    let foods: Vec<(Entity, Vec3, PlantGenome, f32, Option<u32>, Option<bool>, Option<f32>, bool)> = fq
         .iter()
-        .map(|(e, t, st, pg, rot, tree, ferment)| {
-            (e, t.translation, pg.clone(), st.mass, rot.map(|r| r.age), tree.map(|t| t.edible), ferment.map(|f| f.toxic))
+        .map(|(e, t, st, pg, rot, tree, ferment, grass)| {
+            (e, t.translation, pg.clone(), st.mass, rot.map(|r| r.age), tree.map(|t| t.edible), ferment.map(|f| f.toxic), grass.is_some())
         })
         .collect();
     let mut eaten: HashSet<Entity> = HashSet::new();
@@ -1069,6 +1277,7 @@ pub fn live_step(
         let n_s = genome.sensors.len();
         let max_range = genome.sensors.iter().map(|s| s.range).fold(0.0f32, f32::max);
         let mut best: Option<(usize, f32)> = None;
+        let mut best_grass: Option<(usize, f32)> = None; // nearest GRASS (grazed underfoot; kept OUT of forage/sensing)
         let mut sd = vec![f32::INFINITY; n_s]; // nearest dist per sensor
         let mut skind = vec![0u8; n_s]; // food kind that nearest sensor-food is
         let _r = max_range.max(NEAR_QUERY);
@@ -1091,6 +1300,15 @@ pub fn live_step(
                     }
                     let to = f.1 - pos;
                     let d2 = to.length_squared();
+                    // grass is a passive underfoot graze, NOT a forage target: keep it out of `best` (the
+                    // single-nearest the creature navigates to + eats) and out of the sensor cones, else
+                    // ubiquitous grass is always nearest -> creatures never reach real plants -> starve.
+                    if f.7 {
+                        if best_grass.is_none_or(|(_, bd2)| d2 < bd2) {
+                            best_grass = Some((i, d2));
+                        }
+                        continue;
+                    }
                     if best.is_none_or(|(_, bd2)| d2 < bd2) {
                         best = Some((i, d2));
                     }
@@ -1349,8 +1567,9 @@ pub fn live_step(
                         eaten.insert(e); // prevent same-tick re-eat
                         if rot_age.is_some() {
                             commands.entity(e).despawn(); // carrion consumed
-                        } else if foods.len() < PLANT_CAP && rng.f32() < pg.quality * SEED_VIA_GUT {
-                            // endozoochory (13): grazing a living plant may disperse a mutated offspring
+                        } else if !foods[i].7 && foods.len() < PLANT_CAP && rng.f32() < pg.quality * SEED_VIA_GUT {
+                            // endozoochory (13): grazing a living plant may disperse a mutated offspring.
+                            // Grass excluded (foods[i].7): grass_step owns grass spread + cap, not the plant pool.
                             let mut child = pg.clone();
                             child.mutate(&mut rng);
                             let sp = disperse_pos(&mut rng, np, pg.spread, FOOD_Y); // seed carried + dropped nearby
@@ -1359,6 +1578,34 @@ pub fn live_step(
                     }
                 }
                 // failed bite: the plant's defense held; it survives this contact
+            }
+        }
+
+        // passive grass graze: a thin underfoot supplement + FALLBACK. Grass is NOT a forage target
+        // (excluded from `best` above) and is grazed ONLY WHEN HUNGRY (energy below start) -- grass is
+        // everywhere, so an ungated graze would force-feed full creatures every tick and the overflow would
+        // pump growth-load (OVEREAT_G) into chronic gorging disease. As a hunger-gated fallback it has room,
+        // so NO overeat penalty applies. Defenseless + flat -> always succeeds; yield scaled by GRASS_EAT_GAIN.
+        if let Some((gi, gd2)) = best_grass {
+            let ge = foods[gi].0;
+            if energy.total() < START_ENERGY && gd2.sqrt() < EAT_RADIUS && !eaten.contains(&ge) {
+                let gg = foods[gi].2.clone(); // grass genome: one nutrient, low density
+                let gmass = foods[gi].3;
+                let frac = (1.0 - 0.85 * gg.regrow).clamp(0.12, 1.0); // turf: small bite, regrows
+                let bite_mass = gmass * frac;
+                *tree_bites.0.entry(ge).or_insert(0.0) += bite_mass; // grass_step applies the graze
+                let eff = if gen.diet { master_expression(&genome.uptake, &diet.reserves, RESERVE_REQ, MASTER_FLOOR) } else { 1.0 };
+                let base = bite_mass * gg.nutrient * (0.5 + gg.quality);
+                energy.add_sugar(EAT_GAIN * GRASS_EAT_GAIN * base * eff, SUGAR_CAP, fat_max); // hungry -> has room, no gorge
+                fit.0 += base * eff * GRASS_EAT_GAIN;
+                if gen.diet {
+                    let fert = soil.get(np);
+                    let soil_f = 1.0 - SOIL_NUTRI + SOIL_NUTRI * (fert / FERT_CAP).min(1.0);
+                    let toxin = absorb_and_toxin(&mut diet.reserves, &genome.uptake, &gg, soil_f, base);
+                    energy.burn(toxin);
+                    diet.g += toxin * TOXIN_G;
+                }
+                eaten.insert(ge);
             }
         }
 
@@ -1529,10 +1776,11 @@ pub fn generation_step(
         (&mut Transform, &mut Energy, &mut Fitness, &mut Heading, &mut Alive, &mut Genome, &mut Brain, &mut DietState, &mut Locomotion),
         With<Creature>,
     >,
-    pq: Query<(&PlantGenome, &PlantState), Without<Rot>>, // living plants only (carrion excluded from stats/save)
+    pq: Query<(&PlantGenome, &PlantState), (Without<Rot>, Without<Grass>)>, // living plants only (carrion + grass excluded from stats/save)
     tq: Query<&PlantGenome, With<Tree>>, // trees only, for the evolvable-height stat
     soil: Res<Soil>,
     gw: Res<GroundWater>,
+    climate: Res<Climate>,
     fire: Res<Fire>,
     weather: Res<Weather>,
     mut exit: MessageWriter<AppExit>,
@@ -1720,7 +1968,7 @@ pub fn generation_step(
     let avg_wet: f32 = pq.iter().map(|(g, _)| g.wet).sum::<f32>() / plant_n as f32;
     if gen.diet {
         let avg_rig: f32 = scored.iter().map(|(_, g)| g.rigidity).sum::<f32>() / n as f32;
-        info!("gen {:>3} | nutri {:>6.2} | sens {:.1} r{:.0} | rig {:.2} | bite {:.2} vs def {:.2} | light {:.2} sz {:.2} sw {:.2} so {:.2} brain {:.1} | plant-nut {:.2} qual {:.2} wet {:.2} | roam {:.2} elev {:.1} | plants {} soil {:.2} gw {:.2} fire {:.3} | trees {} h{:.2} b{:.2}", gen.generation, avg, avg_sensors, avg_range, avg_rig, avg_bite, avg_def, avg_light, avg_size, avg_swim, avg_social, avg_hidden, avg_nut, avg_qual, avg_wet, avg_roam, avg_elev, plant_n, soil.avg(), gw.avg(), fire.avg(), tree_n, avg_tree_h, avg_tree_b);
+        info!("gen {:>3} | nutri {:>6.2} | sens {:.1} r{:.0} | rig {:.2} | bite {:.2} vs def {:.2} | light {:.2} sz {:.2} sw {:.2} so {:.2} brain {:.1} | plant-nut {:.2} qual {:.2} wet {:.2} | roam {:.2} elev {:.1} | plants {} soil {:.2} gw {:.2} clim {:.2}[{:.2}-{:.2}] desert {:.0}% fire {:.3} | trees {} h{:.2} b{:.2}", gen.generation, avg, avg_sensors, avg_range, avg_rig, avg_bite, avg_def, avg_light, avg_size, avg_swim, avg_social, avg_hidden, avg_nut, avg_qual, avg_wet, avg_roam, avg_elev, plant_n, soil.avg(), gw.avg(), climate.avg(), climate.range().0, climate.range().1, climate.land_arid_frac(0.25) * 100.0, fire.avg(), tree_n, avg_tree_h, avg_tree_b);
     } else {
         info!("gen {:>3} | food {:>6.2} | sens {:.1} r{:.0} | bite {:.2} vs def {:.2} | plant-nut {:.2} qual {:.2} wet {:.2} | roam {:.2} elev {:.1} | plants {} soil {:.2} gw {:.2}", gen.generation, avg, avg_sensors, avg_range, avg_bite, avg_def, avg_nut, avg_qual, avg_wet, avg_roam, avg_elev, plant_n, soil.avg(), gw.avg());
     }

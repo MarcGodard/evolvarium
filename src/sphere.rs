@@ -216,6 +216,13 @@ pub fn rockiness(d: Vec3) -> f32 {
 /// Plant habitability 0..1 at `d`: 0 in ocean, reduced on rock, in drought, and in the cold (poles). Land
 /// flora thrives in warm, moist, low ground -> plants + the creatures that eat them cluster temperate/tropical.
 pub fn plant_habitability(d: Vec3) -> f32 {
+    plant_habitability_with_moisture(d, moisture(d))
+}
+
+/// Plant habitability with an EXTERNALLY supplied land moisture, so the dynamic climate grid can override
+/// the static `moisture(d)` field -> deserts + rainforests form as climate drifts. Ocean/aquatic + thermal
+/// branches are moisture-independent (unchanged). `plant_habitability` = this with the static moisture.
+pub fn plant_habitability_with_moisture(d: Vec3, moist: f32) -> f32 {
     let e = elevation01(d);
     if e < AQUATIC_FLOOR {
         return 0.0; // abyssal deep ocean: barren (no light reaches the bottom)
@@ -231,7 +238,7 @@ pub fn plant_habitability(d: Vec3) -> f32 {
         return ((0.55 + 0.30 * shallow) * water_warm).clamp(0.0, 1.0);
     }
     let rock_ok = 1.0 - 0.9 * rockiness(d);
-    let moist_ok = (moisture(d) / 0.35).clamp(0.0, 1.0);
+    let moist_ok = (moist / 0.35).clamp(0.0, 1.0);
     (rock_ok * moist_ok * warm_ok).clamp(0.0, 1.0)
 }
 
@@ -243,12 +250,24 @@ pub fn fuel(d: Vec3) -> f32 {
     if is_ocean(d) {
         return 0.0; // water carries no burnable fuel (plant_habitability is high in shallow seas -> exclude)
     }
-    plant_habitability(d) // land only: ~0 on rock, low in desert/drought, high in lush temperate/tropical
+    // frozen ground (the polar ice cap) carries no DRY fuel -> never burns. plant_habitability keeps a floor
+    // at the poles (cold-niche flora stays alive), but snow-covered tundra does not carry fire, so gate fuel
+    // to 0 across the same temperature band the biome paints as ice (temp < 0.25). Keeps the ice cap a
+    // firebreak, separate from the habitability floor that feeds the cold niche.
+    let cold_ok = (base_temperature(d) / 0.25).clamp(0.0, 1.0); // 0 at the frozen pole .. 1 by the ice edge
+    plant_habitability(d) * cold_ok // land only: ~0 on rock/desert/ice, high in lush temperate/tropical
 }
 
 /// Unlit biome color (RGB 0..1) at outward direction `d`: ocean by depth, land by elevation/moisture,
 /// polar ice. Shared by the globe mesh (viz) + the snapshot renderer so they look the same.
 pub fn biome_color(d: Vec3) -> [f32; 3] {
+    biome_color_with_moisture(d, moisture(d))
+}
+
+/// As `biome_color` but with an EXTERNALLY supplied land moisture, so the globe render can recolor land
+/// from the live climate grid (dry -> sand/desert, wet -> green) as climate drifts. Ocean depth + polar
+/// ice branches are moisture-independent (unchanged). `biome_color` = this with the static moisture.
+pub fn biome_color_with_moisture(d: Vec3, m: f32) -> [f32; 3] {
     let lerp3 = |a: [f32; 3], b: [f32; 3], t: f32| {
         let t = t.clamp(0.0, 1.0);
         [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]
@@ -259,7 +278,6 @@ pub fn biome_color(d: Vec3) -> [f32; 3] {
         return lerp3([0.13, 0.40, 0.60], [0.02, 0.09, 0.28], depth);
     }
     let elev = (elevation(d) / ELEV_MAX).clamp(0.0, 1.0);
-    let m = moisture(d);
     let mut c = lerp3([0.20, 0.55, 0.22], [0.48, 0.40, 0.26], elev);
     if m < 0.35 {
         c = lerp3(c, [0.80, 0.72, 0.45], (0.35 - m) / 0.35);
@@ -314,6 +332,11 @@ pub fn daylight_at(d: Vec3, tick: u32) -> f32 {
 
 const CLOUD_FREQ: f32 = 3.0;     // cloud patch size (higher = smaller, more patches)
 const CLOUD_SPEED: f32 = 0.0009; // wind: radians/tick the cloud field rotates (drifts west->east)
+// Climate-drift field (geological): the SLOW regional wet/dry anomaly the climate memory chases. Same
+// rotate-the-sample-point trick as clouds, but ~500x slower so wet belts migrate over years, not days.
+const CLIMATE_DRIFT: f32 = 0.45;     // anomaly amplitude (0 = static climate, 1 = strong wet-belt migration)
+const CLIMATE_SPEED: f32 = 0.0000019; // rad/tick the anomaly rotates: full sweep TAU/speed ~3.3M ticks ~1380 days
+const CLIMATE_FREQ: f32 = 1.3;       // anomaly patch size (low = continent-scale wet/dry zones, not speckle)
 const CLOUD_COVER: f32 = 0.55;   // noise threshold: above this is cloudy (higher = sparser clouds)
 pub const CLOUD_RAIN_MIN: f32 = 0.45; // cloud cover above which rain can fall (thick-ish cloud)
 // Rain-mask threshold on a second fbm field: rain falls only where the mask exceeds this. fbm3 clusters
@@ -349,6 +372,22 @@ pub fn rain_at(d: Vec3, tick: u32) -> f32 {
         return 0.0; // cloudy but not raining here
     }
     cover // rain as heavy as the cloud is thick
+}
+
+/// Long-run climate moisture target 0..1 at `d` for `tick`: the value this cell's slow climate memory
+/// drifts toward. Static moisture baseline + a VERY slowly rotating regional anomaly (continent-scale wet
+/// vs dry patches) so some regions stay rainier and the wet/dry belts migrate over years -> deserts +
+/// rainforests form, persist, move. Pure + deterministic -> headless + render agree. The slow `Climate`
+/// grid (sim.rs) low-pass-filters this; sampling it directly = the instantaneous target, not the climate.
+pub fn climate_target(d: Vec3, tick: u32) -> f32 {
+    let base = moisture(d);
+    // rotate the sample point slowly about the spin axis -> the anomaly pattern migrates across the surface
+    let a = tick as f32 * CLIMATE_SPEED;
+    let (s, c) = (a.sin(), a.cos());
+    let rot = Vec3::new(c * d.x - s * d.z, d.y, s * d.x + c * d.z);
+    let anomaly = fbm3(rot * CLIMATE_FREQ + Vec3::splat(57.4)); // ~0..0.9, mean ~0.5
+    let bias = CLIMATE_DRIFT * (anomaly - 0.5); // center -> push some regions wetter, others drier than baseline
+    (base + bias).clamp(0.0, 1.0)
 }
 
 #[cfg(test)]

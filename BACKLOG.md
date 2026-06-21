@@ -13,7 +13,8 @@ live in `config.rs`; the live conversion plan is `SPHERE-PLAN.md`.
       drifting cloud puffs, cloud-driven rain streaks, surface fire, starfield, orbit camera.
 - [x] Headless CPU snapshot renderer (`--shots`) -> PNG views (no GPU); creatures colored by thermal gene.
 - [x] Climate: cold poles / warm equator, latitude moisture belts; weather = drifting clouds + ~10%
-      cloud-only rain (no global storms); lightning -> wildfire.
+      cloud-only rain (no global storms). Lightning -> wildfire (re-enabled, flammability fixed: see the
+      Wildfire fix entry under World/visuals).
 
 ### Biology
 - [x] Continuous reproduction (default, stable cross-seed ~70-90 carrying capacity); generational GA via
@@ -51,6 +52,25 @@ live in `config.rs`; the live conversion plan is `SPHERE-PLAN.md`.
       broad guts. NFOOD=4 kept as plant-FAMILY axis (sensing/color) only. Verified: pop 50-86, diet breadth
       evolves 9.7->6.5. KNOWN-SOFT: master expr pegs ~0.99 (reserve gradient too gentle) -> friction F1
       (`clients/evolvarium/tuning-frictions.md`) for the tuning harness.
+
+### Grass: lesser ubiquitous ground cover (2026-06-21)
+- [x] **Grass = a lesser plant** (`Grass` marker + `PlantGenome::grass`): one nutrient (vs ~3-4),
+      low energy density, defenseless, flat, full-sun, high-regrow turf. Own lifecycle (`grass_step`)
+      + own cap (`GRASS_CAP`, kept OFF `PLANT_CAP`), refills toward target each tick, dies on
+      fire/drown/poor-soil so it persists only where `plant_habitability > GRASS_HAB_MIN` (= "soil
+      capable of plants"). Excluded from the saved-plant snapshot + plant stats (`Without<Grass>`).
+- [x] **Grazeable as a hunger-gated FALLBACK, NOT a forage target**: grass is kept out of the
+      forage `best`/sensor slot (`best_grass` tracked separately) so creatures still navigate to real
+      plants, and is grazed underfoot only when `energy < START_ENERGY`, yield x`GRASS_EAT_GAIN`.
+      WHY both: (1) creatures eat/approach only the SINGLE nearest food -> ubiquitous grass-as-best
+      traps them nibbling low-yield turf, never reaching plants; (2) an ungated graze force-feeds full
+      creatures every tick and the overflow pumps `OVEREAT_G` growth-load -> chronic gorging disease.
+      Either alone crashed pop 62->12. Fixed design: pop 63 (== grass-off 62), balance-neutral.
+- [x] **Visualized as instanced 3D tufts** (`viz::grass_tuft_mesh`): one shared bushy 7-blade clump
+      mesh + one green double-sided material for ALL tufts (cheap). `size_grass` sets each tuft's
+      LENGTH + girth from local soil (habitability + moisture) so rich ground grows visibly taller,
+      lush turf; rooted + stood on the surface normal. Homeland-clustered in normal mode so the walk
+      view shows a green carpet. Verified via `--capture`.
 
 ## Open
 
@@ -97,17 +117,30 @@ live in `config.rs`; the live conversion plan is `SPHERE-PLAN.md`.
       HUD field (incl. trend) + color/shape encoding + all controls. Top-left hint points to H.
 - [x] WALK MODE (camera): TAB toggles ORBIT (space) <-> WALK (ground). True walk -- eye rides a fixed height
       above terrain (climbs hills, no fly): WASD move (W/S fwd+back, A/D strafe, great-circle steps), arrows
-      or right-drag look, Shift run. Real shadows ON only in walk (close horizon -> range covers view, no
-      eclipse disc); OFF in orbit. Ground-tuned cascade (max 130, first bound 12); globe+ocean NotShadowCaster
-      so only trees/creatures cast. camera::CameraMode + WalkCam + update_shadow_mode.
+      or right-drag look, Shift run. Real shadows ON in BOTH modes now (orbit eclipse-disc fixed). Ground-tuned
+      walk cascade (max 130, first bound 12), zoom-scaled orbit cascade. camera::CameraMode + WalkCam +
+      update_shadow_mode + update_shadow_cascade.
 - [x] WALK lighting fix: walk used to look like permanent night (positional day/night -> spawned on the
       dark hemisphere half the time; a day is only ~2400 ticks). Entering walk now snaps the sky to local
       noon via a visual SunOffset (lights + sun/moon only; sim daylight/rest untouched). [ / ] scrub
       time-of-day, \ jump to noon (golden-hour shadows on demand). Ambient lifts 220->550 in walk.
-- [~] Orbit-view real shadows: ABANDONED. A directional shadow map only covers maximum_distance around the
-      camera, so the boundary showed as a dark "eclipse" disc that grew zooming in; widening the range blacked
-      the whole hemisphere (big smooth globe self-shadows). Orbit uses normal-based lambert day/night only.
-      Real shadows live in walk mode instead (above).
+- [x] Orbit-view real shadows: FIXED (was abandoned). The old "eclipse" disc was a self-shadow blackout from
+      the celestial bodies + globe casting into the shadow map; fixed by marking sun-disc/moon/stars
+      NotShadowCaster + a zoom-scaled orbit cascade (near/far tracks camera dist). Orbit now shows a real
+      terminator shadow.
+- [x] Planet casts a shadow in BOTH views: the globe is now a shadow caster in orbit AND walk (was orbit-only;
+      walk forced NotShadowCaster to avoid curved-terrain self-shadow acne). Re-enabled in walk with a higher
+      per-mode shadow_normal_bias (3.2 walk / 1.8 orbit) so the terrain just past the horizon falls into the
+      planet's shadow at dawn/dusk without acne. camera::update_planet_caster + update_shadow_mode. Verified
+      live by the user.
+- [x] Wildfire flammability fix + re-enable (`FIRE_ENABLED=true`): the polar ice cap no longer burns
+      (`sphere::fuel` gates to 0 across the ice-temperature band, like ocean already did), so ocean + ice are
+      firebreaks. Fires spread far less easily: `FIRE_SPREAD` 0.5->0.18 and spread now SCALES with the
+      neighbor's fuel density (lush forest carries fire, sparse scrub barely does), `FUEL_MIN` 0.30->0.45,
+      `FIRE_DECAY` 0.12->0.18. Burning ALSO enriches soil where it burns: per-cell ash (`FIRE_ASH`) plus a new
+      `FIRE_BURN_ASH` deposit when a plant/tree/grass burns up (its biomass -> ash, x mass; trees ~3x) so
+      burned ground regrows richer. Glow shrunk + ocean-guarded so coarse coastal cells don't spill flame onto
+      the sea. Verified headless: pop stable ~49-63, fire avg 0.006-0.012 (contained), trees hold ~150.
 - [x] Earth-like geography (terrain features in sphere.rs): ~50% ocean (SEA_LEVEL 0.41), one great deep
       ocean + a second basin, two mountain ranges -- all GUARANTEED via placed gaussian landmarks (not left
       to noise). report_geography test confirms ocean ~47% / deep ~13% / mountain ~5%. Homeland moved to a

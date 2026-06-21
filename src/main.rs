@@ -95,6 +95,7 @@ fn main() {
     app.insert_resource(rng::Rng::seed(seed));
     app.insert_resource(sim::Soil::new()); // dynamic soil-fertility grid (M5 nutrient loop)
     app.insert_resource(sim::GroundWater::new()); // dynamic rain-fed ground-water grid (rain cycle)
+    app.insert_resource(sim::Climate::new()); // slow climate-memory grid (geological desert/rainforest drift)
     app.insert_resource(sim::Fire::new()); // lightning-ignited wildfire grid
     app.init_resource::<sim::Weather>(); // current rainfall intensity (storms onset + decay)
     app.init_resource::<sim::TreeBites>(); // per-tick fruit-tree grazing accumulator
@@ -126,7 +127,7 @@ fn main() {
             .add_systems(Startup, sim::spawn_world_headless)
             .add_systems(
                 Update,
-                (snapshot::snapshot_capture, sim::weather_step, sim::fire_step, sim::live_step, sim::predation_step, sim::plant_step, sim::rot_step, sim::generation_step).chain(),
+                (snapshot::snapshot_capture, sim::weather_step, sim::fire_step, sim::live_step, sim::predation_step, sim::grass_step, sim::plant_step, sim::rot_step, sim::generation_step).chain(),
             );
     } else {
         // Real-time visuals: step in FixedUpdate at the sim rate so sim-time = wall-time.
@@ -137,7 +138,7 @@ fn main() {
             .add_systems(Startup, (setup_scene, sim::spawn_world_render))
             .add_systems(
                 FixedUpdate,
-                (sim::weather_step, sim::fire_step, sim::live_step, sim::predation_step, sim::plant_step, sim::rot_step, sim::generation_step).chain(),
+                (sim::weather_step, sim::fire_step, sim::live_step, sim::predation_step, sim::grass_step, sim::plant_step, sim::rot_step, sim::generation_step).chain(),
             );
         if let Some(prefix) = capture {
             app.insert_resource(capture::CaptureCfg { prefix, when: cap_when, yaw: cap_yaw, off: cap_off, pitch: cap_pitch, orbit: cap_orbit, dist: cap_dist, underwater: cap_water })
@@ -156,9 +157,10 @@ fn setup_scene(
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     // planet: elevation-displaced, biome-vertex-colored globe. White base_color lets vertex colors show.
-    // NotShadowCaster: the big smooth globe must NOT cast. A directional shadow map fit around a planet-
-    // scale caster collapses depth precision -> ground shadows vanish (and the smooth sphere self-shadows
-    // into a blackout). It still RECEIVES, so trees/creatures drop crisp real shadows on the land in walk.
+    // The globe is a shadow caster in BOTH views (camera::update_planet_caster), so it shadows its own night
+    // side / the terrain just past the horizon at dawn-dusk. It also RECEIVES, so trees/creatures drop crisp
+    // real shadows on the land. Walk's curved-terrain self-shadow acne is held off by a higher per-mode
+    // shadow_normal_bias (camera::update_shadow_mode) + the 4096 shadow map.
     commands.spawn((
         Mesh3d(meshes.add(terrain::build_globe(160))),
         MeshMaterial3d(materials.add(StandardMaterial {
@@ -167,7 +169,7 @@ fn setup_scene(
             ..default()
         })),
         Transform::IDENTITY,
-        viz::Planet, // mode-toggled shadow caster: casts in orbit (night-side shadow), not in walk (acne)
+        viz::Planet, // shadow caster in both orbit + walk (night-side / terminator shadow)
     ));
     // ocean shell: a translucent blue sphere at sea level (land pokes above it, basins flood below). Glossy
     // (low roughness + high reflectance) so the sun glints off it; viz::animate_ocean breathes a slow swell.

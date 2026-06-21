@@ -15,6 +15,12 @@ pub struct Tree {
     pub edible: bool,
 }
 
+// Grass marker: a lesser ground plant. Shares PlantGenome/PlantState/Food (so the eat path treats it
+// like any plant) but lives on its own cap + lifecycle step (grass_step). Lesser = one nutrient, low
+// energy, ~0 defense, ~0 height, high regrow (turf survives grazing). Ubiquitous on plant-capable soil.
+#[derive(Component)]
+pub struct Grass;
+
 // Carrion marker + rot clock. A dead creature drops carrion: fresh = rich meat (no defense), but as
 // `age` climbs its nutrition fades and toxin rises -> rotten meat poisons the eater (BACKLOG P3).
 // Despawns once fully decomposed. Distinguishes carrion from living plants (which carry no Rot).

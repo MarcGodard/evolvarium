@@ -276,6 +276,10 @@ fn update_shadow_mode(
     let walk = *mode == CameraMode::Walk;
     for mut l in &mut lights {
         l.shadows_enabled = show_shadows.0; // real shadows in walk AND orbit now (no more eclipse disc)
+        // the planet now casts in both modes; on the surface the curved globe self-shadows the very ground
+        // the eye stands on -> needs a heftier normal bias to push the receiver off its own caster (no acne),
+        // while orbit (large-scale terminator, distant view) keeps the lighter bias for crisp object shadows.
+        l.shadow_normal_bias = if walk { 3.2 } else { 1.8 };
     }
     // orbit shadows are coarse (far camera, wide cascade) -> soften with multi-tap Gaussian PCF; walk stays
     // crisp (Hardware2x2) since the tight eye-level cascade already resolves sharp ground shadows.
@@ -328,10 +332,11 @@ fn update_shadow_cascade(
     }
 }
 
-// Toggle the planet globe's shadow-caster status by mode (runs on mode change). Orbit: the globe CASTS so
-// it shadows its own night side (objects on the dark hemisphere stop catching the sun "through" the planet).
-// Walk: the globe is NotShadowCaster -- a planet-scale self-shadow caused ground acne/blackout, and walk
-// sits on the lit side near local noon so night-through-planet is a non-issue.
+// Toggle the planet globe's shadow-caster status (runs on mode/shadow change). The globe CASTS in BOTH
+// orbit AND walk now (user: both views need the planet casting), so it shadows its own night side -- the
+// far hemisphere + the terrain just past the local horizon at dawn/dusk fall into the planet's own shadow
+// instead of catching the sun "through" the planet. Walk's curved-terrain self-shadow acne (the old reason
+// this was orbit-only) is countered by a higher shadow_normal_bias set per-mode in update_shadow_mode.
 fn update_planet_caster(
     mode: Res<CameraMode>,
     show_shadows: Res<crate::viz::ShowShadows>,
@@ -341,7 +346,8 @@ fn update_planet_caster(
     if !mode.is_changed() && !show_shadows.is_changed() {
         return;
     }
-    let cast = *mode == CameraMode::Orbit && show_shadows.0;
+    let _ = mode; // cast in both modes; only gated by the master shadow toggle
+    let cast = show_shadows.0;
     for e in &planet {
         if cast {
             commands.entity(e).remove::<bevy::light::NotShadowCaster>();

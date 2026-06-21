@@ -117,9 +117,17 @@ pub const SEED_VIA_GUT: f32 = 0.5; // max chance (x quality) an eaten plant disp
 pub const PLANT_START_MASS: f32 = 0.6;
 pub const PLANT_MIN_MASS: f32 = 0.15; // below this a grazed plant is fully consumed (carrot eaten whole)
 
+// --- grass: lesser ground cover. Ubiquitous on plant-capable soil; thin fallback food (own cap so it
+// neither counts against PLANT_CAP nor floods the food web). Yield kept low in PlantGenome::grass. ---
+pub const GRASS_CAP: usize = 8000; // target tuft count (whole-planet cover; main CPU lever: eat scan clones all food)
+pub const GRASS_EAT_GAIN: f32 = 0.35; // grass graze yield scale vs a plant bite (lesser: a thin supplement)
+pub const GRASS_START_MASS: f32 = 0.4;
+pub const GRASS_MIN_MASS: f32 = 0.1; // below this a grazed tuft is gone (regrows from refill elsewhere)
+pub const GRASS_HAB_MIN: f32 = 0.25; // min plant_habitability to seed/keep grass = "soil capable of plants"
+
 // --- trees: long-lived, near-uneatable plants ---
-pub const N_TREES: usize = 40; // initial trees
-pub const TREE_CAP: usize = 70; // max trees
+pub const N_TREES: usize = 240; // initial trees (whole-planet seeding, scattered worldwide)
+pub const TREE_CAP: usize = 480; // max trees (whole-planet forests; ambient reproduction fills toward this)
 pub const TREE_MATURITY: f32 = 14.0; // trees grow large before reproducing
 pub const P_TREE_REPRO: f32 = 0.004; // slow reproduction (long-lived, sparse)
 pub const TREE_DENSITY_R: f32 = 18.0; // trees self-limit clustering within this radius
@@ -182,16 +190,24 @@ pub const RAIN_RATE: f32 = 0.8;  // ground-water added/sec at full rain on a ful
 pub const EVAP: f32 = 0.06;      // ground-water evaporated/sec at noon (scaled by sunlight, x current water)
 pub const WET_GAIN: f32 = 0.45;  // how much saturated ground water adds to a plant's effective local moisture
 pub const WET_GROWTH: f32 = 0.3; // growth-rate boost from watered ground (rain visibly greens the land)
+// --- dynamic climate (geological): a THIRD moisture layer, slower than GroundWater. Per-cell long-term
+// moisture relaxes toward a drifting target (regional rain propensity minus aridity) over MONTHS of sim
+// time, so persistently-dry regions turn to desert + persistently-wet regions turn lush, and the wet belt
+// slowly migrates -> deserts + rainforests form, persist, and move. Shared sim+render (deterministic).
+pub const CLIMATE_RATE: f32 = 0.0003; // climate relax rate /sec toward target. tau=1/rate ~3333 sim-sec ~83 days (one day=2400 ticks=40s); geological
+pub const CLIMATE_VEG: f32 = 1.0; // how strongly climate moisture (vs static) drives plant growth/mortality (1=full)
+// (spatial drift consts CLIMATE_DRIFT + CLIMATE_SPEED live in sphere.rs alongside the other field consts)
 // Lightning -> fire: during a storm, lightning strikes ignite a fire-grid cell. Fire spreads through DRY
 // vegetation, burns plants/trees + hurts creatures caught in it, is doused by rain/wet ground, and leaves
 // fertile ash. Ties the weather system to a dramatic, visible ecological disturbance + renewal cycle.
 pub const P_LIGHTNING: f32 = 0.02; // per-tick strike chance while a storm is active (several per storm; most fizzle on wet ground, the dry-fuel ones catch)
 pub const LIGHTNING_RAIN: f32 = 0.4; // rain intensity above which lightning can strike (storms only)
 pub const FIRE_WET_MAX: f32 = 0.45; // fire only ignites/spreads into cells drier than this (wet ground won't burn)
-pub const FIRE_DECAY: f32 = 0.12; // natural burnout per sec
+pub const FIRE_DECAY: f32 = 0.18; // natural burnout per sec (raised: fires die out sooner, don't run away)
 pub const FIRE_DOUSE: f32 = 2.0; // extra burnout per sec per unit local ground water (rain puts fire out)
-pub const FIRE_SPREAD: f32 = 0.5; // spread rate per sec to adjacent dry cells
+pub const FIRE_SPREAD: f32 = 0.18; // base spread rate per sec to adjacent dry cells (lowered + now scaled by the neighbor's fuel density in fire_step, so sparse vegetation barely carries fire)
 pub const FIRE_ASH: f32 = 2.5; // soil fertility deposited per sec by a burning cell (ash enriches regrowth)
+pub const FIRE_BURN_ASH: f32 = 1.2; // EXTRA soil fertility deposited when a plant/tree burns UP (its biomass -> ash), x mass; trees deposit more (bigger biomass). Burned ground regrows richer.
 pub const FIRE_KILL: f32 = 0.4; // fire intensity at which a plant/tree in the cell burns up
 pub const FIRE_DAMAGE: f32 = 9.0; // energy/sec a creature loses standing in fire
 // Defense also taxes REPRODUCTION, not just growth: at carrying capacity growth cost is toothless, so

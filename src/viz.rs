@@ -5,10 +5,12 @@
 // All cosmetic; never touches sim state.
 use bevy::prelude::*;
 
-use crate::components::{Alive, Creature, DietState, Energy, Fitness, Food, Heading, Rot, Tree};
+use crate::components::{Alive, Creature, DietState, Energy, Fitness, Food, Grass, Heading, Rot, Tree};
 use crate::genome::{master_expression, Genome, NFOOD, NUTRIENTS};
 use crate::plant::{plant_color, PlantGenome, PlantState};
 use crate::sim::{grid_cell_surface, Fire, GenState, GroundWater, ROT_GONE};
+use bevy::asset::RenderAssetUsages;
+use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
 // Visual time-of-day offset (ticks) added to the sun ONLY for lighting + the sun/moon sky. Sim daylight
@@ -30,9 +32,10 @@ pub struct Underwater(pub bool);
 #[derive(Component)]
 pub struct Ocean;
 
-// The planet globe entity. Its shadow-caster status is toggled by camera mode: ON in orbit so the planet
-// shadows its own night side (no sun "through" the planet), OFF in walk where a planet-scale self-shadow
-// caused ground-scale acne/blackout (and walk sits on the lit side near noon anyway).
+// The planet globe entity. It casts a shadow in BOTH camera modes (camera::update_planet_caster), so the
+// planet shadows its own night side (no sun "through" the planet) in orbit AND, in walk, the terrain just
+// past the local horizon falls into the planet's shadow at dawn/dusk. The old walk self-shadow acne is held
+// off by a higher per-mode shadow_normal_bias (camera::update_shadow_mode).
 #[derive(Component)]
 pub struct Planet;
 
@@ -68,7 +71,8 @@ impl Plugin for VizPlugin {
                     draw_sensors,
                     add_plant_visuals,
                     size_plants,
-                    (day_night_lighting, time_of_day, toggle_shadows, walk_ambient, update_daycycle, track_underwater, update_sky, toggle_underwater_tint, animate_ocean),
+                    (add_grass_visuals, size_grass),
+                    (day_night_lighting, time_of_day, toggle_shadows, walk_ambient, update_daycycle, track_underwater, update_sky, toggle_underwater_tint, animate_ocean, update_globe_climate),
                     rain_visuals,
                     fire_visuals,
                     update_clouds,
@@ -151,7 +155,7 @@ fn add_plant_visuals(
     mesh: Option<Res<PlantMesh>>,
     trees: Option<Res<TreeMeshes>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    q: Query<(Entity, &PlantGenome, Option<&Tree>), (With<Food>, Without<Mesh3d>)>,
+    q: Query<(Entity, &PlantGenome, Option<&Tree>), (With<Food>, Without<Mesh3d>, Without<Grass>)>, // grass has its own visuals (add_grass_visuals)
 ) {
     let Some(mesh) = mesh else { return };
     for (e, g, tree) in &q {
@@ -211,7 +215,7 @@ fn color_carrion(mut mats: ResMut<Assets<StandardMaterial>>, q: Query<(&Rot, &Me
 // Scale plants by mass (growth visible) AND root them on the terrain. The height gene STRETCHES a
 // plant vertically (taller plant) rather than lifting it into the air -> tall plants read as tall but
 // their base stays on the ground (no floating). Trees render much bigger (tall trunk + canopy).
-fn size_plants(mut q: Query<(&PlantState, &PlantGenome, &mut Transform, Option<&Tree>), With<Food>>) {
+fn size_plants(mut q: Query<(&PlantState, &PlantGenome, &mut Transform, Option<&Tree>), (With<Food>, Without<Grass>)>) {
     for (st, g, mut tf, tree) in &mut q {
         let up = tf.translation.normalize_or_zero(); // outward surface normal at this spot
         let base = crate::sphere::surface_pos(up, 0.0); // foot on the terrain surface
@@ -231,6 +235,95 @@ fn size_plants(mut q: Query<(&PlantState, &PlantGenome, &mut Transform, Option<&
             tf.rotation = rot;
             tf.translation = base + up * (0.35 * girth * tall); // base rooted on the surface (no float)
         }
+    }
+}
+
+// Shared grass tuft mesh + material (inserted by spawn_world_render). One mesh + one material for ALL
+// tufts (cheap: grass is ubiquitous), unlike per-genome plant spheres.
+#[derive(Resource)]
+pub struct GrassMesh(pub Handle<Mesh>);
+#[derive(Resource)]
+pub struct GrassMaterial(pub Handle<StandardMaterial>);
+
+// Build one grass tuft as a clump of BLADES: each blade is a tall, thin, pointed strip that tapers to a
+// tip and arcs over (curved, not a flat sliver), spread over a small footprint + fanned around the clump.
+// Unit height (1.0) so size_grass scales the real length per soil. Double-sided material renders both
+// faces. Reads as real blades of grass at the walk view.
+pub fn grass_tuft_mesh() -> Mesh {
+    const BLADES: usize = 11;
+    let w = 0.022; // blade half-width at the base (thin)
+    let mut positions: Vec<[f32; 3]> = Vec::new();
+    let mut normals: Vec<[f32; 3]> = Vec::new();
+    let mut uvs: Vec<[f32; 2]> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+    for k in 0..BLADES {
+        let t = k as f32;
+        let a = t * 2.39996; // golden angle: spreads blade headings evenly around the clump
+        let (sa, ca) = a.sin_cos();
+        let r = 0.04 + 0.16 * ((t * 1.7).sin().abs()); // root offset from clump center (footprint)
+        let (ox, oz) = (r * ca, r * sa);
+        let h = 0.7 + 0.45 * ((t * 0.9).cos().abs()); // per-blade height variation
+        let curve = 0.18 * h; // tip arcs over in the blade's local +z -> a bent blade, not a flat spike
+        // blade profile in local (x across width, y up, z bend): base -> mid -> pointed tip
+        let prof = [
+            [-w, 0.0, 0.0],
+            [w, 0.0, 0.0],
+            [-w * 0.55, 0.55 * h, curve * 0.45],
+            [w * 0.55, 0.55 * h, curve * 0.45],
+            [0.0, h, curve], // tip (a point)
+        ];
+        let base = positions.len() as u32;
+        for (vi, p) in prof.iter().enumerate() {
+            // rotate the blade about Y by its heading `a`, then offset to its root in the clump
+            let x = p[0] * ca + p[2] * sa + ox;
+            let z = -p[0] * sa + p[2] * ca + oz;
+            positions.push([x, p[1], z]);
+            normals.push([0.0, 1.0, 0.0]); // up-facing -> blades catch the overhead sun (bright green)
+            uvs.push([if vi % 2 == 0 { 0.0 } else { 1.0 }, p[1] / h.max(0.001)]);
+        }
+        // two body quads + the pointed tip triangle
+        indices.extend_from_slice(&[
+            base, base + 1, base + 3, base, base + 3, base + 2, // lower quad
+            base + 2, base + 3, base + 4, // tip triangle
+        ]);
+    }
+    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+    mesh.insert_indices(Indices::U32(indices));
+    mesh
+}
+
+// Give any grass tuft lacking a mesh the shared tuft mesh + green material. Covers initial turf AND
+// tufts spawned by grass_step's refill.
+fn add_grass_visuals(
+    mut commands: Commands,
+    mesh: Option<Res<GrassMesh>>,
+    mat: Option<Res<GrassMaterial>>,
+    q: Query<Entity, (With<Grass>, Without<Mesh3d>)>,
+) {
+    let (Some(mesh), Some(mat)) = (mesh, mat) else { return };
+    for e in &q {
+        commands
+            .entity(e)
+            .insert((Mesh3d(mesh.0.clone()), MeshMaterial3d(mat.0.clone())));
+    }
+}
+
+// Grass LENGTH varies with SOIL: lush + tall on rich, moist, plant-capable ground; short + sparse on
+// marginal soil (a visible read of where the land is good). Plant mass (which itself grew faster on good
+// soil) nudges it a little more. Keeps the tuft rooted + standing on the sphere normal.
+fn size_grass(mut q: Query<(&PlantState, &mut Transform), With<Grass>>) {
+    for (st, mut tf) in &mut q {
+        let up = tf.translation.normalize_or_zero();
+        let base = crate::sphere::surface_pos(up, 0.0);
+        let soil = (0.5 * crate::sphere::plant_habitability(up) + 0.5 * crate::sphere::moisture(up)).clamp(0.0, 1.0);
+        let len = (0.5 + 1.5 * soil) * (0.7 + 0.3 * st.mass.min(1.0)); // ~0.5..2.0 units tall (soil-driven)
+        let girth = 1.4 + 1.1 * soil; // richer soil = wider, fuller clump
+        tf.scale = Vec3::new(girth, len, girth);
+        tf.rotation = Quat::from_rotation_arc(Vec3::Y, up);
+        tf.translation = base + up * 0.02; // roots on the surface
     }
 }
 
@@ -436,8 +529,15 @@ fn fire_visuals(fire: Res<Fire>, mut gizmos: Gizmos) {
         }
         let surf = grid_cell_surface(c);
         let up = surf.normalize_or_zero();
+        // safety: never draw a flame over water (sim won't ignite ocean cells; this guards coarse-grid
+        // coastal cells whose center reads as sea -> no glow spilling onto the waves).
+        if crate::sphere::is_ocean(up) {
+            continue;
+        }
         let col = Color::srgb(1.0, 0.35 + 0.25 * f, 0.05); // deep orange .. yellow-hot
-        gizmos.sphere(surf + up * (0.6 + 2.0 * f), 0.6 + 1.8 * f, col);
+        // small, low glow (was up to r2.4 raised 2.6): a coarse fire cell sits near the coast, so an
+        // oversized blob spilled over the adjacent sea. Keep it tight to the burning land cell.
+        gizmos.sphere(surf + up * (0.3 + 0.8 * f), 0.35 + 0.7 * f, col);
     }
 }
 
@@ -697,6 +797,42 @@ fn animate_ocean(gen: Res<GenState>, mut q: Query<&mut Transform, With<Ocean>>) 
     for mut tf in &mut q {
         tf.scale = Vec3::splat(s);
     }
+}
+
+// Globe climate recolor: as the slow Climate grid drifts, repaint the planet's LAND vertices (dry -> sand,
+// wet -> green) so deserts + rainforests visibly form/migrate over time. Throttled (climate is geological):
+// only repaints every GLOBE_RECOLOR_TICKS sim-ticks. Cheap: one pass rewriting ATTRIBUTE_COLOR from the
+// bilinear-sampled climate moisture (ocean depth + polar ice branches are moisture-independent -> stable).
+const GLOBE_RECOLOR_TICKS: u32 = 600; // ~10 sim-seconds between repaints (51k verts, negligible cost)
+fn update_globe_climate(
+    gen: Res<GenState>,
+    climate: Res<crate::sim::Climate>,
+    planet: Query<&Mesh3d, With<Planet>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut next: Local<u32>,
+) {
+    if gen.tick < *next {
+        return; // not time yet (also paints once at startup, when tick 0 >= next 0)
+    }
+    *next = gen.tick + GLOBE_RECOLOR_TICKS;
+    let Ok(h) = planet.single() else { return };
+    let Some(mesh) = meshes.get_mut(&h.0) else { return };
+    // own the positions so the immutable borrow ends before we re-insert the color attribute
+    let positions: Vec<[f32; 3]> = match mesh.attribute(Mesh::ATTRIBUTE_POSITION) {
+        Some(bevy::mesh::VertexAttributeValues::Float32x3(p)) => p.clone(),
+        _ => return,
+    };
+    let colors: Vec<[f32; 4]> = positions
+        .iter()
+        .map(|p| {
+            // vertex pos = d * (R + elevation) -> normalize recovers the surface direction
+            let d = Vec3::new(p[0], p[1], p[2]).normalize_or_zero();
+            let m = climate.sample(d);
+            let c = crate::sphere::biome_color_with_moisture(d, m);
+            [c[0], c[1], c[2], 1.0]
+        })
+        .collect();
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
 }
 
 // Top-center day/night phase readout (walk mode). Tells you where in the cycle you are at a glance.

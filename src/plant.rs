@@ -79,6 +79,29 @@ impl PlantGenome {
         }
     }
 
+    // Lesser ground plant (grass). One nutrient, low energy density, defenseless, ~flat, full-sun, high
+    // regrow (turf survives grazing), fast maturity. Cheap fallback food; blankets plant-capable soil.
+    pub fn grass(rng: &mut Rng) -> Self {
+        // exactly ONE nutrient axis populated -> "fewer nutrient types" than a normal plant (~3-4).
+        let mut nutrients = [0.0f32; NUTRIENTS];
+        nutrients[(rng.f32() * NUTRIENTS as f32) as usize % NUTRIENTS] = rng.range(0.4, 0.6);
+        PlantGenome {
+            kind: 0, // green family
+            nutrient: rng.range(0.2, 0.3), // low energy density
+            defense: 0.0,                  // defenseless: trivial to graze
+            quality: rng.range(0.4, 0.6),
+            wet: rng.range(0.3, 0.7), // tolerant of most non-extreme soil moisture
+            height: 0.02,             // flat: any creature reaches it
+            light_pref: 0.85,         // sun-loving turf
+            regrow: 0.9,              // survives small bites + regrows (turf, not consumed whole)
+            branches: 0.0,
+            spread: 2.5,
+            maturity: 1.0, // matures fast
+            nutrients,
+            toxicity: 0.0,
+        }
+    }
+
     // Tree-specific evolution: trees evolve like plants but with BIGGER ranges + tree-relevant genes.
     // kind + defense stay pinned (tree identity); height capped at 1.0 (never taller than today's max).
     pub fn mutate_tree(&mut self, rng: &mut Rng) {

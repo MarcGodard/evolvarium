@@ -3,8 +3,8 @@
 A 3D artificial-life sim on a small **planet**. Tiny per-creature neural-net brains (genome = weights +
 sensors + traits) forage, eat, fight, breed, and learn during their lives; a genetic algorithm plus
 lifetime learning evolve them against a living, co-evolving food web. Creatures live on the surface of a
-sphere with day/night, drifting clouds, cloud-driven rain, lightning wildfire, oceans, mountains, and
-cold poles vs a warm equator. Design spec lives in `../clients/evolvarium/` (`00-concept.md` ..).
+sphere with day/night, drifting clouds, cloud-driven rain, lightning wildfire, oceans, mountains, and cold
+poles vs a warm equator. Design spec lives in `../clients/evolvarium/` (`00-concept.md` ..).
 
 ## Run it
 
@@ -16,8 +16,11 @@ cargo run -- --headless        # no window, fast-forward, logs per-generation st
 First build compiles Bevy (slow, minutes); later builds are fast. Linux needs the usual Bevy deps
 (Vulkan/X11/Wayland, alsa, udev).
 
-**Camera (orbit):** hold **right-mouse + drag** to rotate around the planet, **scroll** to zoom, **WASD/QE**
-as a keyboard fallback. **Left-click** a creature/plant to inspect it; **F** follows the selection.
+**Camera:** **TAB** toggles ORBIT (in space) and WALK (on the ground). In orbit, hold **right-mouse + drag**
+to rotate around the planet, **scroll** to zoom, **WASD/QE** as a keyboard fallback. In walk, the eye rides a
+fixed height above the terrain: **WASD** move, arrows or right-drag to look, **Shift** to run, **[ / ]** scrub
+time-of-day, **\\** jump to noon. **Left-click** a creature/plant to inspect it; **F** follows the selection.
+Real sun shadows render in walk mode; **H** opens a legend of every control and HUD field.
 
 ### Headless + flags
 
@@ -41,20 +44,30 @@ cargo run -- --headless --shots=planet --shot-tick=4000   # CPU-render PNG views
 - **Climate**: cold poles + high elevation, warm equator -> a latitudinal thermal niche (creatures evolve
   `temp_pref`). Day/night is positional (the lit half faces the orbiting sun; a moon orbits too).
 - **Weather**: clouds drift; rain falls only from thick clouds (~10%), watering the ground; lightning can
-  ignite wildfire that spreads through dry fuel, burns vegetation, and leaves fertile ash.
-- **Food web**: plants, fruit trees (reach-gated, seed-dispersed when eaten), evergreens, carrion that
-  rots to poison, and a soil-fertility loop (death feeds the ground).
+  ignite wildfire that spreads through dry vegetation (oceans + the polar ice cap are firebreaks; spread
+  scales with fuel density), burns plants/trees, and leaves fertile ash so burned ground regrows richer.
+- **Food web**: plants, fruit trees (reach-gated, seed-dispersed when eaten, dropping fallen fruit),
+  evergreens, fermenting fruit/detritus, carrion that rots to poison, and a soil-fertility loop (death
+  feeds the ground).
 
 ## The genome (every trait is a trade-off)
 
 Creatures evolve: directional **sensors** (angle + range), a variable-topology **brain** (weights +
-per-connection plasticity + hidden-layer size), **diet** expression + **rigidity** (specialist vs
-generalist), **bite**, **height**, **size**, **swim** (aquatic niche), **social** (kin herding), and
-**temp_pref** (thermal/latitudinal niche). Plants/trees evolve nutrient, defense, quality, moisture
-preference, height, light preference, regrow, branches, spread, and maturity.
+per-connection plasticity + hidden-layer size), a 10-nutrient **diet** genome (per-nutrient `uptake` +
+**rigidity** specialist-vs-generalist), **bite**, **height**, **size**, **swim** (aquatic niche),
+**alpine** (mountain niche), **social** (kin herding), **temp_pref** (thermal/latitudinal niche),
+**longevity** (long life vs upkeep), **metab** (frugal/sluggish vs fast/costly), **parental** (r/K
+investment), and **adiposity** (lean/nimble vs fatty/buffered). Plants/trees evolve a 10-nutrient profile
+plus defense, quality, moisture preference, height, light preference, regrow, branches, spread, and maturity.
+
+**Metabolism**: three energy stores (fast / sugar / fat) burn fast->sugar->fat; fast leaks even at rest,
+fat mobilizes slowly and carries upkeep. Plants give sugar, meat gives fat, fruit and fermenting detritus
+give the volatile fast store. A regulatory `master_expression` (reserves vs uptake demand) gates how much
+energy each food yields, so diet breadth is a real trade-off.
 
 Reproduction is **continuous** by default (self-sustaining birth/death after a short generational warm-up);
 the population self-regulates to a stable carrying capacity (~70-90). Creatures age and die of old age.
+`--mating` enables two-parent assortative reproduction (crossover + mate choice) for stronger speciation.
 
 ## Layout
 
