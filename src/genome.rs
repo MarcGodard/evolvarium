@@ -1,12 +1,14 @@
 // M3: VARIABLE-TOPOLOGY genome. The GA now directs where the NN's input nodes are:
 //   sensors = evolvable list of directional food-eyes (count + angle + range).
-// Brain resizes to match (dynamic I/O). Hidden size fixed for now; full morphology + env-driven
-// growth come later (02/03). Weights kept as structured layers so adding/removing a sensor is clean.
+// Brain resizes to match (dynamic I/O). Hidden-layer size is ALSO evolvable now (add/remove_hidden);
+// per-neuron upkeep (BRAIN_COST) is the trade-off. Weights kept as structured layers so growing/
+// shrinking a sensor or a hidden neuron is clean.
 use crate::rng::Rng;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-pub const HIDDEN: usize = 6;
+pub const MIN_HIDDEN: usize = 2; // brains never shrink below this
+pub const MAX_HIDDEN: usize = 16; // ...nor grow beyond (bounds the per-neuron upkeep cost)
 pub const OUTPUTS: usize = 2; // [thrust 0..1, turn -1..1]
 pub const NFOOD: usize = 4; // food types (epigenetic diet model, see 12)
 
@@ -64,10 +66,10 @@ pub fn n_inputs(n_sensors: usize) -> usize {
     n_sensors * SIG_PER_SENSOR + GLOBAL_INPUTS
 }
 
-fn random_net(rng: &mut Rng, n_in: usize, plasticity: bool) -> Net {
+fn random_net(rng: &mut Rng, n_in: usize, n_hidden: usize, plasticity: bool) -> Net {
     let cell = |rng: &mut Rng| if plasticity { rng.f32() * 0.2 } else { rng.range(-1.0, 1.0) };
-    let ih = (0..HIDDEN).map(|_| (0..n_in + 1).map(|_| cell(rng)).collect()).collect();
-    let ho = (0..OUTPUTS).map(|_| (0..HIDDEN + 1).map(|_| cell(rng)).collect()).collect();
+    let ih = (0..n_hidden).map(|_| (0..n_in + 1).map(|_| cell(rng)).collect()).collect();
+    let ho = (0..OUTPUTS).map(|_| (0..n_hidden + 1).map(|_| cell(rng)).collect()).collect();
     Net { ih, ho }
 }
 
@@ -81,14 +83,15 @@ impl Genome {
             })
             .collect();
         let n_in = n_inputs(n_sensors);
+        let n_hidden = 3 + (rng.f32() * 4.0) as usize; // 3..6 to start; evolves via add/remove_hidden
         let mut expr0 = [0.0f32; NFOOD];
         for e in expr0.iter_mut() {
             *e = rng.f32();
         }
         Genome {
             sensors,
-            net: random_net(rng, n_in, false),
-            plast: random_net(rng, n_in, true),
+            net: random_net(rng, n_in, n_hidden, false),
+            plast: random_net(rng, n_in, n_hidden, true),
             expr0,
             rigidity: rng.f32(),
             bite: rng.f32() * 0.5,
@@ -162,6 +165,43 @@ impl Genome {
         }
         if rng.f32() < 0.06 && self.sensors.len() > MIN_SENSORS {
             self.remove_sensor(rng);
+        }
+        // structural: grow / shrink the HIDDEN layer (brain capacity evolves; per-neuron upkeep is the cost)
+        if rng.f32() < 0.05 && self.net.ih.len() < MAX_HIDDEN {
+            self.add_hidden(rng);
+        }
+        if rng.f32() < 0.05 && self.net.ih.len() > MIN_HIDDEN {
+            self.remove_hidden(rng);
+        }
+    }
+
+    // Grow the hidden layer by one neuron: a new ih row (input weights) + a new column in every ho row
+    // (its output weights), in both net + plast (kept same shape). Brain rebuilt from genome on spawn.
+    fn add_hidden(&mut self, rng: &mut Rng) {
+        let n_in1 = self.net.ih[0].len(); // n_in + 1 (incl. bias column)
+        self.net.ih.push((0..n_in1).map(|_| rng.range(-1.0, 1.0)).collect());
+        self.plast.ih.push((0..n_in1).map(|_| rng.f32() * 0.2).collect());
+        for row in &mut self.net.ho {
+            let bias = row.len() - 1; // insert the new hidden->output weight before the bias
+            row.insert(bias, rng.range(-1.0, 1.0));
+        }
+        for row in &mut self.plast.ho {
+            let bias = row.len() - 1;
+            row.insert(bias, rng.f32() * 0.2);
+        }
+    }
+
+    // Shrink the hidden layer: drop a random hidden neuron's ih row + its column in every ho row.
+    fn remove_hidden(&mut self, rng: &mut Rng) {
+        let h = self.net.ih.len();
+        let idx = (rng.f32() * h as f32) as usize % h;
+        self.net.ih.remove(idx);
+        self.plast.ih.remove(idx);
+        for row in &mut self.net.ho {
+            row.remove(idx); // idx < bias position, so this drops that neuron's output weight
+        }
+        for row in &mut self.plast.ho {
+            row.remove(idx);
         }
     }
 

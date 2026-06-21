@@ -56,6 +56,7 @@ pub const CLIMB_COST: f32 = 1.2;
 pub const DESCEND_REFUND: f32 = 0.4;
 pub const ROCK_MOVE_COST: f32 = 9.0; // extra energy/sec moving over rocky highland (hard to cross)
 pub const SENSE_COST: f32 = 0.012; // energy/sec per unit of total sensor range (long-range vision isn't free)
+pub const BRAIN_COST: f32 = 0.05; // energy/sec per hidden neuron: a bigger brain (more nodes) costs upkeep, so the NN grows only when the extra compute pays off -> brain size evolves to an interior optimum
 pub const EAT_RADIUS: f32 = 1.1;
 pub const ENERGY_MAX: f32 = 60.0; // energy ceiling; eating past it harms (overeating trade-off, see 12)
 pub const OVEREAT_G: f32 = 0.2; // growth-load gained per unit of energy eaten while already full

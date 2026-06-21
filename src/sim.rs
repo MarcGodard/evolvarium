@@ -745,6 +745,7 @@ pub fn live_step(
             + BITE_COST * genome.bite
             + ROCK_MOVE_COST * rock * thrust.abs()
             + SENSE_COST * sense_range
+            + BRAIN_COST * genome.net.ih.len() as f32 // bigger brain = more upkeep
             + HEIGHT_COST * genome.height
             + LIGHT_COST * (light - genome.light_pref).abs()
             + SWIM_LAND_COST * genome.swim * (1.0 - wet_here) // fins are a liability on dry land
@@ -1126,6 +1127,7 @@ pub fn generation_step(
     let avg_size: f32 = scored.iter().map(|(_, g)| g.size).sum::<f32>() / n as f32;
     let avg_swim: f32 = scored.iter().map(|(_, g)| g.swim).sum::<f32>() / n as f32; // >0.5 => aquatic niche emerging
     let avg_social: f32 = scored.iter().map(|(_, g)| g.social).sum::<f32>() / n as f32; // herd instinct
+    let avg_hidden: f32 = scored.iter().map(|(_, g)| g.net.ih.len() as f32).sum::<f32>() / n as f32; // brain size
     let tree_n = tq.iter().len();
     let avg_tree_h = if tree_n > 0 { tq.iter().map(|g| g.height).sum::<f32>() / tree_n as f32 } else { 0.0 }; // tree reach gene
     let avg_tree_b = if tree_n > 0 { tq.iter().map(|g| g.branches).sum::<f32>() / tree_n as f32 } else { 0.0 }; // tree branches gene
@@ -1137,7 +1139,7 @@ pub fn generation_step(
     let avg_wet: f32 = pq.iter().map(|(g, _)| g.wet).sum::<f32>() / plant_n as f32;
     if gen.diet {
         let avg_rig: f32 = scored.iter().map(|(_, g)| g.rigidity).sum::<f32>() / n as f32;
-        info!("gen {:>3} | nutri {:>6.2} | sens {:.1} r{:.0} | rig {:.2} | bite {:.2} vs def {:.2} | light {:.2} sz {:.2} sw {:.2} so {:.2} | plant-nut {:.2} qual {:.2} wet {:.2} | roam {:.2} elev {:.1} | plants {} soil {:.2} gw {:.2} | trees {} h{:.2} b{:.2}", gen.generation, avg, avg_sensors, avg_range, avg_rig, avg_bite, avg_def, avg_light, avg_size, avg_swim, avg_social, avg_nut, avg_qual, avg_wet, avg_roam, avg_elev, plant_n, soil.avg(), gw.avg(), tree_n, avg_tree_h, avg_tree_b);
+        info!("gen {:>3} | nutri {:>6.2} | sens {:.1} r{:.0} | rig {:.2} | bite {:.2} vs def {:.2} | light {:.2} sz {:.2} sw {:.2} so {:.2} brain {:.1} | plant-nut {:.2} qual {:.2} wet {:.2} | roam {:.2} elev {:.1} | plants {} soil {:.2} gw {:.2} | trees {} h{:.2} b{:.2}", gen.generation, avg, avg_sensors, avg_range, avg_rig, avg_bite, avg_def, avg_light, avg_size, avg_swim, avg_social, avg_hidden, avg_nut, avg_qual, avg_wet, avg_roam, avg_elev, plant_n, soil.avg(), gw.avg(), tree_n, avg_tree_h, avg_tree_b);
     } else {
         info!("gen {:>3} | food {:>6.2} | sens {:.1} r{:.0} | bite {:.2} vs def {:.2} | plant-nut {:.2} qual {:.2} wet {:.2} | roam {:.2} elev {:.1} | plants {} soil {:.2} gw {:.2}", gen.generation, avg, avg_sensors, avg_range, avg_bite, avg_def, avg_nut, avg_qual, avg_wet, avg_roam, avg_elev, plant_n, soil.avg(), gw.avg());
     }
