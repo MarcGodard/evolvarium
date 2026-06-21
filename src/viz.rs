@@ -43,6 +43,7 @@ impl Plugin for VizPlugin {
                     pick_on_click,
                     update_stats,
                     update_world_stats,
+                    time_controls,
                     draw_selection,
                 ),
             );
@@ -280,7 +281,7 @@ fn fire_visuals(fire: Res<Fire>, mut gizmos: Gizmos) {
 pub struct ShowSensors(pub bool);
 
 fn log_viz_help() {
-    info!("viz: creature hue=diet specialization, vividness=rigidity, size=sensor count | press G = show sensor rays");
+    info!("viz: creature hue=diet specialization, vividness=rigidity, size=sensor count | G=sensor rays | SPACE=pause | +/-=sim speed");
 }
 
 // Hue per dominant food/diet type, matching the food palette (green/purple/gold/cyan).
@@ -328,6 +329,31 @@ fn restyle_creatures(
 fn toggle_sensors(keys: Res<ButtonInput<KeyCode>>, mut show: ResMut<ShowSensors>) {
     if keys.just_pressed(KeyCode::KeyG) {
         show.0 = !show.0;
+    }
+}
+
+// God-controls: SPACE pauses/resumes the sim, +/- fast-forward / slow down. Drives Bevy's virtual clock,
+// which FixedUpdate advances from -> pausing/speeding it pauses/speeds the whole simulation, no sim change.
+fn time_controls(keys: Res<ButtonInput<KeyCode>>, mut vtime: ResMut<Time<Virtual>>) {
+    if keys.just_pressed(KeyCode::Space) {
+        if vtime.is_paused() {
+            vtime.unpause();
+            info!("sim resumed");
+        } else {
+            vtime.pause();
+            info!("sim PAUSED");
+        }
+    }
+    let cur = vtime.relative_speed();
+    if keys.just_pressed(KeyCode::Equal) || keys.just_pressed(KeyCode::NumpadAdd) {
+        let s = (cur * 2.0).min(16.0);
+        vtime.set_relative_speed(s);
+        info!("sim speed {s:.2}x");
+    }
+    if keys.just_pressed(KeyCode::Minus) || keys.just_pressed(KeyCode::NumpadSubtract) {
+        let s = (cur * 0.5).max(0.25);
+        vtime.set_relative_speed(s);
+        info!("sim speed {s:.2}x");
     }
 }
 
