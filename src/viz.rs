@@ -435,7 +435,13 @@ pub fn noon_offset(d: Vec3, tick: u32) -> i64 {
 fn rain_visuals(gen: Res<GenState>, mut gizmos: Gizmos) {
     use std::f32::consts::{FRAC_PI_2, PI, TAU};
     let (rows, cols) = (44, 88);
-    let t = gen.tick as f32;
+    // Fall span + speed are CONSTANT (not derived from rain intensity). rain_at animates every tick (clouds
+    // drift), so an intensity-derived span made the modulus + jitter jump each tick -> drops bounced up/down
+    // back+forth instead of falling. FALL_SPEED*FALL_SPAN cycle = whole ticks, and the tick is wrapped to an
+    // exact multiple of that cycle -> seamless wrap + no f32 precision drift on long runs.
+    const FALL_SPAN: f32 = 9.0; // drop travel distance (surface .. top of streak)
+    const FALL_SPEED: f32 = 0.25; // units per tick
+    let t = (gen.tick % 180_000) as f32; // 180000 = 5000 * (FALL_SPAN/FALL_SPEED) -> phase identical across wrap
     for j in 0..rows {
         for i in 0..cols {
             let lat = -FRAC_PI_2 + PI * (j as f32 + 0.5) / rows as f32;
@@ -453,9 +459,9 @@ fn rain_visuals(gen: Res<GenState>, mut gizmos: Gizmos) {
                 // spread the drop across the cell footprint in the tangent plane
                 let foot =
                     base + east * (hash01(seed) - 0.5) * 4.0 + north * (hash01(seed ^ 0x55) - 0.5) * 4.0;
-                // fall: bottom of the streak slides span..0 over time then wraps back to the top
-                let span = 7.0 + 4.0 * r;
-                let fall = span - ((t * 0.25 + hash01(seed ^ 0xAA) * span) % span);
+                // fall: bottom of the streak slides FALL_SPAN..0 over time then wraps back to the top
+                let fall =
+                    FALL_SPAN - ((t * FALL_SPEED + hash01(seed ^ 0xAA) * FALL_SPAN) % FALL_SPAN);
                 let len = 1.2 + 1.5 * r; // heavier rain = longer streaks
                 let head = Color::srgba(0.70, 0.80, 1.0, (0.35 + 0.5 * r).min(0.85)); // bright drop head
                 let tail = Color::srgba(0.70, 0.80, 1.0, 0.0); // fades into a motion tail

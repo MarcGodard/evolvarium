@@ -190,6 +190,16 @@ pub const HABITAT_KILL: f32 = 0.03; // per-tick death scale in poor sites (deep 
 pub const DROWN_KILL: f32 = 0.06;   // per-tick death scale for a non-aquatic plant fully submerged
 pub const DROWN_TREE: f32 = 0.5;    // per-tick death for a tree in water (trees are land-only, no kelp forests)
 pub const SEASON_FREQ: f32 = 0.4; // seasonal wet/dry oscillation speed (radians per generation)
+// --- new plant genes (real-life flora: aquatic depth, drought, climate niche, ecology) ---
+pub const WATER_LIGHT_ATTEN: f32 = 0.85; // sunlight lost over a full water column: deep sea is dim, so only
+                                         // shade plants (low light_pref, e.g. kelp) thrive deep; sun-lovers
+                                         // (lily) need the shallows -> the deep-vs-shallow sun gradient.
+pub const CLIMB_LIGHT: f32 = 0.4;        // vine light bonus: a climber reaches better-lit canopy (lf += climb*this)
+pub const SUCC_BUFFER: f32 = 0.9;        // succulence drought buffer: water storage offsets DRY-side moisture stress
+pub const TEMP_FLOOR: f32 = 0.45;        // floor on a plant's thermal growth factor (off-niche grows slow, not zero)
+pub const TEMP_KILL: f32 = 0.01;         // per-tick death scale for climate-niche mismatch beyond tolerance
+pub const TEMP_TOL: f32 = 0.3;           // temp_pref mismatch under this is harmless
+pub const NFIX_RATE: f32 = 0.6;          // soil fertility/sec a full nitrogen-fixer (legume) adds at its spot
 // Dynamic ground water (rain cycle): a wetness layer on TOP of the static terrain moisture. The sun
 // evaporates it (faster at noon), storms refill it. Rocky cells shed runoff (no gain); grassy cells
 // soak it up -> after a heavy rain, low-lying grassland turns wet and favors wet-liking plants, which

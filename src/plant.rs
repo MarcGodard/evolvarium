@@ -12,6 +12,46 @@ pub const PLANT_MIN: usize = 140; // reseed floor so the food web can't fully co
 pub const P_REPRO: f32 = 0.015; // per-tick reproduction chance for a mature plant
 const GROWTH_BASE: f32 = 1.2; // mass/sec at full growth allocation
 
+// Plant growth FORM (silhouette): picks the render mesh, so the world reads as a real botanical mix
+// instead of identical balls. Visual identity per lineage (stable: doesn't drift on mutate). Aquatic
+// forms (LILYPAD/KELP) render at/under the waterline. See viz::PlantForms for the meshes.
+pub mod form {
+    pub const HERB: u8 = 0; // small leafy plant (the generic default)
+    pub const SHRUB: u8 = 1; // rounded woody bush
+    pub const GROUNDCOVER: u8 = 2; // low spreading mat (clover, creeping herbs)
+    pub const FERN: u8 = 3; // arching fronds (shade, moist)
+    pub const SUCCULENT: u8 = 4; // fat ribbed body (cactus/aloe, desert)
+    pub const REED: u8 = 5; // tall thin vertical stalks (wetland edge)
+    pub const FLOWER_STALK: u8 = 6; // slim stem topped by a bloom (wildflower)
+    pub const ROSETTE: u8 = 7; // low radial leaves (agave, lettuce, thistle)
+    pub const LILYPAD: u8 = 8; // flat floating disc on the water surface
+    pub const KELP: u8 = 9; // tall swaying fronds, deep + submerged
+    pub const MUSHROOM: u8 = 10; // cap on a stem (fungus, detritus)
+    pub const MOSS: u8 = 11; // very low ground mat (deep shade)
+    pub const COUNT: u8 = 12;
+}
+
+// Founding species presets. Each seeds a recognizable real-world plant (sensible gene combo), then evolves
+// from there. sim::plant_for_site picks one per biome (temperature, moisture, water depth, rockiness).
+#[derive(Clone, Copy)]
+pub enum Archetype {
+    Clover,       // groundcover legume: low, edible, nitrogen-fixing, fast
+    Wildflower,   // flowering herb: sweet, blooms, mid
+    BerryBush,    // shrub: fruiting, sweet, thorny, regrows after a bite
+    Fern,         // shade frond: low light, moist, no flower
+    Cactus,       // desert succulent: drought-buffered, spiny, slow, warm
+    Reed,         // wetland edge: tall, wet-loving, emergent
+    Thistle,      // weed: bitter/toxic, thorny rosette, hardy + allelopathic
+    Nightshade,   // toxic berries: fruit that poisons (sweet-looking, bitter)
+    Moss,         // deep-shade mat: tiny, moist, cool
+    AlpineCushion,// cold-niche cushion: tiny dense, cold-tolerant
+    Tumbleweed,   // arid weed: dry, hardy, fire-adapted, allelopathic
+    Waterlily,    // surface aquatic: full sun, floating pad + bloom
+    Eelgrass,     // shallow submerged seagrass: mid light
+    Kelp,         // deep submerged: NEEDS LESS SUN (shade), tall fronds
+    AlgaeMat,     // surface algae film: full sun, fast, low
+}
+
 #[derive(Component, Clone, Serialize, Deserialize)]
 pub struct PlantGenome {
     pub kind: u8,      // food/diet type (couples to creature expression, see 12)
