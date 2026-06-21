@@ -25,7 +25,7 @@ impl Plugin for VizPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ShowSensors>()
             .init_resource::<Selected>()
-            .add_systems(Startup, (log_viz_help, spawn_stats_ui, spawn_clouds))
+            .add_systems(Startup, (log_viz_help, spawn_stats_ui, spawn_world_stats_ui, spawn_clouds))
             .add_systems(
                 Update,
                 (
@@ -42,6 +42,7 @@ impl Plugin for VizPlugin {
                     color_carrion,
                     pick_on_click,
                     update_stats,
+                    update_world_stats,
                     draw_selection,
                 ),
             );
@@ -341,6 +342,55 @@ pub struct Selected {
 
 #[derive(Component)]
 struct StatsText;
+
+// Live world dashboard (bottom-left): population, day, average evolved genes + niche counts. Render-only.
+#[derive(Component)]
+struct WorldStatsText;
+
+fn spawn_world_stats_ui(mut commands: Commands) {
+    commands.spawn((
+        Text::new("world..."),
+        TextFont { font_size: 13.0, ..default() },
+        TextColor(Color::srgb(0.78, 0.9, 1.0)),
+        Node {
+            position_type: PositionType::Absolute,
+            bottom: Val::Px(8.0),
+            left: Val::Px(8.0),
+            ..default()
+        },
+        WorldStatsText,
+    ));
+}
+
+// Recompute the world dashboard each frame from the living population (cheap aggregate over creatures).
+fn update_world_stats(
+    gen: Res<GenState>,
+    creatures: Query<(&Genome, &Alive), With<Creature>>,
+    mut text: Query<&mut Text, With<WorldStatsText>>,
+) {
+    let Ok(mut t) = text.single_mut() else { return };
+    let (mut n, mut temp, mut lng, mut met, mut par) = (0u32, 0.0f32, 0.0f32, 0.0f32, 0.0f32);
+    let (mut cold, mut warm, mut aq, mut land, mut spec) = (0u32, 0u32, 0u32, 0u32, 0u32);
+    for (g, alive) in &creatures {
+        if !alive.0 {
+            continue;
+        }
+        n += 1;
+        temp += g.temp_pref;
+        lng += g.longevity;
+        met += g.metab;
+        par += g.parental;
+        if g.temp_pref < 0.4 { cold += 1; } else if g.temp_pref > 0.6 { warm += 1; }
+        if g.swim > 0.6 { aq += 1; } else if g.swim < 0.3 { land += 1; }
+        if g.rigidity > 0.6 { spec += 1; }
+    }
+    let nf = n.max(1) as f32;
+    let day = gen.tick / crate::sphere::DAY_TICKS;
+    t.0 = format!(
+        "WORLD\npop        {n}\nday        {day}\ntemp avg   {:.2}  (cold {cold} / warm {warm})\nlongevity  {:.2}\nmetab      {:.2}\nr/K        {:.2}\nhabitat    aquatic {aq} / land {land}\nspecialists {spec}",
+        temp / nf, lng / nf, met / nf, par / nf
+    );
+}
 
 fn spawn_stats_ui(mut commands: Commands) {
     commands.spawn((
