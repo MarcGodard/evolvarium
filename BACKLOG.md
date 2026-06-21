@@ -77,6 +77,10 @@ live in `config.rs`; the live conversion plan is `SPHERE-PLAN.md`.
       or right-drag look, Shift run. Real shadows ON only in walk (close horizon -> range covers view, no
       eclipse disc); OFF in orbit. Ground-tuned cascade (max 130, first bound 12); globe+ocean NotShadowCaster
       so only trees/creatures cast. camera::CameraMode + WalkCam + update_shadow_mode.
+- [x] WALK lighting fix: walk used to look like permanent night (positional day/night -> spawned on the
+      dark hemisphere half the time; a day is only ~2400 ticks). Entering walk now snaps the sky to local
+      noon via a visual SunOffset (lights + sun/moon only; sim daylight/rest untouched). [ / ] scrub
+      time-of-day, \ jump to noon (golden-hour shadows on demand). Ambient lifts 220->550 in walk.
 - [~] Orbit-view real shadows: ABANDONED. A directional shadow map only covers maximum_distance around the
       camera, so the boundary showed as a dark "eclipse" disc that grew zooming in; widening the range blacked
       the whole hemisphere (big smooth globe self-shadows). Orbit uses normal-based lambert day/night only.
