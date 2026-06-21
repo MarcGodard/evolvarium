@@ -11,6 +11,12 @@ use crate::plant::{plant_color, PlantGenome, PlantState};
 use crate::sim::{grid_cell_surface, Fire, GenState, GroundWater, ROT_GONE};
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
+// Visual time-of-day offset (ticks) added to the sun ONLY for lighting + the sun/moon sky. Sim daylight
+// (creature rest, plant growth) still reads raw tick. Lets walk mode snap to local noon + scrub the sun
+// for nice low-angle shadows without fast-forwarding the sim. 0 = sky matches sim time (orbit default).
+#[derive(Resource, Default)]
+pub struct SunOffset(pub i64);
+
 // Markers for the celestial bodies (animated by day_night_lighting).
 #[derive(Component)]
 pub struct SunLight;
@@ -26,6 +32,7 @@ impl Plugin for VizPlugin {
         app.init_resource::<ShowSensors>()
             .init_resource::<Selected>()
             .init_resource::<ShowLegend>()
+            .init_resource::<SunOffset>()
             .add_systems(Startup, (log_viz_help, spawn_stats_ui, spawn_world_stats_ui, spawn_legend_ui, spawn_clouds, set_initial_speed))
             .add_systems(
                 Update,
@@ -37,6 +44,7 @@ impl Plugin for VizPlugin {
                     add_plant_visuals,
                     size_plants,
                     day_night_lighting,
+                    time_of_day,
                     rain_visuals,
                     fire_visuals,
                     update_clouds,
@@ -205,11 +213,14 @@ fn size_plants(mut q: Query<(&PlantState, &PlantGenome, &mut Transform, Option<&
 // shades via surface normals, so illuminance stays constant; ambient (set in setup) lifts the night side.
 fn day_night_lighting(
     gen: Res<GenState>,
+    offset: Res<SunOffset>,
     mut suns: Query<&mut Transform, (With<SunLight>, Without<Moon>, Without<SunDisc>)>,
     mut moons: Query<&mut Transform, (With<Moon>, Without<SunLight>, Without<SunDisc>)>,
     mut discs: Query<&mut Transform, (With<SunDisc>, Without<SunLight>, Without<Moon>)>,
 ) {
-    let sd = crate::sphere::sun_dir(gen.tick);
+    // visual sky time = sim tick + offset (offset lets walk mode pick a sunny hour without moving the sim)
+    let vtick = (gen.tick as i64 + offset.0).rem_euclid(crate::sphere::DAY_TICKS as i64) as u32;
+    let sd = crate::sphere::sun_dir(vtick);
     for mut tf in &mut suns {
         // place the light source out along the sun direction, aimed at the planet center
         *tf = Transform::from_translation(sd * (crate::sphere::PLANET_R * 4.0)).looking_at(Vec3::ZERO, Vec3::Y);
@@ -217,10 +228,47 @@ fn day_night_lighting(
     for mut tf in &mut discs {
         tf.translation = sd * crate::sphere::SUN_DIST; // the visible sun rides the same direction, far out
     }
-    let mp = crate::sphere::moon_pos(gen.tick);
+    let mtick = (gen.tick as i64 + offset.0).max(0) as u32;
+    let mp = crate::sphere::moon_pos(mtick);
     for mut tf in &mut moons {
         tf.translation = mp;
     }
+}
+
+// Scrub time-of-day in walk mode: [ winds the sun back, ] pushes it forward (golden-hour shadows), \
+// snaps to local noon overhead the walker. Adjusts the visual SunOffset only (sim time untouched).
+fn time_of_day(
+    keys: Res<ButtonInput<KeyCode>>,
+    mode: Res<crate::camera::CameraMode>,
+    gen: Res<GenState>,
+    mut offset: ResMut<SunOffset>,
+    walkers: Query<&crate::camera::WalkCam>,
+) {
+    if *mode != crate::camera::CameraMode::Walk {
+        return;
+    }
+    let step = crate::sphere::DAY_TICKS as i64 / 48; // ~1 sky-hour per tap
+    if keys.just_pressed(KeyCode::BracketRight) {
+        offset.0 += step;
+    }
+    if keys.just_pressed(KeyCode::BracketLeft) {
+        offset.0 -= step;
+    }
+    if keys.just_pressed(KeyCode::Backslash) {
+        if let Ok(w) = walkers.single() {
+            offset.0 = noon_offset(w.dir, gen.tick);
+        }
+    }
+}
+
+// Tick offset that puts the sun overhead surface dir `d` (local noon). Sun sweeps longitude: its ground
+// track angle = 2*PI*tick/DAY_TICKS in the x-z plane, so match d's longitude angle.
+pub fn noon_offset(d: Vec3, tick: u32) -> i64 {
+    use std::f32::consts::TAU;
+    let target = d.z.atan2(d.x).rem_euclid(TAU); // longitude of the walk point
+    let want = (target / TAU * crate::sphere::DAY_TICKS as f32).round() as i64;
+    let have = (tick as i64).rem_euclid(crate::sphere::DAY_TICKS as i64);
+    (want - have).rem_euclid(crate::sphere::DAY_TICKS as i64)
 }
 
 // Rain streaks: when a storm is active, draw falling streaks via gizmos (immediate-mode, no entities).
@@ -329,7 +377,7 @@ fn fire_visuals(fire: Res<Fire>, mut gizmos: Gizmos) {
 pub struct ShowSensors(pub bool);
 
 fn log_viz_help() {
-    info!("viz: TAB=orbit/walk | hue=diet, vividness=rigidity, size=sensors | G=sensor rays | SPACE=pause | 1-5=speed +/-=fine | B=seed life P=populate planet L=lightning K=cull | H=legend");
+    info!("viz: TAB=orbit/walk (walk arrives at noon; [ ] scrub time, \\ noon) | hue=diet, vividness=rigidity, size=sensors | G=sensor rays | SPACE=pause | 1-5=speed +/-=fine | B=seed life P=populate planet L=lightning K=cull | H=legend");
 }
 
 // Hue per dominant food/diet type, matching the food palette (green/purple/gold/cyan).
@@ -547,6 +595,8 @@ CONTROLS
          Q/E tilt, left-click inspect, F follow
   WALK:  WASD move, arrows or right-drag look,
          Shift run (eye walks over the hills)
+         [ / ]  scrub time-of-day   \\  jump to noon
+         (walk arrives at local noon: sun + shadows)
   G  sensor rays   SPACE  pause/resume
   1-5  speed presets (slow..fast)   + / -  fine speed
   B  seed creatures    P  populate whole planet

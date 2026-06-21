@@ -6,7 +6,8 @@
 //     WASD move (W/S forward+back, A/D strafe), arrows or right-drag look, Shift run. Shadows ON here: at
 //     eye level the horizon is close so the shadow range covers the whole view -> real tree/creature
 //     shadows, no disc.
-use crate::viz::{Selected, SunLight};
+use crate::sim::GenState;
+use crate::viz::{noon_offset, Selected, SunLight, SunOffset};
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
 use bevy::prelude::*;
 
@@ -93,6 +94,8 @@ fn toggle_mode(
     keys: Res<ButtonInput<KeyCode>>,
     mut mode: ResMut<CameraMode>,
     mut selected: ResMut<Selected>,
+    gen: Res<GenState>,
+    mut sun_offset: ResMut<SunOffset>,
     mut q: Query<(&OrbitCam, &mut WalkCam)>,
 ) {
     if !keys.just_pressed(KeyCode::Tab) {
@@ -110,12 +113,15 @@ fn toggle_mode(
                 .normalize_or_zero();
                 walk.yaw = 0.0;
                 walk.pitch = 0.0;
+                // arrive in daylight: snap the sky to local noon so you see sun + shadows (scrub with [ ] \)
+                sun_offset.0 = noon_offset(walk.dir, gen.tick);
             }
             selected.follow = false;
-            info!("camera: WALK mode (WASD move, arrows/right-drag look, Shift run, TAB to orbit)");
+            info!("camera: WALK mode (WASD move, arrows/right-drag look, Shift run, [ ] scrub time, \\ noon, TAB to orbit)");
             CameraMode::Walk
         }
         CameraMode::Walk => {
+            sun_offset.0 = 0; // back to true sim time for the orbit view
             info!("camera: ORBIT mode");
             CameraMode::Orbit
         }
@@ -228,14 +234,22 @@ fn apply_walk(mode: Res<CameraMode>, mut q: Query<(&mut Transform, &WalkCam)>) {
 // --- shared ---
 
 // Shadows ON only in walk mode (close horizon -> the shadow range covers the view, no eclipse disc); OFF in
-// orbit (the range boundary showed as a disc when zoomed). Runs on mode change + once at startup.
-fn update_shadow_mode(mode: Res<CameraMode>, mut lights: Query<&mut DirectionalLight, With<SunLight>>) {
+// orbit (the range boundary showed as a disc when zoomed). Also lift ambient in walk so shadowed ground +
+// any night side stay readable (orbit keeps low ambient for a crisp terminator). Runs on mode change + once.
+fn update_shadow_mode(
+    mode: Res<CameraMode>,
+    mut lights: Query<&mut DirectionalLight, With<SunLight>>,
+    mut ambient: Query<&mut AmbientLight>,
+) {
     if !mode.is_changed() {
         return;
     }
     let walk = *mode == CameraMode::Walk;
     for mut l in &mut lights {
         l.shadows_enabled = walk;
+    }
+    for mut a in &mut ambient {
+        a.brightness = if walk { 550.0 } else { 220.0 };
     }
 }
 
