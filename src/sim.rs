@@ -529,6 +529,9 @@ fn spawn_carrion(commands: &mut Commands, pos: Vec3, mass: f32) {
             seed_weight: 0.0, // unused for carrion (never disperses)
             windborne: 0.0,
             clonal: 0.0,
+            cling: 0.0,
+            dormancy: 0.0,
+            hydrochory: 0.0,
             form: crate::plant::form::HERB,
             flower: 0.0,
             flower_hue: 0.5,
@@ -667,6 +670,9 @@ fn tree_genome(rng: &mut Rng) -> PlantGenome {
         seed_weight: rng.range(0.3, 0.7), // trees: heavier provisioned seeds (acorn..samara), some drift
         windborne: rng.f32() * 0.4,
         clonal: 0.0,                      // trees seed; no clonal pathway in the tree branch yet
+        cling: 0.0,
+        dormancy: 0.0,
+        hydrochory: 0.0,
         form: crate::plant::form::SHRUB,
         flower: rng.f32() * 0.6, // some trees blossom (render: crown bloom ring)
         flower_hue: rng.f32(),

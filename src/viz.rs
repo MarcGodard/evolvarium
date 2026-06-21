@@ -178,13 +178,22 @@ fn add_plant_visuals(
             // at y=0 so it rests on the trunk top (lower attach point).
             // trunk is centered (half-height 1.0); canopies attach so they envelop most of the trunk,
             // leaving only a short stub of bare trunk -> a tree, not a hat on a pole.
-            let (canopy, color, cy) = if t.edible {
-                (tm.broadleaf.clone(), plant_color(g), 1.0)
+            let (canopy, cmat, cy) = if t.edible {
+                (tm.broadleaf.clone(), materials.add(plant_color(g)), 1.0)
             } else {
-                (tm.conifer.clone(), Color::srgb(0.06, 0.30, 0.18), -0.6)
+                // conifer cones are open shells: draw double-sided so the hollow shows the dark-green inner
+                // face (no see-through to the trunk/sky), and the spine cone fills the core.
+                let m = materials.add(StandardMaterial {
+                    base_color: Color::srgb(0.06, 0.30, 0.18),
+                    perceptual_roughness: 0.9,
+                    double_sided: true,
+                    cull_mode: None,
+                    ..default()
+                });
+                (tm.conifer.clone(), m, -0.6)
             };
             let child = commands
-                .spawn((Mesh3d(canopy), MeshMaterial3d(materials.add(color)), Transform::from_xyz(0.0, cy, 0.0)))
+                .spawn((Mesh3d(canopy), MeshMaterial3d(cmat), Transform::from_xyz(0.0, cy, 0.0)))
                 .id();
             commands.entity(e).add_child(child);
             // a flowering (blossom) fruit tree gets a ring of bloom blobs in its crown
@@ -661,30 +670,14 @@ pub fn cactus_mesh() -> Mesh {
 pub fn conifer_mesh() -> Mesh {
     let mut b = MeshBuf::new();
     let mut idx = Vec::new();
-    // SOLID conifer: a tapered stack of overlapping blob rings WITH a filled core blob at each level, so
-    // there is no hollow to see through and the trunk stays buried inside. Ring radius steps in+out per
-    // level (skirt bulges) keep a layered evergreen look without the cardboard/see-through of bare cones.
-    // (y, ring_radius, blobs_in_ring, blob_radius)
-    let rings = [
-        (0.2_f32, 1.25_f32, 8usize, 0.6_f32),
-        (0.55, 1.4, 9, 0.58), // skirt bulge (tier)
-        (0.95, 1.0, 8, 0.56),
-        (1.3, 1.12, 8, 0.52), // tier bulge
-        (1.65, 0.72, 7, 0.48),
-        (1.95, 0.5, 6, 0.44),
-        (2.25, 0.0, 1, 0.42), // tip
-    ];
-    for (y, rr, n, br) in rings {
-        let shade = 0.6 + 0.2 * (y / 2.25); // darker base -> lighter crown (baked depth)
-        if n <= 1 {
-            push_sphere(&mut b, &mut idx, Vec3::new(0.0, y, 0.0), br, 5, 7, shade);
-        } else {
-            for k in 0..n {
-                let a = std::f32::consts::TAU * k as f32 / n as f32;
-                push_sphere(&mut b, &mut idx, Vec3::new(a.cos() * rr, y, a.sin() * rr), br, 4, 6, shade);
-            }
-            push_sphere(&mut b, &mut idx, Vec3::new(0.0, y, 0.0), br * 1.15, 4, 6, shade * 0.9); // filled core
-        }
+    // Crisp TIERED fir: smooth cones (no cardboard facets) as drooping branch skirts, stacked so each rim
+    // pokes out below the next. A narrow central SPINE cone fills the core, and the canopy material is drawn
+    // double-sided (see add_plant_visuals), so there is no hollow see-through and the trunk stays hidden.
+    push_cone(&mut b, &mut idx, Vec3::new(0.0, 0.0, 0.0), 0.35, 2.55, 12, 0.7); // central spine (core fill)
+    // (base_y, base_radius, height, shade) skirts: wide bottom -> narrow top, moderate overlap = visible tiers
+    let skirts = [(0.1_f32, 1.5_f32, 1.0_f32, 0.68_f32), (0.7, 1.2, 1.0, 0.8), (1.3, 0.9, 1.0, 0.9), (1.85, 0.55, 0.95, 1.0)];
+    for (y, r, h, shade) in skirts {
+        push_cone(&mut b, &mut idx, Vec3::new(0.0, y, 0.0), r, h, 16, shade);
     }
     b.finish(idx)
 }
