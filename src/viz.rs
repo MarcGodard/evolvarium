@@ -198,7 +198,12 @@ fn add_plant_visuals(
             commands.entity(e).add_child(child);
             // a flowering (blossom) fruit tree gets a ring of bloom blobs in its crown
             if t.edible && g.flower > 0.4 {
-                let fmat = materials.add(flower_color(g));
+                let fmat = materials.add(StandardMaterial {
+                    base_color: flower_color(g),
+                    double_sided: true,
+                    cull_mode: None,
+                    ..default()
+                });
                 for k in 0..5 {
                     let a = k as f32 * 1.2566; // 72 deg apart
                     let c = commands
@@ -254,7 +259,12 @@ fn add_plant_visuals(
             let child = commands
                 .spawn((
                     Mesh3d(forms.flower.clone()),
-                    MeshMaterial3d(materials.add(flower_color(g))),
+                    MeshMaterial3d(materials.add(StandardMaterial {
+                        base_color: flower_color(g),
+                        double_sided: true,
+                        cull_mode: None,
+                        ..default()
+                    })),
                     Transform::from_xyz(0.0, top, 0.0).with_scale(Vec3::splat(0.28 + 0.45 * g.flower)),
                 ))
                 .id();
@@ -593,22 +603,27 @@ pub fn blob_cluster_mesh(blobs: &[(Vec3, f32, f32)]) -> Mesh {
     b.finish(idx)
 }
 
-// A petalled flower: a ring of rounded petals around a small center button (unit-ish, base at y=0). Petals
-// are bright, the center is darker -> a cheerful little bloom for the kids.
+// A petalled flower: a shallow CUP of petals around a raised center button. Petals tilt up-and-out (tips
+// raised) with real slanted normals so they catch light + read 3D, and each petal sits at a slightly
+// different height (staggered) so coplanar petals don't z-fight. Rendered double-sided (see add_plant_visuals)
+// so the undersides aren't black. Base at y=0.
 pub fn flower_mesh(petals: usize) -> Mesh {
     let mut b = MeshBuf::new();
     let mut idx = Vec::new();
-    push_sphere(&mut b, &mut idx, Vec3::new(0.0, 0.05, 0.0), 0.16, 4, 6, 0.55); // center button (dark)
+    push_sphere(&mut b, &mut idx, Vec3::new(0.0, 0.14, 0.0), 0.16, 5, 7, 0.6); // raised center button
     for k in 0..petals {
         let a = std::f32::consts::TAU * k as f32 / petals as f32;
         let (s, c) = a.sin_cos();
         let dir = Vec3::new(c, 0.0, s);
-        let tip = dir * 0.5 + Vec3::Y * 0.06;
-        let mid = dir * 0.28 + Vec3::Y * 0.12;
-        let side = Vec3::new(-s, 0.0, c) * 0.14;
-        let n = [0.0, 1.0, 0.0];
+        let side = Vec3::new(-s, 0.0, c) * 0.16;
+        let stagger = 0.012 * (k % 3) as f32; // tiny per-petal height offset -> no coplanar z-fight
+        let base_l = dir * 0.12 - side + Vec3::Y * (0.02 + stagger);
+        let base_r = dir * 0.12 + side + Vec3::Y * (0.02 + stagger);
+        let tip = dir * 0.5 + Vec3::Y * (0.2 + stagger); // tip raised -> cupped petal
+        let n = (tip - base_l).cross(base_r - base_l).normalize_or_zero(); // real slant normal
+        let n = [n.x, n.y, n.z];
         let start = b.pos.len() as u32;
-        for (p, v) in [(mid - side, 0.95), (mid + side, 0.95), (tip, 1.0)] {
+        for (p, v) in [(base_l, 0.9), (base_r, 0.9), (tip, 1.0)] {
             b.pos.push([p.x, p.y, p.z]);
             b.nor.push(n);
             b.col.push([v, v, v, 1.0]);
