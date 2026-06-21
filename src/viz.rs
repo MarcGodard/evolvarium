@@ -8,7 +8,7 @@ use bevy::prelude::*;
 use crate::components::{Alive, Creature, DietState, Energy, Fitness, Food, Heading, Rot, Tree};
 use crate::genome::{Genome, NFOOD};
 use crate::plant::{plant_color, PlantGenome, PlantState};
-use crate::sim::{daylight, GenState, ROT_GONE};
+use crate::sim::{daylight, GenState, Weather, ROT_GONE};
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
 pub struct VizPlugin;
@@ -28,6 +28,7 @@ impl Plugin for VizPlugin {
                     size_plants,
                     ground_creatures,
                     day_night_lighting,
+                    rain_visuals,
                     hide_dead,
                     color_carrion,
                     pick_on_click,
@@ -135,14 +136,45 @@ fn size_plants(mut q: Query<(&PlantState, &PlantGenome, &mut Transform, Option<&
 }
 
 // Day/night: dim the sun at night + bright at noon, AND arc it across the sky (so shadows sweep).
-fn day_night_lighting(gen: Res<GenState>, mut suns: Query<(&mut DirectionalLight, &mut Transform)>) {
+// Rain overcasts the sky: a storm dims the sun and tints it grey-blue (gloom you can see coming).
+fn day_night_lighting(
+    gen: Res<GenState>,
+    weather: Res<Weather>,
+    mut suns: Query<(&mut DirectionalLight, &mut Transform)>,
+) {
     let d = daylight(gen.tick);
     let phase = (gen.tick as f32 / crate::sim::DAY_TICKS as f32) * std::f32::consts::TAU; // 0 = midnight
     // sun arcs east (morning) -> overhead (noon) -> west (evening); below horizon at night
     let sun_pos = Vec3::new(phase.sin() * 60.0, -phase.cos() * 60.0, 22.0);
+    let overcast = 1.0 - 0.7 * weather.rain; // storm dims the light up to 70%
     for (mut sun, mut tf) in &mut suns {
-        sun.illuminance = 150.0 + 11000.0 * d; // night dark .. noon bright
+        sun.illuminance = (150.0 + 11000.0 * d) * overcast; // night dark .. noon bright, dimmed by rain
+        sun.color = Color::srgb(1.0, 1.0 - 0.25 * weather.rain, 1.0 - 0.45 * weather.rain); // warm -> grey-blue gloom
         *tf = Transform::from_translation(sun_pos).looking_at(Vec3::ZERO, Vec3::Y);
+    }
+}
+
+// Rain streaks: when a storm is active, draw falling streaks via gizmos (immediate-mode, no entities).
+// Count + opacity scale with Weather.rain. Positions are a deterministic scatter that falls + wraps on
+// the tick clock (no per-frame RNG -> stays reproducible). Cosmetic; reads the rain cycle at a glance.
+fn rain_visuals(gen: Res<GenState>, weather: Res<Weather>, mut gizmos: Gizmos) {
+    if weather.rain < 0.05 {
+        return;
+    }
+    let span = crate::sim::WORLD_HALF; // scatter over the arena
+    let n = (weather.rain * 600.0) as u32; // heavier rain = more streaks
+    let fall = (gen.tick as f32) * 0.9; // falling offset
+    let streak = 2.2; // length of each drop
+    let col = Color::srgba(0.65, 0.72, 0.9, 0.35 + 0.4 * weather.rain);
+    for i in 0..n {
+        // cheap hash scatter in x,z; phase per-drop so they don't fall in lockstep
+        let hx = ((i.wrapping_mul(374761393)) & 0xffff) as f32 / 65535.0;
+        let hz = ((i.wrapping_mul(668265263)) & 0xffff) as f32 / 65535.0;
+        let x = (hx * 2.0 - 1.0) * span;
+        let z = (hz * 2.0 - 1.0) * span;
+        let phase = (hx + hz) * 40.0;
+        let y = 28.0 - ((fall + phase) % 30.0); // fall from y~28 down, wrapping
+        gizmos.line(Vec3::new(x, y + streak, z), Vec3::new(x, y, z), col);
     }
 }
 
