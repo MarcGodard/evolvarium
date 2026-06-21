@@ -367,7 +367,7 @@ fn god_disturbances(
         for mut alive in &mut creatures {
             if alive.0 {
                 i += 1;
-                if i % 3 == 0 {
+                if i.is_multiple_of(3) {
                     alive.0 = false; // sim turns it into carrion + despawns next step
                     killed += 1;
                 }
@@ -474,7 +474,7 @@ fn update_world_stats(
     let day = gen.tick / crate::sphere::DAY_TICKS;
     // sample population ~once a second into a rolling history (~48 samples) for the trend sparkline
     *frame += 1;
-    if *frame % 60 == 0 {
+    if (*frame).is_multiple_of(60) {
         hist.push(n as u16);
         if hist.len() > 48 {
             hist.remove(0);
@@ -543,7 +543,7 @@ fn pick_on_click(
     let mut best: Option<(f32, Entity)> = None;
     let consider = |e: Entity, pos: Vec3, r: f32, best: &mut Option<(f32, Entity)>| {
         if let Some(t) = ray_hit(o, d, pos, r) {
-            if best.map_or(true, |(bt, _)| t < bt) {
+            if best.is_none_or(|(bt, _)| t < bt) {
                 *best = Some((t, e));
             }
         }

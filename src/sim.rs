@@ -223,6 +223,7 @@ pub fn fire_step(
         return; // nothing burning, skip the sweep
     }
     let cur = fire.cell.clone(); // spread reads the pre-tick state
+    #[allow(clippy::needless_range_loop)] // c indexes cur + fire.cell AND derives grid neighbors (c%n, c/n)
     for c in 0..cur.len() {
         let f = cur[c];
         if f <= 0.02 {
@@ -438,7 +439,7 @@ pub fn spawn_world_headless(mut commands: Commands, mut rng: ResMut<Rng>, mut ge
     };
     // loading a saved population into continuous mode skips the warm-up (the genomes are already
     // competent) -> drop straight into a living world. Desync energy + age so they don't act in lockstep.
-    let skip_warmup = gen.continuous && snap.as_ref().map_or(false, |s| !s.creatures.is_empty());
+    let skip_warmup = gen.continuous && snap.as_ref().is_some_and(|s| !s.creatures.is_empty());
     if skip_warmup {
         gen.generation = WARMUP_GENS;
     }
@@ -529,7 +530,7 @@ pub fn spawn_world_render(
     };
     // loading a saved population into continuous mode skips warm-up (genomes already competent) ->
     // drop straight into a living world. Desync energy + age so they don't act in lockstep.
-    let skip_warmup = gen.continuous && snap.as_ref().map_or(false, |s| !s.creatures.is_empty());
+    let skip_warmup = gen.continuous && snap.as_ref().is_some_and(|s| !s.creatures.is_empty());
     if skip_warmup {
         gen.generation = WARMUP_GENS;
     }
@@ -756,7 +757,7 @@ pub fn predation_step(
                 continue;
             }
             let d2 = apos.distance_squared(bpos);
-            if d2 < r2 && best.map_or(true, |(bd, _)| d2 < bd) {
+            if d2 < r2 && best.is_none_or(|(bd, _)| d2 < bd) {
                 best = Some((d2, bi));
             }
         }
@@ -897,7 +898,7 @@ pub fn live_step(
                     }
                     let to = f.1 - pos;
                     let d2 = to.length_squared();
-                    if best.map_or(true, |(_, bd2)| d2 < bd2) {
+                    if best.is_none_or(|(_, bd2)| d2 < bd2) {
                         best = Some((i, d2));
                     }
                     let dist = d2.sqrt();
@@ -1271,7 +1272,7 @@ pub fn generation_step(
     if gen.continuous && gen.generation >= WARMUP_GENS {
         let pop = cq.iter().count();
         let done = gen.headless && (gen.tick >= gen.max_gens * GEN_TICKS || pop == 0);
-        if gen.tick % CONT_LOG_TICKS == 0 || done {
+        if gen.tick.is_multiple_of(CONT_LOG_TICKS) || done {
             let n = pop.max(1) as f32;
             let mut e = 0.0;
             let mut f = 0.0;
@@ -1311,7 +1312,7 @@ pub fn generation_step(
             if gen.save.is_some() {
                 let avg_e = e / n;
                 let score = if avg_e >= 30.0 { pop as f32 } else { 0.0 };
-                if score > 0.0 && best.as_ref().map_or(true, |(s, _)| score > *s) {
+                if score > 0.0 && best.as_ref().is_none_or(|(s, _)| score > *s) {
                     let mut creatures: Vec<(f32, Genome)> =
                         cq.iter().map(|(_, _, fit, _, _, g, _, _, _)| (fit.0, g.clone())).collect();
                     creatures.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());

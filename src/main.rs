@@ -8,6 +8,8 @@
 //   cargo run -- --headless --seed=7         -> reproducible run with a chosen seed
 //   cargo run -- --headless --save=run.json  -> write fitness-ranked survivors + food web at run end
 //   cargo run -- --load=run.json             -> resume from a saved population
+// Bevy ECS systems legitimately take many args + use complex query tuple types; silence that clippy noise.
+#![allow(clippy::too_many_arguments, clippy::type_complexity)]
 mod camera;
 mod components;
 mod config;
