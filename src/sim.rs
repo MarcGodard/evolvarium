@@ -509,6 +509,21 @@ fn spawn_carrion(commands: &mut Commands, pos: Vec3, mass: f32) {
             maturity: 999.0, // never reproduces via plant_step (also excluded by Without<Rot>)
             nutrients: [0.0; NUTRIENTS], // unused: meat tops reserves flat (balanced tissue), separate eat branch
             toxicity: 0.0,
+            // new genes: all neutral/off for carrion (it never grows, reproduces, or renders as a plant)
+            temp_pref: 0.5,
+            succulence: 0.0,
+            submerged: 0.0,
+            fruiting: 0.0,
+            nitrogen_fix: 0.0,
+            fire_seed: 0.0,
+            climb: 0.0,
+            allelopathy: 0.0,
+            form: crate::plant::form::HERB,
+            flower: 0.0,
+            flower_hue: 0.5,
+            leaf_hue: 0.5,
+            bushiness: 0.5,
+            droop: 0.0,
         },
         Rot { age: 0 },
         Transform::from_translation(p),
@@ -558,7 +573,7 @@ pub fn seed_burst(commands: &mut Commands, rng: &mut Rng, parents: &[Genome], n:
 // live in (aquatic flora + swimmers in the sea, alpine creatures + land flora + trees on land, climate-
 // matched temp_pref). Lets you seed an empty/sparse world all over instead of waiting for spread. Render
 // god-control P. Counts are targets; ocean/land/abyss filtering retries a few times per item.
-pub fn seed_planet(commands: &mut Commands, rng: &mut Rng, parents: &[Genome], ntypes: u8, n_creatures: usize, n_plants: usize, n_trees: usize) {
+pub fn seed_planet(commands: &mut Commands, rng: &mut Rng, parents: &[Genome], _ntypes: u8, n_creatures: usize, n_plants: usize, n_trees: usize) {
     use std::f32::consts::PI;
     let whole = |rng: &mut Rng| crate::sphere::random_dir_in_cap(rng, Vec3::Y, PI); // uniform over the globe
     // creatures: adapt each to where it lands so it survives there -> every region gets life
@@ -593,10 +608,7 @@ pub fn seed_planet(commands: &mut Commands, rng: &mut Rng, parents: &[Genome], n
             }
             d = whole(rng);
         }
-        let mut pg = PlantGenome::random(rng, ntypes);
-        if crate::sphere::is_ocean(d) {
-            pg.wet = rng.range(0.7, 1.0); // aquatic flora survives submersion
-        }
+        let pg = plant_for_site(rng, d); // species by biome (aquatic in water, land flora on land)
         spawn_plant(commands, pg, rng.range(0.5, 1.3) * PLANT_START_MASS, crate::sphere::surface_pos(d, FOOD_Y));
     }
     // trees: land only + habitable ground
@@ -632,6 +644,21 @@ fn tree_genome(rng: &mut Rng) -> PlantGenome {
         // fruit trees are nutrient-rich (fruit is good food): a broad, generous profile + low toxicity
         nutrients: [0.55; NUTRIENTS],
         toxicity: rng.f32() * 0.15,
+        // trees: warm-ish climate niche, fruit-bearing crown, occasional blossom; form ignored (Tree marker)
+        temp_pref: rng.range(0.4, 0.8),
+        succulence: 0.0,
+        submerged: 0.0,
+        fruiting: rng.range(0.4, 0.8),
+        nitrogen_fix: 0.0,
+        fire_seed: rng.f32() * 0.2,
+        climb: 0.0,
+        allelopathy: 0.0,
+        form: crate::plant::form::SHRUB,
+        flower: rng.f32() * 0.6, // some trees blossom (render: crown bloom ring)
+        flower_hue: rng.f32(),
+        leaf_hue: rng.range(0.3, 0.45),
+        bushiness: rng.range(0.4, 0.8),
+        droop: 0.0,
     }
 }
 
@@ -644,6 +671,39 @@ fn spawn_tree(commands: &mut Commands, mass: f32, pos: Vec3, edible: bool, g: Pl
         g,
         Transform::from_translation(pos),
     ));
+}
+
+// Pick a founding plant species for a surface site by biome (real-world distribution): ocean depth ->
+// deep kelp (needs less sun) vs shallow lily/eelgrass/algae; land by temperature + moisture -> cold
+// alpine/moss, arid cactus/tumbleweed/thistle, wet reed/fern, else a mixed meadow. The species then
+// evolves from here. Replaces uniform-random plants so the world reads as real biomes.
+fn plant_for_site(rng: &mut Rng, d: Vec3) -> PlantGenome {
+    use crate::plant::Archetype as A;
+    let pick = |rng: &mut Rng, opts: &[A]| opts[(rng.f32() * opts.len() as f32) as usize % opts.len()];
+    if crate::sphere::is_ocean(d) {
+        let e01 = crate::sphere::elevation01(d);
+        let submersion = ((crate::sphere::SEA_LEVEL - e01) / crate::sphere::SEA_LEVEL).clamp(0.0, 1.0);
+        let a = if submersion > 0.6 {
+            A::Kelp // deep + dim -> shade-loving kelp (needs less sun)
+        } else {
+            pick(rng, &[A::Waterlily, A::Eelgrass, A::AlgaeMat]) // shallows -> sun-lit aquatics
+        };
+        return PlantGenome::archetype(rng, a);
+    }
+    let t = crate::sphere::base_temperature(d);
+    let m = crate::sphere::moisture(d);
+    // cold cutoff matches the biome/sea-ice onset (temp < 0.34) so the frozen fringe gets cold-adapted
+    // species (alpine cushion, moss), not temperate plants that would just sit on the ice and die back.
+    let a = if t < 0.34 {
+        pick(rng, &[A::AlpineCushion, A::Moss]) // cold poles / high ground (frozen fringe)
+    } else if m < 0.32 {
+        pick(rng, &[A::Cactus, A::Tumbleweed, A::Thistle]) // desert / arid
+    } else if m > 0.68 {
+        pick(rng, &[A::Reed, A::Fern, A::Wildflower, A::Moss]) // wet / lush
+    } else {
+        pick(rng, &[A::Clover, A::Wildflower, A::BerryBush, A::Nightshade, A::Fern]) // mixed meadow
+    };
+    PlantGenome::archetype(rng, a)
 }
 
 // Spawn one plant (living food). No render mesh; add_plant_visuals (render mode) gives it one.
@@ -739,20 +799,22 @@ pub fn spawn_world_headless(mut commands: Commands, mut rng: ResMut<Rng>, mut ge
             Transform::from_translation(p),
         ));
     }
-    let ntypes = gen.ntypes();
     // diverse mode spreads life globally (creatures are placed in niches worldwide, so food must be too).
     let food_pos = |rng: &mut Rng| plant_spawn_pos(rng, !gen.diverse, FOOD_Y); // land + shallow water (aquatic flora)
     match &snap {
         Some(s) if !s.plants.is_empty() => {
             for sp in &s.plants {
                 let p = food_pos(&mut rng);
-                spawn_plant(&mut commands, sp.g.clone(), sp.mass, p);
+                // regenerate every loaded plant as fresh biome-matched flora (we do not carry legacy plants
+                // forward); sp.mass is kept so the food web reloads grown, not all seedlings.
+                let g = plant_for_site(&mut rng, p.normalize_or_zero());
+                spawn_plant(&mut commands, g, sp.mass, p);
             }
         }
         _ => {
             for _ in 0..FOOD {
                 let p = food_pos(&mut rng);
-                let pg = PlantGenome::random(&mut rng, ntypes);
+                let pg = plant_for_site(&mut rng, p.normalize_or_zero()); // species by biome
                 spawn_plant(&mut commands, pg, rng.range(0.3, 1.4) * PLANT_START_MASS, p); // varied mass desyncs the food supply
             }
         }
@@ -795,8 +857,30 @@ pub fn spawn_world_render(
     // shared creature mesh as a resource so viz::add_creature_visuals can dress creatures BORN mid-sim
     // (spawn_creature adds no mesh) -> newborns + B-button creatures become visible, not just the seed pop.
     commands.insert_resource(crate::viz::CreatureMesh(creature_mesh.clone()));
-    // shared plant sphere mesh; viz::add_plant_visuals colors each plant by its genome
-    commands.insert_resource(crate::viz::PlantMesh(meshes.add(Sphere::new(0.35))));
+    // per-form plant mesh library: one silhouette per plant::form (viz::add_plant_visuals picks by genome).
+    // Round forms = icospheres; tall/leafy forms = procedural frond clumps; lily pad = a flat disc.
+    {
+        use crate::plant::form;
+        let mut forms = vec![bevy::asset::Handle::default(); form::COUNT as usize];
+        forms[form::HERB as usize] = meshes.add(Sphere::new(0.35).mesh().ico(2).unwrap());
+        forms[form::SHRUB as usize] = meshes.add(Sphere::new(0.5).mesh().ico(2).unwrap());
+        forms[form::GROUNDCOVER as usize] = meshes.add(Sphere::new(0.4).mesh().ico(2).unwrap());
+        forms[form::MOSS as usize] = meshes.add(Sphere::new(0.35).mesh().ico(1).unwrap());
+        forms[form::FERN as usize] = meshes.add(crate::viz::frond_clump_mesh(7, 0.10, 0.18, 0.5, 0.35));
+        forms[form::SUCCULENT as usize] = meshes.add(Capsule3d::new(0.28, 0.5));
+        forms[form::REED as usize] = meshes.add(crate::viz::frond_clump_mesh(6, 0.035, 0.10, 0.12, 0.05));
+        forms[form::FLOWER_STALK as usize] = meshes.add(Cylinder::new(0.05, 1.0));
+        forms[form::ROSETTE as usize] = meshes.add(crate::viz::frond_clump_mesh(10, 0.12, 0.10, 0.2, 0.9));
+        forms[form::LILYPAD as usize] = meshes.add(crate::viz::disc_mesh(20));
+        forms[form::KELP as usize] = meshes.add(crate::viz::frond_clump_mesh(5, 0.14, 0.12, 0.6, 0.3));
+        forms[form::MUSHROOM as usize] = meshes.add(Cylinder::new(0.06, 0.5));
+        commands.insert_resource(crate::viz::PlantForms {
+            forms,
+            flower: meshes.add(Sphere::new(0.12).mesh().ico(1).unwrap()),
+            berry: meshes.add(Sphere::new(0.09).mesh().ico(1).unwrap()),
+            cap: meshes.add(Sphere::new(0.32).mesh().ico(2).unwrap()),
+        });
+    }
     commands.insert_resource(crate::viz::TreeMeshes {
         trunk: meshes.add(Cylinder::new(0.16, 3.0)),
         broadleaf: meshes.add(Sphere::new(1.3)),
@@ -887,19 +971,21 @@ pub fn spawn_world_render(
             Transform::from_translation(p),
         ));
     }
-    let ntypes = gen.ntypes();
     let food_pos = |rng: &mut Rng| plant_spawn_pos(rng, !gen.diverse, FOOD_Y); // land + shallow water (aquatic flora)
     match &snap {
         Some(s) if !s.plants.is_empty() => {
             for sp in &s.plants {
                 let p = food_pos(&mut rng);
-                spawn_plant(&mut commands, sp.g.clone(), sp.mass, p);
+                // regenerate every loaded plant as fresh biome-matched flora (we do not carry legacy plants
+                // forward); sp.mass is kept so the food web reloads grown, not all seedlings.
+                let g = plant_for_site(&mut rng, p.normalize_or_zero());
+                spawn_plant(&mut commands, g, sp.mass, p);
             }
         }
         _ => {
             for _ in 0..FOOD {
                 let p = food_pos(&mut rng);
-                let pg = PlantGenome::random(&mut rng, ntypes);
+                let pg = plant_for_site(&mut rng, p.normalize_or_zero()); // species by biome
                 spawn_plant(&mut commands, pg, rng.range(0.3, 1.4) * PLANT_START_MASS, p); // varied mass desyncs the food supply
             }
         }
@@ -1001,6 +1087,13 @@ pub fn plant_step(
         if fire.get(ppos) > FIRE_KILL {
             let biomass = if tree.is_some() { 3.0 } else { 1.0 };
             soil.add(ppos, FIRE_BURN_ASH * st.mass * biomass);
+            // serotiny: a fire-adapted plant releases a seed AS it burns (post-fire recruitment onto the
+            // fresh ash, where competition just cleared) -> fire spreads its lineage, not just kills it.
+            if tree.is_none() && rng.f32() < g.fire_seed {
+                let mut child = g.clone();
+                child.mutate(&mut rng);
+                births.push((child, disperse_pos(&mut rng, ppos, g.spread, FOOD_Y)));
+            }
             commands.entity(e).despawn();
             if tree.is_none() {
                 plant_count = plant_count.saturating_sub(1);
@@ -1083,7 +1176,11 @@ pub fn plant_step(
         // dry to desert / green to forest over years as climate drifts (temporal + geological selection).
         let clim = crate::sphere::moisture(pdir) * (1.0 - CLIMATE_VEG) + climate.get(ppos) * CLIMATE_VEG;
         let m = (clim + 0.2 * season + WET_GAIN * water).clamp(0.0, 1.0);
-        let stress = (m - g.wet).abs();
+        // succulence buffers DROUGHT: water-storing plants (cactus/aloe) tolerate sites drier than their
+        // preferred `wet` -> they survive the desert where a thirsty plant would dry out. Wet-side stress
+        // (too soggy) is NOT buffered -> a cactus still rots in a swamp.
+        let dry_deficit = (g.wet - m).max(0.0);
+        let stress = ((m - g.wet).abs() - SUCC_BUFFER * g.succulence * dry_deficit).max(0.0);
         // habitability uses the SAME slow climate moisture, so a region drying out loses its plant base
         // (desertifies) and a wetting region gains one (reforests). Ocean/thermal branches are unaffected.
         let hab = crate::sphere::plant_habitability_with_moisture(pdir, clim); // 0 in deep ocean/desert/cold, 1 on good land
@@ -1092,18 +1189,45 @@ pub fn plant_step(
         let e01 = crate::sphere::elevation01(pdir);
         let submersion = ((crate::sphere::SEA_LEVEL - e01) / crate::sphere::SEA_LEVEL).clamp(0.0, 1.0);
         let drown = DROWN_KILL * submersion * (1.0 - g.wet);
-        let p_mort = MOISTURE_KILL * (stress - MOISTURE_TOLERANCE).max(0.0) + HABITAT_KILL * (0.3 - hab).max(0.0) + drown;
+        // climate niche: a plant grows best where local temperature matches temp_pref (alpine cushion in the
+        // cold, cactus in the heat); off-niche it grows slowly and, far off its band, dies back.
+        let temp = crate::sphere::base_temperature(pdir);
+        let tmiss = (temp - g.temp_pref).abs();
+        let temp_grow = TEMP_FLOOR + (1.0 - TEMP_FLOOR) * (1.0 - tmiss);
+        let p_mort = MOISTURE_KILL * (stress - MOISTURE_TOLERANCE).max(0.0)
+            + HABITAT_KILL * (0.3 - hab).max(0.0)
+            + drown
+            + TEMP_KILL * (tmiss - TEMP_TOL).max(0.0);
         if rng.f32() < p_mort {
+            // allelopathic litter: a chemical-warfare plant leaves extra-toxic detritus (juglone-style leaf
+            // litter) that suppresses competitors germinating on the same ground. Litter carries >= allelopathy.
+            let mut litter = g.clone();
+            litter.toxicity = litter.toxicity.max(g.allelopathy);
             commands.entity(e).despawn();
-            detritus.push((g.clone(), st.mass, tf.translation));
+            detritus.push((litter, st.mass, tf.translation));
             soil.add(ppos, DEATH_FERT * 0.3); // a dead plant enriches the ground where it falls
             plant_count = plant_count.saturating_sub(1);
             continue;
         }
-        // fertile soil speeds growth (M5); scales with habitability (P3) and light match (day/night)
-        st.mass += g.growth_rate() * boost * hab * lf * DT;
+        // underwater the water column dims sunlight with depth -> deep plants get little light, so only shade
+        // species (low light_pref, e.g. kelp) thrive deep; sun-lovers (lily) need the shallows. A vine adds
+        // a light bonus (climbs toward the canopy) without paying the height growth cost.
+        let light_uw = light * (1.0 - WATER_LIGHT_ATTEN * submersion);
+        let lf = (0.35 + 0.65 * (1.0 - (light_uw - g.light_pref).abs()) + CLIMB_LIGHT * g.climb).min(1.0);
+        // nitrogen-fixer (legume): root nodules enrich local soil fertility each tick (clover/beans).
+        if g.nitrogen_fix > 0.0 {
+            soil.add(ppos, NFIX_RATE * g.nitrogen_fix * DT);
+        }
+        // fertile soil speeds growth (M5); scales with habitability (P3), light match, and climate niche
+        st.mass += g.growth_rate() * boost * hab * lf * temp_grow * DT;
         st.age += 1;
-        if st.mass >= g.maturity
+        let mature = st.mass >= g.maturity;
+        // a fruiting non-tree (berry bush, nightshade) drops fallen fruit -> the fast-energy + ferment chain,
+        // exactly like a fruit tree. Drop rate scales with the fruiting gene (its growth already paid for it).
+        if mature && g.fruiting > 0.2 && rng.f32() < P_FRUIT_DROP * g.fruiting {
+            fruit_drops.push((g.clone(), disperse_pos(&mut rng, ppos, 2.0, FOOD_Y)));
+        }
+        if mature
             && plant_count + births.len() < PLANT_CAP
             && rng.f32() < P_REPRO * (1.0 - DEF_REPRO_COST * g.defense)
         {
@@ -1138,10 +1262,10 @@ pub fn plant_step(
             Transform::from_translation(pos),
         ));
     }
-    // reseed floor: keep a minimal seed bank so creatures can't drive food fully extinct
-    let ntypes = gen.ntypes();
+    // reseed floor: keep a minimal seed bank so creatures can't drive food fully extinct (biome-matched)
     while plant_count + births.len() < PLANT_MIN {
-        births.push((PlantGenome::random(&mut rng, ntypes), rand_pos(&mut rng, FOOD_Y)));
+        let pos = rand_pos(&mut rng, FOOD_Y);
+        births.push((plant_for_site(&mut rng, pos.normalize_or_zero()), pos));
     }
     for (g, pos) in births {
         spawn_plant(&mut commands, g, rng.range(0.5, 1.3) * PLANT_START_MASS, pos); // varied reseed mass (staggered maturity)

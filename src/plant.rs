@@ -75,6 +75,45 @@ pub struct PlantGenome {
                                      // Effective output at eat-time = this x soil fertility (richer ground -> more).
     #[serde(default)]
     pub toxicity: f32, // 0..1 genetic toxin load: deters eaters (energy hit + growth-load) but costs growth.
+
+    // --- climate + survival genes (affect sim AND visuals) ---
+    #[serde(default = "half_light")]
+    pub temp_pref: f32, // 0 cold/alpine .. 1 warm/tropical: climate niche (mirror of creature temp_pref). Off-niche = slow growth + soft death.
+    #[serde(default)]
+    pub succulence: f32, // 0..1 water storage: buffers DROUGHT (survives dry/desert sites), costs growth (cactus/aloe).
+    #[serde(default)]
+    pub submerged: f32, // 0 surface/emergent .. 1 deep submerged: render depth + minor self-shade (lily -> kelp).
+    #[serde(default)]
+    pub fruiting: f32, // 0..1 non-tree fruit-bearing: drops fallen fruit like a tree (berry bush), costs growth.
+
+    // --- ecology genes (cheap, no neighbor scans; affect sim AND visuals) ---
+    #[serde(default)]
+    pub nitrogen_fix: f32, // 0..1 legume: enriches local soil fertility each tick (clover/beans), costs growth.
+    #[serde(default)]
+    pub fire_seed: f32, // 0..1 serotiny: on burn-up it releases seeds (post-fire recruitment), costs a little growth.
+    #[serde(default)]
+    pub climb: f32, // 0..1 vine: climbs to the light (light-factor bonus) without paying height; weak structure, costs growth.
+    #[serde(default)]
+    pub allelopathy: f32, // 0..1 chemical warfare: its litter (detritus) is extra toxic (suppresses competitors), costs growth.
+
+    // --- visual-only genes (cosmetic; zero sim cost) ---
+    #[serde(default = "default_form")]
+    pub form: u8, // PlantForm silhouette -> render mesh (see plant::form). Visual identity; stable per lineage.
+    #[serde(default)]
+    pub flower: f32, // 0..1 bloom presence/size (render: a colored bloom child).
+    #[serde(default = "half_light")]
+    pub flower_hue: f32, // 0..1 petal hue (x360).
+    #[serde(default = "half_light")]
+    pub leaf_hue: f32, // 0..1 foliage hue jitter (variety on top of the family hue).
+    #[serde(default = "half_light")]
+    pub bushiness: f32, // 0..1 clump fullness (render: girth/fullness).
+    #[serde(default)]
+    pub droop: f32, // 0..1 upright .. weeping arch (render).
+}
+
+// serde default for form on old saves: the generic small herb (a sphere-like leafy plant).
+fn default_form() -> u8 {
+    form::HERB
 }
 
 // serde default for nutrients on old saves: a flat mid spread (a generic plant feeds every nutrient a little).
@@ -116,7 +155,286 @@ impl PlantGenome {
             maturity: rng.range(2.0, 6.0),
             nutrients,
             toxicity: rng.f32() * 0.3, // most plants mildly toxic; evolves up as a defense (costs growth)
+            temp_pref: rng.f32(),
+            succulence: rng.f32() * 0.3,
+            submerged: 0.0,
+            fruiting: rng.f32() * 0.3,
+            nitrogen_fix: rng.f32() * 0.2,
+            fire_seed: rng.f32() * 0.2,
+            climb: rng.f32() * 0.2,
+            allelopathy: rng.f32() * 0.2,
+            // random fallback plant: a land form (HERB..ROSETTE), never an aquatic/special form
+            form: (rng.f32() * 8.0) as u8 % 8,
+            flower: rng.f32() * 0.5,
+            flower_hue: rng.f32(),
+            leaf_hue: rng.f32(),
+            bushiness: rng.f32(),
+            droop: rng.f32() * 0.3,
         }
+    }
+
+    // Sparse nutrient profile: n_rich axes get a high value, the rest stay 0 -> no food is nutritionally
+    // complete (drives diet variety). Helper for the species archetypes.
+    fn sparse_nutrients(rng: &mut Rng, n_rich: usize) -> [f32; NUTRIENTS] {
+        let mut a = [0.0f32; NUTRIENTS];
+        for _ in 0..n_rich {
+            let i = (rng.f32() * NUTRIENTS as f32) as usize % NUTRIENTS;
+            a[i] = rng.range(0.5, 1.0);
+        }
+        a
+    }
+
+    // Build one founding plant from a species preset, then evolve from here. Starts from random() for
+    // neutral defaults, then overrides the genes that DEFINE the species (real-life grounded combos).
+    pub fn archetype(rng: &mut Rng, a: Archetype) -> Self {
+        let mut g = Self::random(rng, NFOOD as u8);
+        // sensible visual defaults; each arm tweaks
+        g.submerged = 0.0;
+        g.flower = 0.0;
+        g.fruiting = 0.0;
+        match a {
+            Archetype::Clover => {
+                g.kind = 0; // green family
+                g.nutrient = rng.range(0.35, 0.55);
+                g.defense = 0.05;
+                g.quality = rng.range(0.5, 0.8);
+                g.wet = rng.range(0.4, 0.7);
+                g.height = 0.05;
+                g.light_pref = rng.range(0.6, 0.85);
+                g.regrow = 0.7; // grazed lawn legume regrows
+                g.maturity = rng.range(1.5, 3.0);
+                g.toxicity = 0.0;
+                g.nitrogen_fix = rng.range(0.6, 0.95); // legume enriches the soil
+                g.nutrients = Self::sparse_nutrients(rng, 3);
+                g.form = form::GROUNDCOVER;
+                g.leaf_hue = rng.range(0.30, 0.40); // green
+                g.flower = rng.range(0.1, 0.3); // small white-pink clover heads
+                g.flower_hue = rng.range(0.85, 0.98);
+            }
+            Archetype::Wildflower => {
+                g.kind = 2; // warm/yellow family
+                g.nutrient = rng.range(0.4, 0.7);
+                g.defense = 0.05;
+                g.quality = rng.range(0.6, 0.9); // sweet nectar, palatable
+                g.wet = rng.range(0.4, 0.7);
+                g.height = rng.range(0.2, 0.4);
+                g.light_pref = rng.range(0.6, 0.9);
+                g.maturity = rng.range(2.0, 4.0);
+                g.toxicity = rng.f32() * 0.1;
+                g.nutrients = Self::sparse_nutrients(rng, 3);
+                g.form = form::FLOWER_STALK;
+                g.leaf_hue = rng.range(0.28, 0.38);
+                g.flower = rng.range(0.6, 1.0); // big showy bloom
+                g.flower_hue = rng.f32(); // any petal color
+            }
+            Archetype::BerryBush => {
+                g.kind = 1; // purple/berry family
+                g.nutrient = rng.range(0.6, 0.9);
+                g.defense = rng.range(0.3, 0.6); // thorns
+                g.quality = rng.range(0.6, 0.9);
+                g.wet = rng.range(0.4, 0.7);
+                g.height = rng.range(0.3, 0.6);
+                g.light_pref = rng.range(0.5, 0.8);
+                g.regrow = rng.range(0.7, 0.95); // survives a bite, regrows
+                g.maturity = rng.range(3.0, 6.0);
+                g.toxicity = rng.f32() * 0.1;
+                g.fruiting = rng.range(0.6, 1.0); // bears berries (fallen fruit -> fast energy)
+                g.nutrients = Self::sparse_nutrients(rng, 4);
+                g.form = form::SHRUB;
+                g.leaf_hue = rng.range(0.30, 0.42);
+                g.flower = rng.range(0.2, 0.4);
+                g.flower_hue = rng.range(0.85, 0.98);
+            }
+            Archetype::Fern => {
+                g.kind = 0;
+                g.nutrient = rng.range(0.3, 0.5);
+                g.defense = rng.range(0.1, 0.3);
+                g.quality = rng.range(0.3, 0.6);
+                g.wet = rng.range(0.6, 0.9); // moist understory
+                g.height = rng.range(0.2, 0.45);
+                g.light_pref = rng.range(0.1, 0.35); // SHADE: thrives in low light
+                g.maturity = rng.range(2.5, 5.0);
+                g.toxicity = rng.f32() * 0.15;
+                g.nutrients = Self::sparse_nutrients(rng, 2);
+                g.form = form::FERN;
+                g.leaf_hue = rng.range(0.33, 0.45); // deep green
+                g.flower = 0.0; // ferns don't flower
+            }
+            Archetype::Cactus => {
+                g.kind = 3;
+                g.nutrient = rng.range(0.4, 0.7);
+                g.defense = rng.range(0.5, 0.8); // spines
+                g.quality = rng.range(0.2, 0.4);
+                g.wet = rng.range(0.05, 0.25); // desert: likes it DRY
+                g.height = rng.range(0.2, 0.5);
+                g.light_pref = rng.range(0.8, 1.0); // full blazing sun
+                g.temp_pref = rng.range(0.6, 0.9); // hot
+                g.maturity = rng.range(4.0, 8.0);
+                g.toxicity = rng.f32() * 0.2;
+                g.succulence = rng.range(0.7, 1.0); // water storage: survives drought
+                g.nutrients = Self::sparse_nutrients(rng, 2);
+                g.form = form::SUCCULENT;
+                g.leaf_hue = rng.range(0.40, 0.52); // blue-green
+                g.flower = rng.range(0.0, 0.5); // occasional cactus bloom
+                g.flower_hue = rng.range(0.0, 0.15); // red/yellow
+            }
+            Archetype::Reed => {
+                g.kind = 0;
+                g.nutrient = rng.range(0.3, 0.5);
+                g.defense = rng.range(0.1, 0.3);
+                g.quality = rng.range(0.3, 0.5);
+                g.wet = rng.range(0.75, 1.0); // wetland edge
+                g.height = rng.range(0.6, 0.95); // tall stalks
+                g.light_pref = rng.range(0.6, 0.9);
+                g.maturity = rng.range(3.0, 6.0);
+                g.nutrients = Self::sparse_nutrients(rng, 2);
+                g.form = form::REED;
+                g.leaf_hue = rng.range(0.25, 0.35);
+            }
+            Archetype::Thistle => {
+                g.kind = 1;
+                g.nutrient = rng.range(0.3, 0.5);
+                g.defense = rng.range(0.5, 0.85); // very thorny
+                g.quality = rng.range(0.1, 0.3);
+                g.wet = rng.range(0.3, 0.6);
+                g.height = rng.range(0.2, 0.45);
+                g.light_pref = rng.range(0.6, 0.9);
+                g.maturity = rng.range(2.0, 4.0);
+                g.toxicity = rng.range(0.4, 0.7); // bitter
+                g.allelopathy = rng.range(0.4, 0.7);
+                g.nutrients = Self::sparse_nutrients(rng, 2);
+                g.form = form::ROSETTE;
+                g.leaf_hue = rng.range(0.30, 0.42);
+                g.flower = rng.range(0.4, 0.7);
+                g.flower_hue = rng.range(0.78, 0.9); // purple thistle head
+            }
+            Archetype::Nightshade => {
+                g.kind = 1;
+                g.nutrient = rng.range(0.5, 0.8); // looks rich
+                g.defense = rng.range(0.1, 0.3);
+                g.quality = rng.range(0.5, 0.8); // tempting
+                g.wet = rng.range(0.4, 0.7);
+                g.height = rng.range(0.3, 0.6);
+                g.light_pref = rng.range(0.4, 0.7);
+                g.maturity = rng.range(3.0, 5.0);
+                g.toxicity = rng.range(0.6, 0.95); // poisonous berries
+                g.fruiting = rng.range(0.5, 0.9);
+                g.nutrients = Self::sparse_nutrients(rng, 3);
+                g.form = form::SHRUB;
+                g.leaf_hue = rng.range(0.33, 0.45);
+                g.flower = rng.range(0.3, 0.6);
+                g.flower_hue = rng.range(0.7, 0.85); // deadly-nightshade purple
+            }
+            Archetype::Moss => {
+                g.kind = 0;
+                g.nutrient = rng.range(0.2, 0.35);
+                g.defense = 0.0;
+                g.quality = rng.range(0.3, 0.5);
+                g.wet = rng.range(0.7, 1.0);
+                g.height = 0.02;
+                g.light_pref = rng.range(0.05, 0.3); // deep shade
+                g.temp_pref = rng.range(0.3, 0.6);
+                g.maturity = rng.range(1.5, 3.0);
+                g.regrow = 0.85;
+                g.nutrients = Self::sparse_nutrients(rng, 1);
+                g.form = form::MOSS;
+                g.leaf_hue = rng.range(0.33, 0.45);
+            }
+            Archetype::AlpineCushion => {
+                g.kind = 0;
+                g.nutrient = rng.range(0.3, 0.5);
+                g.defense = rng.range(0.1, 0.3);
+                g.quality = rng.range(0.3, 0.5);
+                g.wet = rng.range(0.3, 0.6);
+                g.height = 0.05; // hugs the ground out of the wind
+                g.light_pref = rng.range(0.6, 0.9);
+                g.temp_pref = rng.range(0.05, 0.25); // COLD niche
+                g.maturity = rng.range(2.0, 4.0);
+                g.nutrients = Self::sparse_nutrients(rng, 2);
+                g.form = form::GROUNDCOVER;
+                g.bushiness = rng.range(0.7, 1.0); // dense cushion
+                g.leaf_hue = rng.range(0.30, 0.45);
+                g.flower = rng.range(0.2, 0.5);
+                g.flower_hue = rng.f32();
+            }
+            Archetype::Tumbleweed => {
+                g.kind = 2;
+                g.nutrient = rng.range(0.25, 0.45);
+                g.defense = rng.range(0.3, 0.6);
+                g.quality = rng.range(0.15, 0.35);
+                g.wet = rng.range(0.1, 0.3); // arid
+                g.height = rng.range(0.3, 0.6);
+                g.light_pref = rng.range(0.7, 1.0);
+                g.temp_pref = rng.range(0.5, 0.85);
+                g.maturity = rng.range(2.0, 4.0);
+                g.succulence = rng.range(0.3, 0.6);
+                g.fire_seed = rng.range(0.5, 0.9); // fire-adapted recruiter
+                g.allelopathy = rng.range(0.3, 0.6);
+                g.nutrients = Self::sparse_nutrients(rng, 2);
+                g.form = form::SHRUB;
+                g.leaf_hue = rng.range(0.12, 0.22); // dry straw color
+            }
+            Archetype::Waterlily => {
+                g.kind = 3;
+                g.nutrient = rng.range(0.4, 0.7);
+                g.defense = rng.range(0.05, 0.2);
+                g.quality = rng.range(0.5, 0.8);
+                g.wet = rng.range(0.9, 1.0); // aquatic
+                g.height = 0.05;
+                g.light_pref = rng.range(0.8, 1.0); // floats up to FULL sun
+                g.submerged = 0.0; // sits ON the surface
+                g.maturity = rng.range(2.5, 5.0);
+                g.nutrients = Self::sparse_nutrients(rng, 3);
+                g.form = form::LILYPAD;
+                g.leaf_hue = rng.range(0.30, 0.42);
+                g.flower = rng.range(0.5, 0.9); // the lily bloom
+                g.flower_hue = rng.range(0.85, 1.0);
+            }
+            Archetype::Eelgrass => {
+                g.kind = 3;
+                g.nutrient = rng.range(0.3, 0.5);
+                g.defense = rng.range(0.05, 0.2);
+                g.quality = rng.range(0.4, 0.6);
+                g.wet = rng.range(0.9, 1.0);
+                g.height = rng.range(0.4, 0.7);
+                g.light_pref = rng.range(0.4, 0.6); // shallow submerged, mid light
+                g.submerged = rng.range(0.4, 0.7);
+                g.maturity = rng.range(2.5, 5.0);
+                g.nutrients = Self::sparse_nutrients(rng, 2);
+                g.form = form::KELP; // ribbon fronds (shorter via height)
+                g.leaf_hue = rng.range(0.28, 0.38);
+            }
+            Archetype::Kelp => {
+                g.kind = 3;
+                g.nutrient = rng.range(0.5, 0.8);
+                g.defense = rng.range(0.1, 0.3);
+                g.quality = rng.range(0.4, 0.7);
+                g.wet = rng.range(0.95, 1.0);
+                g.height = rng.range(0.7, 1.0); // tall fronds reaching up the column
+                g.light_pref = rng.range(0.05, 0.3); // NEEDS LESS SUN: thrives in the dim deep
+                g.submerged = rng.range(0.7, 1.0); // deep
+                g.maturity = rng.range(4.0, 7.0);
+                g.nutrients = Self::sparse_nutrients(rng, 3);
+                g.form = form::KELP;
+                g.leaf_hue = rng.range(0.20, 0.32); // brown-green kelp
+            }
+            Archetype::AlgaeMat => {
+                g.kind = 0;
+                g.nutrient = rng.range(0.3, 0.5);
+                g.defense = 0.0;
+                g.quality = rng.range(0.4, 0.6);
+                g.wet = rng.range(0.9, 1.0);
+                g.height = 0.02;
+                g.light_pref = rng.range(0.7, 1.0); // surface film, full sun
+                g.submerged = rng.range(0.0, 0.2);
+                g.maturity = rng.range(1.5, 3.0);
+                g.regrow = 0.85;
+                g.nutrients = Self::sparse_nutrients(rng, 1);
+                g.form = form::MOSS; // flat mat
+                g.leaf_hue = rng.range(0.33, 0.5);
+            }
+        }
+        g
     }
 
     // Lesser ground plant (grass). One nutrient, low energy density, defenseless, ~flat, full-sun, high
@@ -139,6 +457,20 @@ impl PlantGenome {
             maturity: 1.0, // matures fast
             nutrients,
             toxicity: 0.0,
+            temp_pref: 0.5, // climate-tolerant turf
+            succulence: 0.0,
+            submerged: 0.0,
+            fruiting: 0.0,
+            nitrogen_fix: 0.0,
+            fire_seed: 0.0,
+            climb: 0.0,
+            allelopathy: 0.0,
+            form: form::GROUNDCOVER,
+            flower: 0.0,
+            flower_hue: 0.3,
+            leaf_hue: 0.33, // green
+            bushiness: 0.5,
+            droop: 0.0,
         }
     }
 
@@ -157,6 +489,12 @@ impl PlantGenome {
             *n = (*n + rng.normal() * 0.1).clamp(0.0, 1.0);
         }
         self.toxicity = (self.toxicity + rng.normal() * 0.08).clamp(0.0, 1.0);
+        // blossom variety drifts on trees (flowering/fruit trees); form is fixed (trees use the Tree marker)
+        self.temp_pref = (self.temp_pref + rng.normal() * 0.08).clamp(0.0, 1.0);
+        self.fruiting = (self.fruiting + rng.normal() * 0.1).clamp(0.0, 1.0);
+        self.flower = (self.flower + rng.normal() * 0.1).clamp(0.0, 1.0);
+        self.flower_hue = (self.flower_hue + rng.normal() * 0.08).clamp(0.0, 1.0);
+        self.leaf_hue = (self.leaf_hue + rng.normal() * 0.05).clamp(0.0, 1.0);
     }
 
     pub fn mutate(&mut self, rng: &mut Rng) {
@@ -178,6 +516,20 @@ impl PlantGenome {
             *n = (*n + rng.normal() * 0.1).clamp(0.0, 1.0);
         }
         self.toxicity = (self.toxicity + rng.normal() * 0.08).clamp(0.0, 1.0);
+        // new genes drift; form stays fixed (visual species identity), submerged drifts only a little
+        self.temp_pref = (self.temp_pref + rng.normal() * 0.08).clamp(0.0, 1.0);
+        self.succulence = (self.succulence + rng.normal() * 0.08).clamp(0.0, 1.0);
+        self.submerged = (self.submerged + rng.normal() * 0.06).clamp(0.0, 1.0);
+        self.fruiting = (self.fruiting + rng.normal() * 0.08).clamp(0.0, 1.0);
+        self.nitrogen_fix = (self.nitrogen_fix + rng.normal() * 0.08).clamp(0.0, 1.0);
+        self.fire_seed = (self.fire_seed + rng.normal() * 0.08).clamp(0.0, 1.0);
+        self.climb = (self.climb + rng.normal() * 0.08).clamp(0.0, 1.0);
+        self.allelopathy = (self.allelopathy + rng.normal() * 0.08).clamp(0.0, 1.0);
+        self.flower = (self.flower + rng.normal() * 0.1).clamp(0.0, 1.0);
+        self.flower_hue = (self.flower_hue + rng.normal() * 0.08).clamp(0.0, 1.0);
+        self.leaf_hue = (self.leaf_hue + rng.normal() * 0.05).clamp(0.0, 1.0);
+        self.bushiness = (self.bushiness + rng.normal() * 0.08).clamp(0.0, 1.0);
+        self.droop = (self.droop + rng.normal() * 0.06).clamp(0.0, 1.0);
     }
 
     // Investing in nutrient richness, defense, and digestible quality slows growth (no free lunch, 10).
@@ -197,7 +549,14 @@ impl PlantGenome {
                 - 0.15 * self.regrow
                 - 0.2 * self.branches
                 - 0.18 * mean_nutri
-                - 0.3 * self.toxicity * self.toxicity)
+                - 0.3 * self.toxicity * self.toxicity
+                // new genes each tax growth (no free lunch): water storage, fruit, root nodules, resin, vine
+                - 0.25 * self.succulence
+                - 0.2 * self.fruiting
+                - 0.2 * self.nitrogen_fix
+                - 0.08 * self.fire_seed
+                - 0.1 * self.climb
+                - 0.12 * self.allelopathy)
                 .clamp(0.12, 1.0)
     }
 }
@@ -211,8 +570,17 @@ pub fn plant_color(g: &PlantGenome) -> Color {
         2 => 45.0,
         _ => 190.0,
     };
-    let hue = base_hue - 40.0 * g.defense + 60.0 * g.toxicity; // tough -> warmer/red; toxic -> shifts purple (warning)
+    // leaf_hue gene jitters the family hue (+/-35 deg) -> foliage variety: yellow-green grass, blue-green
+    // succulents, deep-green ferns, straw-dry weeds, all within the same family.
+    let leaf_jit = (g.leaf_hue - 0.5) * 70.0;
+    let hue = base_hue + leaf_jit - 40.0 * g.defense + 60.0 * g.toxicity; // tough -> warmer; toxic -> purple warning
     let light = 0.35 + 0.35 * g.nutrient; // richer plants brighter
     let sat = 0.35 + 0.55 * g.quality; // tastier (digestible) plants more vivid; tough/fibrous = washed out
-    Color::hsl(hue, sat, light)
+    Color::hsl(hue.rem_euclid(360.0), sat, light)
 }
+
+// Petal color for a flowering plant's bloom child. flower_hue spans the full wheel (any petal color).
+pub fn flower_color(g: &PlantGenome) -> Color {
+    Color::hsl((g.flower_hue * 360.0).rem_euclid(360.0), 0.75, 0.65)
+}
+
