@@ -424,23 +424,39 @@ pub fn noon_offset(d: Vec3, tick: u32) -> i64 {
     (want - have).rem_euclid(crate::sphere::DAY_TICKS as i64)
 }
 
-// Rain streaks: when a storm is active, draw falling streaks via gizmos (immediate-mode, no entities).
-// Count + opacity scale with Weather.rain. Positions are a deterministic scatter that falls + wraps on
-// the tick clock (no per-frame RNG -> stays reproducible). Cosmetic; reads the rain cycle at a glance.
-// Rain streaks: short radial lines hanging under thick clouds wherever it is currently raining (cloud-
-// driven). Sampled on a lat/lon grid; rain is sparse (~10% of thick cloud) so streaks are scattered.
+// Rain streaks (immediate-mode gizmos, no entities). Wherever it is currently raining (cloud-driven,
+// sampled on a lat/lon grid), draw a scatter of drops that visibly FALL: each drop's height cycles down the
+// tick clock + wraps, so the streak animates instead of hanging static. Heavier rain (rain_at) = more drops,
+// longer streaks, brighter. Each streak is a gradient line: faded motion-tail up top, bright drop head at
+// the bottom. Deterministic (tick clock + hashed jitter, no per-frame RNG) -> reproducible.
 fn rain_visuals(gen: Res<GenState>, mut gizmos: Gizmos) {
     use std::f32::consts::{FRAC_PI_2, PI, TAU};
     let (rows, cols) = (44, 88);
-    let col = Color::srgba(0.6, 0.7, 0.95, 0.55);
+    let t = gen.tick as f32;
     for j in 0..rows {
         for i in 0..cols {
             let lat = -FRAC_PI_2 + PI * (j as f32 + 0.5) / rows as f32;
             let lon = -PI + TAU * (i as f32 + 0.5) / cols as f32;
             let d = crate::sphere::lonlat_to_pos(lon, lat, 0.0).normalize();
-            if crate::sphere::rain_at(d, gen.tick) > 0.0 {
-                let base = crate::sphere::surface_pos(d, 0.0);
-                gizmos.line(base + d * 9.0, base + d * 3.0, col); // a drop falling toward the surface
+            let r = crate::sphere::rain_at(d, gen.tick);
+            if r <= 0.0 {
+                continue;
+            }
+            let (east, north) = crate::sphere::tangent_frame(d);
+            let base = crate::sphere::surface_pos(d, 0.0);
+            let drops = 1 + (r * 4.0) as usize; // heavier downpour scatters more drops (1..5)
+            for k in 0..drops {
+                let seed = ((j * cols + i) * 8 + k) as u32;
+                // spread the drop across the cell footprint in the tangent plane
+                let foot =
+                    base + east * (hash01(seed) - 0.5) * 4.0 + north * (hash01(seed ^ 0x55) - 0.5) * 4.0;
+                // fall: bottom of the streak slides span..0 over time then wraps back to the top
+                let span = 7.0 + 4.0 * r;
+                let fall = span - ((t * 0.25 + hash01(seed ^ 0xAA) * span) % span);
+                let len = 1.2 + 1.5 * r; // heavier rain = longer streaks
+                let head = Color::srgba(0.70, 0.80, 1.0, (0.35 + 0.5 * r).min(0.85)); // bright drop head
+                let tail = Color::srgba(0.70, 0.80, 1.0, 0.0); // fades into a motion tail
+                gizmos.line_gradient(foot + d * (fall + len + 0.5), foot + d * (fall + 0.5), tail, head);
             }
         }
     }
@@ -564,8 +580,12 @@ fn update_clouds(
     }
 }
 
-// Wildfire glow: an orange flame sphere at each burning fire-cell on the surface, sized by intensity.
-fn fire_visuals(fire: Res<Fire>, mut gizmos: Gizmos) {
+// Wildfire (immediate-mode gizmos). Each burning cell renders as a cluster of flickering flame tongues
+// (deep-red base -> yellow-hot tip gradient lines that sway + pulse on the tick clock) plus a few rising,
+// cooling embers. Tongue count + height scale with burn intensity. Tight to the land cell so coarse-grid
+// coastal cells don't spill flame onto the sea. Deterministic (tick clock + hashed jitter) -> reproducible.
+fn fire_visuals(fire: Res<Fire>, gen: Res<GenState>, mut gizmos: Gizmos) {
+    let t = gen.tick as f32;
     for c in 0..fire.cell.len() {
         let f = fire.cell[c];
         if f < 0.1 {
@@ -574,14 +594,42 @@ fn fire_visuals(fire: Res<Fire>, mut gizmos: Gizmos) {
         let surf = grid_cell_surface(c);
         let up = surf.normalize_or_zero();
         // safety: never draw a flame over water (sim won't ignite ocean cells; this guards coarse-grid
-        // coastal cells whose center reads as sea -> no glow spilling onto the waves).
+        // coastal cells whose center reads as sea -> no flame spilling onto the waves).
         if crate::sphere::is_ocean(up) {
             continue;
         }
-        let col = Color::srgb(1.0, 0.35 + 0.25 * f, 0.05); // deep orange .. yellow-hot
-        // small, low glow (was up to r2.4 raised 2.6): a coarse fire cell sits near the coast, so an
-        // oversized blob spilled over the adjacent sea. Keep it tight to the burning land cell.
-        gizmos.sphere(surf + up * (0.3 + 0.8 * f), 0.35 + 0.7 * f, col);
+        let (east, north) = crate::sphere::tangent_frame(up);
+        // flame tongues: flickering vertical gradient lines, deep-red base climbing to a yellow-hot tip.
+        let tongues = 3 + (f * 5.0) as usize; // hotter fire = fuller flame (3..8 tongues)
+        for k in 0..tongues {
+            let seed = (c * 16 + k) as u32;
+            let flick = 0.5 + 0.5 * (t * 0.25 + seed as f32 * 1.3).sin(); // pulsing height
+            let sway = (t * 0.18 + seed as f32 * 2.1).sin() * 0.6 * f; // lateral wander, wilder when hot
+            let foot = surf
+                + up * 0.2
+                + east * (hash01(seed) - 0.5) * 1.6
+                + north * (hash01(seed ^ 0x9) - 0.5) * 1.6;
+            let h = (1.0 + 2.2 * f) * (0.55 + 0.7 * flick); // taller with intensity + flicker
+            let tip = foot + up * h + east * sway + north * sway * 0.5;
+            let cool = Color::srgb(0.90, 0.16, 0.03); // deep red, cooler base
+            let hot = Color::srgb(1.0, 0.85, 0.30); // yellow-hot tip
+            gizmos.line_gradient(foot, tip, cool, hot);
+        }
+        // embers: small bright motes that rise, drift wider, and fade as they cool
+        let embers = (f * 4.0) as usize;
+        for k in 0..embers {
+            let seed = (c * 16 + 100 + k) as u32;
+            let span = 4.0 + 3.0 * f;
+            let rise = (t * 0.2 + hash01(seed) * span) % span;
+            let frac = rise / span;
+            let p = surf
+                + up * (1.0 + rise)
+                + east * (hash01(seed ^ 0x3) - 0.5) * 2.0 * frac
+                + north * (hash01(seed ^ 0x7) - 0.5) * 2.0 * frac;
+            let lit = Color::srgba(1.0, 0.6, 0.2, (1.0 - frac) * 0.9); // bright, dims as it cools
+            let gone = Color::srgba(1.0, 0.3, 0.05, 0.0);
+            gizmos.line_gradient(p, p + up * 0.4, lit, gone);
+        }
     }
 }
 
@@ -589,7 +637,7 @@ fn fire_visuals(fire: Res<Fire>, mut gizmos: Gizmos) {
 pub struct ShowSensors(pub bool);
 
 fn log_viz_help() {
-    info!("viz: TAB=orbit/walk (walk arrives at noon; [ ] scrub time, \\ noon; swim into the sea: look + W to dive) | hue=diet, vividness=rigidity, size=sensors | G=sensor rays | SPACE=pause | 1-5=speed +/-=fine | B=seed life P=populate planet L=lightning K=cull | H=legend");
+    info!("viz: TAB=orbit/walk (keeps true sim time; [ ] scrub time, \\ noon; swim into the sea: look + W to dive) | hue=diet, vividness=rigidity, size=sensors | G=sensor rays | SPACE=pause | 1-5=speed +/-=fine | B=seed life P=populate planet L=lightning K=cull | H=legend");
 }
 
 // Hue per dominant food/diet type, matching the food palette (green/purple/gold/cyan).
@@ -998,7 +1046,7 @@ CONTROLS
          swim into the SEA: look + W to dive/rise
          (view tints blue while underwater)
          [ / ]  scrub time-of-day   \\  jump to noon
-         (walk arrives at local noon; scrub [ ] for
+         (walk keeps true sim time; scrub [ ] for
           low sun + long shadows; night goes dark)
   G  sensor rays   SPACE  pause/resume
   1-5  speed presets (slow..fast)   + / -  fine speed

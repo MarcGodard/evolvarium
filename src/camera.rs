@@ -5,8 +5,7 @@
 //   WALK: a true ground walk -- the eye rides a fixed height above the terrain (climbs hills, never flies).
 //     WASD move (W/S forward+back, A/D strafe), arrows or right-drag look, Shift run. Walk into the sea to
 //     swim (look + W to dive). Real shadows ON: tight cascade at eye level -> crisp tree/creature shadows.
-use crate::sim::GenState;
-use crate::viz::{noon_offset, Selected, SunLight, SunOffset};
+use crate::viz::{Selected, SunLight, SunOffset};
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
 use bevy::prelude::*;
 
@@ -101,7 +100,6 @@ fn toggle_mode(
     keys: Res<ButtonInput<KeyCode>>,
     mut mode: ResMut<CameraMode>,
     mut selected: ResMut<Selected>,
-    gen: Res<GenState>,
     mut sun_offset: ResMut<SunOffset>,
     mut q: Query<(&OrbitCam, &mut WalkCam)>,
 ) {
@@ -121,9 +119,9 @@ fn toggle_mode(
                 walk.yaw = 0.0;
                 walk.pitch = 0.0;
                 walk.eye_alt = WALK_EYE;
-                // arrive in good light: snap the sky to ~mid-morning (sun ~45deg up, not overhead) so shadows
-                // are immediately visible (overhead noon casts them straight down = invisible). [ ] \ to scrub.
-                sun_offset.0 = noon_offset(walk.dir, gen.tick) - (crate::sphere::DAY_TICKS as i64) / 8;
+                // keep TRUE sim time on arrival so walk + orbit agree on time-of-day at the same spot
+                // (snapping to morning made orbit-night jump to walk-midday). [ ] scrub, \ jumps to noon.
+                sun_offset.0 = 0;
             }
             selected.follow = false;
             info!("camera: WALK mode (WASD move, arrows/right-drag look, Shift run, swim into the sea: look + W to dive, [ ] scrub time, \\ noon, TAB to orbit)");
