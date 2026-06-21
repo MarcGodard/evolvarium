@@ -230,7 +230,7 @@ fn setup_scene(
     commands.spawn((
         DirectionalLight {
             shadows_enabled: true,
-            illuminance: 100_000.0, // full daylight (was overcast-dim)
+            illuminance: 80_000.0, // daylight, dialed down 20% from full-noon 100k for a softer sun
             shadow_depth_bias: 0.04,
             shadow_normal_bias: 1.8,
             ..default()
