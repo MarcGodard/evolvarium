@@ -66,6 +66,25 @@ or `--headless` so it exits on its own.
 - `genome.rs` / `components.rs` / `plant.rs` — genome, ECS components, plant model.
 - `terrain.rs` — globe render mesh. `snapshot.rs` — CPU `--shots` renderer. `config.rs` — balance constants.
 
+## Design docs & specs (outside the repo)
+
+The full design specs + roadmap live in **`~/Documents/Github/clients/evolvarium/`** (a plain docs folder,
+NOT a git repo — edit the files directly; nothing to commit there). Read the relevant doc before nontrivial
+design work:
+
+- `00-concept.md` … `13-living-food-and-distribution.md` — numbered design specs (concept, architecture,
+  genome encoding, brain/NN, metabolism + nutrients, environment fields, god controls, roadmap, open
+  questions, environment trade-offs, crate stack, diet/growth/disease, living food).
+- `14-tuning-harness.md` — **complete build blueprint for the agent tuning harness** (a `--scenario` JSON
+  runner + a Workflow agent fan-out that tunes cohorts to survival). Planned, NOT built; intended to be
+  built by a separate agent. Full schemas, CLI contract, reflex presets, and the list of private symbols
+  to expose are in there.
+- `tuning-frictions.md` — running log of balance frictions for the harness to dial in (F1 = nutrient
+  master-expression gradient too soft; F2 = bite pegs ~1.0). The harness's first job is F1.
+- `PITCH.md`, `SESSION-STATUS.md` — friend-facing pitch + a resume/handoff note.
+
+`BACKLOG.md` (in this repo) is the source of truth for what's done vs open; the spec folder is the "why/how".
+
 ## Conventions
 
 - Comments follow the existing verbose-prose style in this repo (match surrounding code).
