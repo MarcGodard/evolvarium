@@ -102,6 +102,7 @@ fn main() {
     app.insert_resource(sim::Fire::new()); // lightning-ignited wildfire grid
     app.init_resource::<sim::Weather>(); // current rainfall intensity (storms onset + decay)
     app.init_resource::<sim::TreeBites>(); // per-tick fruit-tree grazing accumulator
+    app.init_resource::<sim::SeedBank>(); // dormancy seed bank: buried seeds germinate later (plant_step)
     app.insert_resource(sim::GenState {
         generation: 0,
         ticks_left: sim::GEN_TICKS,

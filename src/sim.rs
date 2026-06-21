@@ -90,6 +90,12 @@ pub struct Weather {
     pub rain: f32,
 }
 
+// Seed bank (dormancy gene): seeds buried in the soil that germinate LATER, not now. Each entry counts down
+// `ticks`; at 0 plant_step spawns it. The bank lives independent of surface plants, so a patch wiped by
+// fire/drought/grazing re-greens from its buried seeds (boom after disturbance). Capped at SEED_BANK_CAP.
+#[derive(Resource, Default)]
+pub struct SeedBank(pub Vec<(PlantGenome, Vec3, u32)>); // (genome, surface pos, ticks until germination)
+
 // Dynamic ground-water grid (rain cycle): per-cell wetness 0..1 layered over static terrain moisture.
 // Sun evaporates it, rain refills it (rocky cells shed runoff). Coarse grid so wetness is spatially local.
 #[derive(Resource)]
@@ -670,9 +676,9 @@ fn tree_genome(rng: &mut Rng) -> PlantGenome {
         seed_weight: rng.range(0.3, 0.7), // trees: heavier provisioned seeds (acorn..samara), some drift
         windborne: rng.f32() * 0.4,
         clonal: 0.0,                      // trees seed; no clonal pathway in the tree branch yet
-        cling: 0.0,
-        dormancy: 0.0,
-        hydrochory: 0.0,
+        cling: rng.f32() * 0.2,           // some trees bear hooked/sticky seeds
+        dormancy: rng.range(0.3, 0.6),    // acorn/nut seed bank: trees bank seed in the soil between mast years
+        hydrochory: rng.f32() * 0.2,      // riverside/coastal trees float their seeds (evolves up where it pays)
         form: crate::plant::form::SHRUB,
         flower: rng.f32() * 0.6, // some trees blossom (render: crown bloom ring)
         flower_hue: rng.f32(),
@@ -1171,6 +1177,7 @@ pub fn plant_step(
     climate: Res<Climate>,
     fire: Res<Fire>,
     mut tree_bites: ResMut<TreeBites>,
+    mut bank: ResMut<SeedBank>,
     mut q: Query<(Entity, &mut PlantState, &PlantGenome, &Transform, Option<&Tree>), (Without<Rot>, Without<Grass>)>, // not carrion, not grass (grass_step owns grass)
 ) {
     soil.decay(); // fertility leaches / is taken up over time
@@ -1380,22 +1387,62 @@ pub fn plant_step(
                 st.mass *= PLANT_REPRO_FRAC; // budding a ramet costs the parent
             }
         }
+        // cling (epizoochory): a passing animal snags a burr/sticky seed + carries it FAR, even though this
+        // plant is never eaten -> defended/toxic/inedible plants still disperse by animal (burdock, cleavers).
+        // Flat per-tick chance (abstracts animal traffic; no proximity scan). Independent of fruiting/toxicity.
+        if mature
+            && g.cling > 0.0
+            && plant_count + births.len() < PLANT_CAP
+            && rng.f32() < P_CLING * g.cling
+        {
+            let mut child = g.clone();
+            child.mutate(&mut rng);
+            let pos = disperse_pos(&mut rng, ppos, eff_spread(g) * CLING_SPREAD_MULT, FOOD_Y);
+            if !(g.wet > 0.85 && !crate::sphere::is_ocean(pos.normalize_or_zero())) {
+                births.push((child, pos));
+            }
+        }
         if mature
             && plant_count + births.len() < PLANT_CAP
             && rng.f32() < P_REPRO * (1.0 - DEF_REPRO_COST * g.defense)
         {
             let mut child = g.clone();
             child.mutate(&mut rng);
+            // hydrochory: a seed from a plant AT/NEAR water floats + rides far. near_water = 1 at/below sea
+            // level, tapering to 0 a short band above -> only coastal/aquatic plants get the long water reach.
+            let near_water = ((crate::sphere::SEA_LEVEL + HYDRO_COAST_BAND - e01) / HYDRO_COAST_BAND).clamp(0.0, 1.0);
+            let hydro = 1.0 + HYDRO_RANGE * g.hydrochory * near_water;
             // wind + seed weight set how far this seed travels (dandelion flies, acorn drops near the parent)
-            let pos = disperse_pos(&mut rng, ppos, eff_spread(g), FOOD_Y);
+            let pos = disperse_pos(&mut rng, ppos, eff_spread(g) * hydro, FOOD_Y);
             // aquatic plants (high wet) only seed into water; a seed that lands on dry ground is dropped
             // (mirror of land-only trees). Parent still pays the budding cost either way.
             if !(g.wet > 0.85 && !crate::sphere::is_ocean(pos.normalize_or_zero())) {
-                births.push((child, pos));
+                // dormancy: a fraction of seeds go DORMANT into the soil bank (germinate later) instead of
+                // sprouting now -> the lineage survives a surface wipe (fire/drought) and booms after. The
+                // rest sprout immediately. Bank is capped; when full, dormant seeds are simply lost.
+                if rng.f32() < DORMANCY_FRAC * g.dormancy && bank.0.len() < SEED_BANK_CAP {
+                    let wait = DORMANT_TICKS_MIN + (rng.f32() * (DORMANT_TICKS_MAX - DORMANT_TICKS_MIN) as f32) as u32;
+                    bank.0.push((child, pos, wait));
+                } else {
+                    births.push((child, pos));
+                }
             }
             st.mass *= PLANT_REPRO_FRAC;
         }
     }
+    // seed bank germination: count every buried seed down; one that reaches 0 sprouts this tick (subject to
+    // the cap) and leaves the bank. A patch cleared by fire/drought thus re-greens from its bank later (dormancy).
+    let mut germinated: Vec<(PlantGenome, Vec3)> = Vec::new();
+    bank.0.retain_mut(|(g, pos, ticks)| {
+        *ticks = ticks.saturating_sub(1);
+        if *ticks == 0 && plant_count + births.len() + germinated.len() < PLANT_CAP {
+            germinated.push((g.clone(), *pos));
+            false // sprouted -> remove from the bank
+        } else {
+            true // still dormant (or ready but the cap is full this tick: retry next tick)
+        }
+    });
+    births.extend(germinated);
     // dead plants -> detritus that FERMENTS (completes the rot chain, P3): poor food, fermenting to a
     // little toxic FAST energy, then gone. Ferment marker routes it to the plant-matter eat branch.
     for (g, mass, pos) in detritus {

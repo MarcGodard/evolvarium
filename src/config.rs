@@ -168,6 +168,20 @@ pub const P_PLANT_EAT_DISPERSE: f32 = 0.06; // per-grazed-tick chance a fruiting
 pub const PLANT_EAT_SPREAD_MULT: f32 = 2.5; // animal-carried plant seeds travel this much farther than wind-fall
 pub const P_CLONAL: f32 = 0.012;            // per-tick clonal ramet chance scale (x clonal gene), for a mature plant
 pub const CLONAL_RADIUS: f32 = 2.5;         // a runner / ramet sprouts this far from the parent (dense local patch)
+// cling (epizoochory): a passing animal snags a burr + carries it far, even from an inedible plant. Abstracts
+// animal traffic as a flat per-tick chance (no proximity scan, matching the cheap-ecology-gene convention).
+pub const P_CLING: f32 = 0.05;              // per-tick chance scale a mature plant's seed hitches a ride (x cling)
+pub const CLING_SPREAD_MULT: f32 = 3.0;     // a fur-borne seed travels this much farther than wind-fall
+// hydrochory: a seed from a plant AT/NEAR water floats + rides far. near_water tapers from 1 at/below sea
+// level to 0 a short band above it, so only coastal + aquatic plants get the long water dispersal.
+pub const HYDRO_RANGE: f32 = 4.0;           // full hydrochory at the waterline stretches dispersal by +400%
+pub const HYDRO_COAST_BAND: f32 = 0.06;     // elevation01 band above sea level still counted as near-water
+// dormancy (seed bank): a fraction of seeds wait DORMANT in the soil, then germinate later -> a patch wiped
+// by fire/drought/grazing re-greens from its buried bank. The bank persists independent of surface plants.
+pub const DORMANCY_FRAC: f32 = 0.7;         // at dormancy=1, this fraction of seeds go to the bank instead of sprouting
+pub const SEED_BANK_CAP: usize = 6000;      // max buried seeds tracked (drop new ones when full)
+pub const DORMANT_TICKS_MIN: u32 = 200;     // shortest a seed waits buried before it germinates
+pub const DORMANT_TICKS_MAX: u32 = 1600;    // longest a seed waits buried (staggers recruitment over time)
 
 // --- fruit + fermentation (Phase B): the forageable source of FAST energy ---
 // Fruit trees drop fruit; fallen fruit + dead-plant detritus ferment over their Rot clock. Eating in

@@ -108,6 +108,18 @@ pub struct PlantGenome {
     pub clonal: f32,      // 0..1 vegetative spread (rhizome / runner / sucker): puts out near-identical ramets
                           // right beside itself -> dense local patch WITHOUT seeding (strawberry, aspen). No
                           // long dispersal, no gene shuffle (true clone). Costs growth.
+    #[serde(default)]
+    pub cling: f32,       // 0..1 epizoochory (burrs / hooks / sticky seed): a passing animal snags the seed +
+                          // carries it FAR, even though the plant is never eaten -> defended/toxic/inedible
+                          // plants still get animal dispersal (burdock, cleavers). Costs growth.
+    #[serde(default)]
+    pub dormancy: f32,    // 0..1 seed bank: a fraction of seeds wait DORMANT in the soil + germinate later
+                          // instead of sprouting now. Outlasts fire/drought/grazing that clears the surface ->
+                          // a wiped patch re-greens from its buried bank (boom after disturbance). Costs growth.
+    #[serde(default)]
+    pub hydrochory: f32,  // 0..1 water dispersal (buoyant / corky seed): a seed from a plant AT/NEAR water
+                          // floats + rides far on the water (coconut, mangrove propagule). Only helps where
+                          // there is water to float on; inland it does nothing. Costs growth.
 
     // --- visual-only genes (cosmetic; zero sim cost) ---
     #[serde(default = "default_form")]
@@ -179,6 +191,9 @@ impl PlantGenome {
             seed_weight: rng.f32() * 0.5,
             windborne: rng.f32() * 0.4,
             clonal: rng.f32() * 0.3,
+            cling: rng.f32() * 0.3,
+            dormancy: rng.f32() * 0.4,
+            hydrochory: rng.f32() * 0.2,
             // random fallback plant: a land form (HERB..ROSETTE), never an aquatic/special form
             form: (rng.f32() * 8.0) as u8 % 8,
             flower: rng.f32() * 0.5,
@@ -292,6 +307,7 @@ impl PlantGenome {
                 g.toxicity = rng.f32() * 0.2;
                 g.succulence = rng.range(0.7, 1.0); // water storage: survives drought
                 g.seed_weight = rng.range(0.4, 0.7); // heavy seed: drops near the parent (no wind in the open desert helps)
+                g.dormancy = rng.range(0.6, 0.9); // desert seed bank: seeds wait dormant for the rare rain
                 g.nutrients = Self::sparse_nutrients(rng, 2);
                 g.form = form::SUCCULENT;
                 g.leaf_hue = rng.range(0.40, 0.52); // blue-green
@@ -307,6 +323,7 @@ impl PlantGenome {
                 g.height = rng.range(0.6, 0.95); // tall stalks
                 g.light_pref = rng.range(0.6, 0.9);
                 g.maturity = rng.range(3.0, 6.0);
+                g.hydrochory = rng.range(0.4, 0.7); // wetland edge: seeds float off on the water
                 g.nutrients = Self::sparse_nutrients(rng, 2);
                 g.form = form::REED;
                 g.leaf_hue = rng.range(0.25, 0.35);
@@ -373,6 +390,7 @@ impl PlantGenome {
                 g.light_pref = rng.range(0.6, 0.9);
                 g.temp_pref = rng.range(0.05, 0.25); // COLD niche
                 g.maturity = rng.range(2.0, 4.0);
+                g.dormancy = rng.range(0.5, 0.8); // alpine seed bank: seeds overwinter dormant under the snow
                 g.nutrients = Self::sparse_nutrients(rng, 2);
                 g.form = form::GROUNDCOVER;
                 g.bushiness = rng.range(0.7, 1.0); // dense cushion
@@ -395,6 +413,7 @@ impl PlantGenome {
                 g.allelopathy = rng.range(0.3, 0.6);
                 g.windborne = rng.range(0.6, 0.9); // the whole dead plant tumbles + scatters seed downwind
                 g.seed_weight = rng.range(0.0, 0.2);
+                g.dormancy = rng.range(0.5, 0.8); // arid seed bank: waits out the dry, booms after rain/fire
                 g.nutrients = Self::sparse_nutrients(rng, 2);
                 g.form = form::SHRUB;
                 g.leaf_hue = rng.range(0.12, 0.22); // dry straw color
@@ -409,6 +428,7 @@ impl PlantGenome {
                 g.light_pref = rng.range(0.8, 1.0); // floats up to FULL sun
                 g.submerged = 0.0; // sits ON the surface
                 g.maturity = rng.range(2.5, 5.0);
+                g.hydrochory = rng.range(0.6, 0.9); // floating seeds drift across the water
                 g.nutrients = Self::sparse_nutrients(rng, 3);
                 g.form = form::LILYPAD;
                 g.leaf_hue = rng.range(0.30, 0.42);
@@ -426,6 +446,7 @@ impl PlantGenome {
                 g.submerged = rng.range(0.4, 0.7);
                 g.maturity = rng.range(2.5, 5.0);
                 g.clonal = rng.range(0.5, 0.8); // seagrass spreads by rhizome into meadows
+                g.hydrochory = rng.range(0.5, 0.8); // seeds drift on the current
                 g.nutrients = Self::sparse_nutrients(rng, 2);
                 g.form = form::KELP; // ribbon fronds (shorter via height)
                 g.leaf_hue = rng.range(0.28, 0.38);
@@ -440,6 +461,7 @@ impl PlantGenome {
                 g.light_pref = rng.range(0.05, 0.3); // NEEDS LESS SUN: thrives in the dim deep
                 g.submerged = rng.range(0.7, 1.0); // deep
                 g.maturity = rng.range(4.0, 7.0);
+                g.hydrochory = rng.range(0.6, 0.9); // buoyant spores/fragments drift far on the current
                 g.nutrients = Self::sparse_nutrients(rng, 3);
                 g.form = form::KELP;
                 g.leaf_hue = rng.range(0.20, 0.32); // brown-green kelp
@@ -456,6 +478,7 @@ impl PlantGenome {
                 g.maturity = rng.range(1.5, 3.0);
                 g.regrow = 0.85;
                 g.clonal = rng.range(0.6, 0.9); // algal film spreads clonally across the surface
+                g.hydrochory = rng.range(0.6, 0.9); // surface film rafts across the water
                 g.nutrients = Self::sparse_nutrients(rng, 1);
                 g.form = form::MOSS; // flat mat
                 g.leaf_hue = rng.range(0.33, 0.5);
@@ -495,6 +518,9 @@ impl PlantGenome {
             seed_weight: 0.1,  // tiny light grass seed
             windborne: 0.3,    // blows a little
             clonal: 0.6,       // turf creeps + fills by runners (the main way grass spreads)
+            cling: 0.1,        // grass seed occasionally hitches a ride
+            dormancy: 0.5,     // a real grass seed bank: turf re-greens fast after fire/drought
+            hydrochory: 0.0,   // land turf: no water dispersal
             form: form::GROUNDCOVER,
             flower: 0.0,
             flower_hue: 0.3,
@@ -522,9 +548,13 @@ impl PlantGenome {
         // blossom variety drifts on trees (flowering/fruit trees); form is fixed (trees use the Tree marker)
         self.temp_pref = (self.temp_pref + rng.normal() * 0.08).clamp(0.0, 1.0);
         self.fruiting = (self.fruiting + rng.normal() * 0.1).clamp(0.0, 1.0);
-        // trees disperse by seed too: acorn (heavy, short) vs samara (light, windborne) drifts
+        // trees disperse by seed too: acorn (heavy, short) vs samara (light, windborne) drifts; burr trees
+        // cling to fur, riverside/coastal trees float their seeds (mangrove), oaks bank acorns (dormancy).
         self.seed_weight = (self.seed_weight + rng.normal() * 0.08).clamp(0.0, 1.0);
         self.windborne = (self.windborne + rng.normal() * 0.08).clamp(0.0, 1.0);
+        self.cling = (self.cling + rng.normal() * 0.08).clamp(0.0, 1.0);
+        self.dormancy = (self.dormancy + rng.normal() * 0.08).clamp(0.0, 1.0);
+        self.hydrochory = (self.hydrochory + rng.normal() * 0.08).clamp(0.0, 1.0);
         self.flower = (self.flower + rng.normal() * 0.1).clamp(0.0, 1.0);
         self.flower_hue = (self.flower_hue + rng.normal() * 0.08).clamp(0.0, 1.0);
         self.leaf_hue = (self.leaf_hue + rng.normal() * 0.05).clamp(0.0, 1.0);
@@ -561,6 +591,9 @@ impl PlantGenome {
         self.seed_weight = (self.seed_weight + rng.normal() * 0.08).clamp(0.0, 1.0);
         self.windborne = (self.windborne + rng.normal() * 0.08).clamp(0.0, 1.0);
         self.clonal = (self.clonal + rng.normal() * 0.08).clamp(0.0, 1.0);
+        self.cling = (self.cling + rng.normal() * 0.08).clamp(0.0, 1.0);
+        self.dormancy = (self.dormancy + rng.normal() * 0.08).clamp(0.0, 1.0);
+        self.hydrochory = (self.hydrochory + rng.normal() * 0.08).clamp(0.0, 1.0);
         self.flower = (self.flower + rng.normal() * 0.1).clamp(0.0, 1.0);
         self.flower_hue = (self.flower_hue + rng.normal() * 0.08).clamp(0.0, 1.0);
         self.leaf_hue = (self.leaf_hue + rng.normal() * 0.05).clamp(0.0, 1.0);
@@ -596,7 +629,11 @@ impl PlantGenome {
                 // dispersal genes tax growth too: provisioning a heavy seed, pappus/wings, runners
                 - 0.12 * self.seed_weight
                 - 0.06 * self.windborne
-                - 0.14 * self.clonal)
+                - 0.14 * self.clonal
+                // burrs/hooks, a dormant seed coat, and a buoyant seed each cost a little growth
+                - 0.06 * self.cling
+                - 0.08 * self.dormancy
+                - 0.05 * self.hydrochory)
                 .clamp(0.12, 1.0)
     }
 }
