@@ -158,6 +158,17 @@ pub const TREE_MASS_NUTRI: f32 = 0.5; // at full maturity a tree's fruit is (1-t
 pub const P_TREE_EAT_DISPERSE: f32 = 0.03; // per-grazed-tick chance an eaten fruit tree disperses a seed (animal-carried)
 pub const TREE_EAT_SPREAD_MULT: f32 = 2.5; // animal-carried seeds travel this much farther than wind-fall
 
+// --- plant dispersal genetics (how seed_weight / windborne / clonal / fruiting shape where offspring land) ---
+// Effective seed dispersal = genome `spread` x wind stretch x seed-weight drag. Light + windborne flies far
+// (dandelion); heavy drops near the parent (acorn). Animal-carried (endozoochory) seeds go farther still,
+// but toxic fruit is eaten less -> toxic plants stay clustered. Clonal is a separate short-range runner path.
+pub const WIND_RANGE: f32 = 1.6;            // full windborne stretches dispersal by +160% (2.6x reach)
+pub const SEED_DRAG: f32 = 0.6;             // full seed_weight shortens dispersal to 40% (heavy seed drops near parent)
+pub const P_PLANT_EAT_DISPERSE: f32 = 0.06; // per-grazed-tick chance a fruiting plant's seed is animal-carried far
+pub const PLANT_EAT_SPREAD_MULT: f32 = 2.5; // animal-carried plant seeds travel this much farther than wind-fall
+pub const P_CLONAL: f32 = 0.012;            // per-tick clonal ramet chance scale (x clonal gene), for a mature plant
+pub const CLONAL_RADIUS: f32 = 2.5;         // a runner / ramet sprouts this far from the parent (dense local patch)
+
 // --- fruit + fermentation (Phase B): the forageable source of FAST energy ---
 // Fruit trees drop fruit; fallen fruit + dead-plant detritus ferment over their Rot clock. Eating in
 // the fermentation window (FERMENT_START..FERMENT_END as a fraction of ROT_GONE) yields FAST energy

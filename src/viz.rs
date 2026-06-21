@@ -196,7 +196,7 @@ fn add_plant_visuals(
                         .spawn((
                             Mesh3d(forms.flower.clone()),
                             MeshMaterial3d(fmat.clone()),
-                            Transform::from_xyz(0.9 * a.cos(), 2.4, 0.9 * a.sin()).with_scale(Vec3::splat(1.6)),
+                            Transform::from_xyz(0.9 * a.cos(), 2.4, 0.9 * a.sin()).with_scale(Vec3::splat(0.85)),
                         ))
                         .id();
                     commands.entity(e).add_child(c);
@@ -241,7 +241,7 @@ fn add_plant_visuals(
                 .spawn((
                     Mesh3d(forms.flower.clone()),
                     MeshMaterial3d(materials.add(flower_color(g))),
-                    Transform::from_xyz(0.0, top, 0.0).with_scale(Vec3::splat(0.5 + 0.9 * g.flower)),
+                    Transform::from_xyz(0.0, top, 0.0).with_scale(Vec3::splat(0.28 + 0.45 * g.flower)),
                 ))
                 .id();
             commands.entity(e).add_child(child);

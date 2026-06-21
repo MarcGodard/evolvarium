@@ -35,6 +35,7 @@ pub struct GenState {
     pub load: Option<String>, // --load=PATH: resume from a saved population instead of random
     pub diverse: bool,        // --diverse: hand-seed niche-adapted creatures across the globe (multi-niche showcase)
     pub mating: bool,         // --mating: offspring = crossover of two nearby genetically-similar parents (assortative -> speciation); else single-parent budding
+    pub garden: bool,         // --garden: seed a botanical SHOWCASE (one of every plant species in a grid at the homeland, + a fruit tree, evergreen, vine tree) instead of the normal random world. For inspecting the flora.
 }
 
 impl GenState {
@@ -378,6 +379,13 @@ fn disperse_pos(rng: &mut Rng, parent: Vec3, spread: f32, offset: f32) -> Vec3 {
     crate::sphere::surface_pos(d, offset)
 }
 
+// Effective seed dispersal distance: the genome `spread` STRETCHED by wind dispersal and DRAGGED in by seed
+// weight. Light + windborne -> far (dandelion/samara); heavy -> drops near the parent (oak acorn). Kept >=0.5
+// so a seed always clears the parent stem. Shared by plants + trees (animal-carry multiplies this further).
+fn eff_spread(g: &PlantGenome) -> f32 {
+    (g.spread * (1.0 + WIND_RANGE * g.windborne) * (1.0 - SEED_DRAG * g.seed_weight)).max(0.5)
+}
+
 // A random LAND surface position anywhere on the globe, sitting `offset` above the terrain (dispersal/reseed).
 fn rand_pos(rng: &mut Rng, offset: f32) -> Vec3 {
     let mut d = crate::sphere::random_dir_in_cap(rng, Vec3::Y, std::f32::consts::PI);
@@ -518,6 +526,9 @@ fn spawn_carrion(commands: &mut Commands, pos: Vec3, mass: f32) {
             fire_seed: 0.0,
             climb: 0.0,
             allelopathy: 0.0,
+            seed_weight: 0.0, // unused for carrion (never disperses)
+            windborne: 0.0,
+            clonal: 0.0,
             form: crate::plant::form::HERB,
             flower: 0.0,
             flower_hue: 0.5,
@@ -653,6 +664,9 @@ fn tree_genome(rng: &mut Rng) -> PlantGenome {
         fire_seed: rng.f32() * 0.2,
         climb: 0.0,
         allelopathy: 0.0,
+        seed_weight: rng.range(0.3, 0.7), // trees: heavier provisioned seeds (acorn..samara), some drift
+        windborne: rng.f32() * 0.4,
+        clonal: 0.0,                      // trees seed; no clonal pathway in the tree branch yet
         form: crate::plant::form::SHRUB,
         flower: rng.f32() * 0.6, // some trees blossom (render: crown bloom ring)
         flower_hue: rng.f32(),
@@ -704,6 +718,42 @@ fn plant_for_site(rng: &mut Rng, d: Vec3) -> PlantGenome {
         pick(rng, &[A::Clover, A::Wildflower, A::BerryBush, A::Nightshade, A::Fern]) // mixed meadow
     };
     PlantGenome::archetype(rng, a)
+}
+
+// Botanical SHOWCASE (--garden): one of every plant species laid out in a tidy grid at the homeland, plus a
+// back row of trees (fruit, evergreen, vine-draped evergreen). For inspecting every form at once instead of
+// hunting for them across biomes. Plants spawn already-grown (mass ~ maturity) so they show at full size.
+fn seed_garden(commands: &mut Commands, rng: &mut Rng) {
+    use crate::plant::Archetype as A;
+    let species = [
+        A::Clover, A::Wildflower, A::BerryBush, A::Fern, A::Cactus, // row -1
+        A::Reed, A::Thistle, A::Nightshade, A::Moss, A::AlpineCushion, // row 0
+        A::Tumbleweed, A::Waterlily, A::Eelgrass, A::Kelp, A::AlgaeMat, // row +1
+    ];
+    let c = homeland_center();
+    // tangent basis at the homeland (u = "across", v = "forward")
+    let seed_up = if c.cross(Vec3::Y).length() > 0.01 { Vec3::Y } else { Vec3::X };
+    let u = c.cross(seed_up).normalize();
+    let v = c.cross(u).normalize();
+    let cols = 5usize;
+    let sp = 0.03_f32; // grid spacing in radians (~2.4 units): tight so the plants fill the view
+    let place = |col: f32, row: f32| (c + u * (col * sp) + v * (row * sp)).normalize();
+    for (i, a) in species.iter().enumerate() {
+        let col = (i % cols) as f32 - 2.0;
+        let row = (i / cols) as f32 - 1.0;
+        let g = PlantGenome::archetype(rng, *a);
+        spawn_plant(commands, g, 9.0, crate::sphere::surface_pos(place(col, row), FOOD_Y)); // grown to full size
+    }
+    // back row: a blossoming fruit tree, an evergreen, and a vine-draped evergreen
+    let trees: [(f32, bool, bool); 3] = [(-1.5, true, false), (0.0, false, false), (1.5, false, true)];
+    for (col, edible, vine) in trees {
+        let mut g = tree_genome(rng);
+        g.flower_hue = if vine { 0.8 } else { 0.3 }; // flower_hue > 0.58 -> add_plant_visuals drapes a vine
+        if edible {
+            g.flower = 0.6; // blossoms on the fruit tree
+        }
+        spawn_tree(commands, 6.0, crate::sphere::surface_pos(place(col, 2.6), FOOD_Y), edible, g);
+    }
 }
 
 // Spawn one plant (living food). No render mesh; add_plant_visuals (render mode) gives it one.
@@ -800,29 +850,37 @@ pub fn spawn_world_headless(mut commands: Commands, mut rng: ResMut<Rng>, mut ge
         ));
     }
     // diverse mode spreads life globally (creatures are placed in niches worldwide, so food must be too).
-    let food_pos = |rng: &mut Rng| plant_spawn_pos(rng, !gen.diverse, FOOD_Y); // land + shallow water (aquatic flora)
-    match &snap {
-        Some(s) if !s.plants.is_empty() => {
-            for sp in &s.plants {
-                let p = food_pos(&mut rng);
-                // regenerate every loaded plant as fresh biome-matched flora (we do not carry legacy plants
-                // forward); sp.mass is kept so the food web reloads grown, not all seedlings.
-                let g = plant_for_site(&mut rng, p.normalize_or_zero());
-                spawn_plant(&mut commands, g, sp.mass, p);
+    if gen.garden {
+        // showcase: one of every species in a grid at the homeland (+ a few trees) instead of a random world
+        seed_garden(&mut commands, &mut rng);
+    } else {
+        let food_pos = |rng: &mut Rng| plant_spawn_pos(rng, !gen.diverse, FOOD_Y); // land + shallow water (aquatic flora)
+        match &snap {
+            Some(s) if !s.plants.is_empty() => {
+                for sp in &s.plants {
+                    let p = food_pos(&mut rng);
+                    // regenerate every loaded plant as fresh biome-matched flora (we do not carry legacy plants
+                    // forward); sp.mass is kept so the food web reloads grown, not all seedlings.
+                    let g = plant_for_site(&mut rng, p.normalize_or_zero());
+                    spawn_plant(&mut commands, g, sp.mass, p);
+                }
+            }
+            _ => {
+                for _ in 0..FOOD {
+                    let p = food_pos(&mut rng);
+                    let pg = plant_for_site(&mut rng, p.normalize_or_zero()); // species by biome
+                    spawn_plant(&mut commands, pg, rng.range(0.3, 1.4) * PLANT_START_MASS, p); // varied mass desyncs the food supply
+                }
             }
         }
-        _ => {
-            for _ in 0..FOOD {
-                let p = food_pos(&mut rng);
-                let pg = plant_for_site(&mut rng, p.normalize_or_zero()); // species by biome
-                spawn_plant(&mut commands, pg, rng.range(0.3, 1.4) * PLANT_START_MASS, p); // varied mass desyncs the food supply
-            }
-        }
+        spawn_trees(&mut commands, &mut rng, gen.diverse);
     }
-    spawn_trees(&mut commands, &mut rng, gen.diverse);
-    // start the turf half-full; grass_step tops it up to GRASS_CAP from here.
-    for _ in 0..GRASS_CAP / 2 {
-        spawn_grass(&mut commands, PlantGenome::grass(&mut rng), GRASS_START_MASS, grass_pos(&mut rng, None));
+    // start the turf half-full; grass_step tops it up to GRASS_CAP from here. (Skip in --garden: a clean
+    // showcase ground without the tall turf hiding the specimen plants.)
+    if !gen.garden {
+        for _ in 0..GRASS_CAP / 2 {
+            spawn_grass(&mut commands, PlantGenome::grass(&mut rng), GRASS_START_MASS, grass_pos(&mut rng, None));
+        }
     }
 }
 
@@ -973,7 +1031,9 @@ pub fn spawn_world_render(
     if skip_warmup {
         gen.generation = WARMUP_GENS;
     }
-    for (i, g) in genomes.into_iter().enumerate() {
+    // --garden showcase: just a few creatures wandering the garden, not the whole population.
+    let n_creatures = if gen.garden { 4 } else { usize::MAX };
+    for (i, g) in genomes.into_iter().take(n_creatures).enumerate() {
         let (g, p) = if gen.diverse { diverse_creature(g, i, &mut rng) } else { (g, homeland_pos(&mut rng, CREATURE_Y)) };
         let h = rng.range(-std::f32::consts::PI, std::f32::consts::PI);
         let brain = Brain { net: g.net.clone(), prev_dist: f32::INFINITY };
@@ -999,29 +1059,37 @@ pub fn spawn_world_render(
             Transform::from_translation(p),
         ));
     }
-    let food_pos = |rng: &mut Rng| plant_spawn_pos(rng, !gen.diverse, FOOD_Y); // land + shallow water (aquatic flora)
-    match &snap {
-        Some(s) if !s.plants.is_empty() => {
-            for sp in &s.plants {
-                let p = food_pos(&mut rng);
-                // regenerate every loaded plant as fresh biome-matched flora (we do not carry legacy plants
-                // forward); sp.mass is kept so the food web reloads grown, not all seedlings.
-                let g = plant_for_site(&mut rng, p.normalize_or_zero());
-                spawn_plant(&mut commands, g, sp.mass, p);
+    if gen.garden {
+        // showcase: one of every species in a grid at the homeland (+ a few trees) instead of a random world
+        seed_garden(&mut commands, &mut rng);
+    } else {
+        let food_pos = |rng: &mut Rng| plant_spawn_pos(rng, !gen.diverse, FOOD_Y); // land + shallow water (aquatic flora)
+        match &snap {
+            Some(s) if !s.plants.is_empty() => {
+                for sp in &s.plants {
+                    let p = food_pos(&mut rng);
+                    // regenerate every loaded plant as fresh biome-matched flora (we do not carry legacy plants
+                    // forward); sp.mass is kept so the food web reloads grown, not all seedlings.
+                    let g = plant_for_site(&mut rng, p.normalize_or_zero());
+                    spawn_plant(&mut commands, g, sp.mass, p);
+                }
+            }
+            _ => {
+                for _ in 0..FOOD {
+                    let p = food_pos(&mut rng);
+                    let pg = plant_for_site(&mut rng, p.normalize_or_zero()); // species by biome
+                    spawn_plant(&mut commands, pg, rng.range(0.3, 1.4) * PLANT_START_MASS, p); // varied mass desyncs the food supply
+                }
             }
         }
-        _ => {
-            for _ in 0..FOOD {
-                let p = food_pos(&mut rng);
-                let pg = plant_for_site(&mut rng, p.normalize_or_zero()); // species by biome
-                spawn_plant(&mut commands, pg, rng.range(0.3, 1.4) * PLANT_START_MASS, p); // varied mass desyncs the food supply
-            }
-        }
+        spawn_trees(&mut commands, &mut rng, gen.diverse);
     }
-    spawn_trees(&mut commands, &mut rng, gen.diverse);
-    // start the turf half-full; grass_step tops it up to GRASS_CAP from here.
-    for _ in 0..GRASS_CAP / 2 {
-        spawn_grass(&mut commands, PlantGenome::grass(&mut rng), GRASS_START_MASS, grass_pos(&mut rng, None));
+    // start the turf half-full; grass_step tops it up to GRASS_CAP from here. (Skip in --garden: a clean
+    // showcase ground without the tall turf hiding the specimen plants.)
+    if !gen.garden {
+        for _ in 0..GRASS_CAP / 2 {
+            spawn_grass(&mut commands, PlantGenome::grass(&mut rng), GRASS_START_MASS, grass_pos(&mut rng, None));
+        }
     }
 }
 
@@ -1037,6 +1105,9 @@ pub fn grass_step(
     fire: Res<Fire>,
     mut q: Query<(Entity, &mut PlantState, &PlantGenome, &Transform), (With<Grass>, Without<Rot>)>,
 ) {
+    if gen.garden {
+        return; // --garden showcase: no turf (it would top back up to GRASS_CAP and bury the specimens)
+    }
     let season = (gen.tick as f32 / GEN_TICKS as f32 * SEASON_FREQ).sin();
     let mut count = q.iter().count();
     for (e, mut st, g, tf) in &mut q {
@@ -1183,7 +1254,8 @@ pub fn plant_step(
             let ambient = mature && local <= TREE_MAX_LOCAL && rng.f32() < P_TREE_REPRO * fert_boost;
             let disperse = mature && tree.edible && grazed && rng.f32() < P_TREE_EAT_DISPERSE; // seed carried off
             if (ambient || disperse) && tree_count + tree_births.len() < TREE_CAP {
-                let spread = if disperse { g.spread * TREE_EAT_SPREAD_MULT } else { g.spread };
+                let base = eff_spread(g); // wind/weight shape reach (samara flies, acorn drops); animal-carry adds more
+                let spread = if disperse { base * TREE_EAT_SPREAD_MULT } else { base };
                 let pos = disperse_pos(&mut rng, ppos, spread, FOOD_Y);
                 // trees are land-only: drop seeds that landed in the sea (no ocean forests)
                 if !crate::sphere::is_ocean(pos.normalize_or_zero()) {
@@ -1271,13 +1343,45 @@ pub fn plant_step(
         if mature && g.fruiting > 0.2 && rng.f32() < P_FRUIT_DROP * g.fruiting {
             fruit_drops.push((g.clone(), disperse_pos(&mut rng, ppos, 2.0, FOOD_Y)));
         }
+        // endozoochory: a fruiting plant that SURVIVED being grazed this tick can have a seed carried off in
+        // the eater + dropped FAR (animal dispersal, like fruit trees). Toxic fruit is eaten less, so the
+        // chance scales DOWN with toxicity -> a toxic plant disperses little and its offspring stay clustered
+        // around the parent (toxicity keeps them close, the user's ask). aquatic-only seeds still gated to water.
+        if mature
+            && g.fruiting > 0.2
+            && tree_bites.0.contains_key(&e)
+            && plant_count + births.len() < PLANT_CAP
+            && rng.f32() < P_PLANT_EAT_DISPERSE * g.fruiting * (1.0 - g.toxicity)
+        {
+            let mut child = g.clone();
+            child.mutate(&mut rng);
+            let pos = disperse_pos(&mut rng, ppos, eff_spread(g) * PLANT_EAT_SPREAD_MULT, FOOD_Y);
+            if !(g.wet > 0.85 && !crate::sphere::is_ocean(pos.normalize_or_zero())) {
+                births.push((child, pos));
+            }
+        }
+        // clonal spread (rhizome / runner / sucker): a separate SHORT-range pathway that sprouts a true clone
+        // (no mutate, no gene shuffle) right beside the parent -> dense local patch WITHOUT seeding (strawberry,
+        // aspen). Lets a plant dominate ground clonally; pays in growth (growth_rate cost) + parent mass.
+        if mature
+            && g.clonal > 0.0
+            && plant_count + births.len() < PLANT_CAP
+            && rng.f32() < P_CLONAL * g.clonal
+        {
+            let pos = disperse_pos(&mut rng, ppos, CLONAL_RADIUS, FOOD_Y);
+            if !(g.wet > 0.85 && !crate::sphere::is_ocean(pos.normalize_or_zero())) {
+                births.push((g.clone(), pos)); // identical ramet: fidelity over variation
+                st.mass *= PLANT_REPRO_FRAC; // budding a ramet costs the parent
+            }
+        }
         if mature
             && plant_count + births.len() < PLANT_CAP
             && rng.f32() < P_REPRO * (1.0 - DEF_REPRO_COST * g.defense)
         {
             let mut child = g.clone();
             child.mutate(&mut rng);
-            let pos = disperse_pos(&mut rng, ppos, g.spread, FOOD_Y);
+            // wind + seed weight set how far this seed travels (dandelion flies, acorn drops near the parent)
+            let pos = disperse_pos(&mut rng, ppos, eff_spread(g), FOOD_Y);
             // aquatic plants (high wet) only seed into water; a seed that lands on dry ground is dropped
             // (mirror of land-only trees). Parent still pays the budding cost either way.
             if !(g.wet > 0.85 && !crate::sphere::is_ocean(pos.normalize_or_zero())) {
@@ -1316,7 +1420,10 @@ pub fn plant_step(
         births.push((plant_for_site(&mut rng, pos.normalize_or_zero()), pos));
     }
     for (g, pos) in births {
-        spawn_plant(&mut commands, g, rng.range(0.5, 1.3) * PLANT_START_MASS, pos); // varied reseed mass (staggered maturity)
+        // heavy (well-provisioned) seeds establish as BIGGER, hardier seedlings (head start); light seeds
+        // start tiny -> the seed-weight trade-off: far dispersal vs strong establishment.
+        let est = 0.6 + 0.8 * g.seed_weight; // 0.6x .. 1.4x establishment mass
+        spawn_plant(&mut commands, g, rng.range(0.5, 1.3) * PLANT_START_MASS * est, pos); // varied reseed mass (staggered maturity)
     }
     for (pos, edible, g) in tree_births {
         spawn_tree(&mut commands, PLANT_START_MASS, pos, edible, g);

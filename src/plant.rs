@@ -96,6 +96,19 @@ pub struct PlantGenome {
     #[serde(default)]
     pub allelopathy: f32, // 0..1 chemical warfare: its litter (detritus) is extra toxic (suppresses competitors), costs growth.
 
+    // --- dispersal / reproduction genes (how offspring spread; affect sim, cheap no neighbor scans) ---
+    #[serde(default)]
+    pub seed_weight: f32, // 0 light/dust seed .. 1 heavy provisioned seed. Heavy disperses SHORT (drops near
+                          // parent, oak acorn) but the seedling establishes BIGGER + hardier; light flies far
+                          // (windborne) but starts tiny. Provisioning costs growth.
+    #[serde(default)]
+    pub windborne: f32,   // 0..1 wind dispersal (pappus / wings / dust): extends seed range, strongest on a
+                          // light seed (dandelion, maple samara, tumbleweed). Costs growth.
+    #[serde(default)]
+    pub clonal: f32,      // 0..1 vegetative spread (rhizome / runner / sucker): puts out near-identical ramets
+                          // right beside itself -> dense local patch WITHOUT seeding (strawberry, aspen). No
+                          // long dispersal, no gene shuffle (true clone). Costs growth.
+
     // --- visual-only genes (cosmetic; zero sim cost) ---
     #[serde(default = "default_form")]
     pub form: u8, // PlantForm silhouette -> render mesh (see plant::form). Visual identity; stable per lineage.
@@ -163,6 +176,9 @@ impl PlantGenome {
             fire_seed: rng.f32() * 0.2,
             climb: rng.f32() * 0.2,
             allelopathy: rng.f32() * 0.2,
+            seed_weight: rng.f32() * 0.5,
+            windborne: rng.f32() * 0.4,
+            clonal: rng.f32() * 0.3,
             // random fallback plant: a land form (HERB..ROSETTE), never an aquatic/special form
             form: (rng.f32() * 8.0) as u8 % 8,
             flower: rng.f32() * 0.5,
@@ -205,6 +221,7 @@ impl PlantGenome {
                 g.maturity = rng.range(1.5, 3.0);
                 g.toxicity = 0.0;
                 g.nitrogen_fix = rng.range(0.6, 0.95); // legume enriches the soil
+                g.clonal = rng.range(0.5, 0.8); // creeping runners: clover spreads as a clonal mat
                 g.nutrients = Self::sparse_nutrients(rng, 3);
                 g.form = form::GROUNDCOVER;
                 g.leaf_hue = rng.range(0.30, 0.40); // green
@@ -221,6 +238,8 @@ impl PlantGenome {
                 g.light_pref = rng.range(0.6, 0.9);
                 g.maturity = rng.range(2.0, 4.0);
                 g.toxicity = rng.f32() * 0.1;
+                g.seed_weight = rng.range(0.0, 0.2); // light seed
+                g.windborne = rng.range(0.4, 0.7);   // blows on the wind
                 g.nutrients = Self::sparse_nutrients(rng, 3);
                 g.form = form::FLOWER_STALK;
                 g.leaf_hue = rng.range(0.28, 0.38);
@@ -272,6 +291,7 @@ impl PlantGenome {
                 g.maturity = rng.range(4.0, 8.0);
                 g.toxicity = rng.f32() * 0.2;
                 g.succulence = rng.range(0.7, 1.0); // water storage: survives drought
+                g.seed_weight = rng.range(0.4, 0.7); // heavy seed: drops near the parent (no wind in the open desert helps)
                 g.nutrients = Self::sparse_nutrients(rng, 2);
                 g.form = form::SUCCULENT;
                 g.leaf_hue = rng.range(0.40, 0.52); // blue-green
@@ -302,6 +322,7 @@ impl PlantGenome {
                 g.maturity = rng.range(2.0, 4.0);
                 g.toxicity = rng.range(0.4, 0.7); // bitter
                 g.allelopathy = rng.range(0.4, 0.7);
+                g.windborne = rng.range(0.5, 0.8); // thistledown: parachute seeds fly far
                 g.nutrients = Self::sparse_nutrients(rng, 2);
                 g.form = form::ROSETTE;
                 g.leaf_hue = rng.range(0.30, 0.42);
@@ -336,6 +357,8 @@ impl PlantGenome {
                 g.temp_pref = rng.range(0.3, 0.6);
                 g.maturity = rng.range(1.5, 3.0);
                 g.regrow = 0.85;
+                g.clonal = rng.range(0.6, 0.9); // moss spreads as a creeping clonal mat
+                g.windborne = rng.range(0.4, 0.7); // tiny spores also drift
                 g.nutrients = Self::sparse_nutrients(rng, 1);
                 g.form = form::MOSS;
                 g.leaf_hue = rng.range(0.33, 0.45);
@@ -370,6 +393,8 @@ impl PlantGenome {
                 g.succulence = rng.range(0.3, 0.6);
                 g.fire_seed = rng.range(0.5, 0.9); // fire-adapted recruiter
                 g.allelopathy = rng.range(0.3, 0.6);
+                g.windborne = rng.range(0.6, 0.9); // the whole dead plant tumbles + scatters seed downwind
+                g.seed_weight = rng.range(0.0, 0.2);
                 g.nutrients = Self::sparse_nutrients(rng, 2);
                 g.form = form::SHRUB;
                 g.leaf_hue = rng.range(0.12, 0.22); // dry straw color
@@ -400,6 +425,7 @@ impl PlantGenome {
                 g.light_pref = rng.range(0.4, 0.6); // shallow submerged, mid light
                 g.submerged = rng.range(0.4, 0.7);
                 g.maturity = rng.range(2.5, 5.0);
+                g.clonal = rng.range(0.5, 0.8); // seagrass spreads by rhizome into meadows
                 g.nutrients = Self::sparse_nutrients(rng, 2);
                 g.form = form::KELP; // ribbon fronds (shorter via height)
                 g.leaf_hue = rng.range(0.28, 0.38);
@@ -429,6 +455,7 @@ impl PlantGenome {
                 g.submerged = rng.range(0.0, 0.2);
                 g.maturity = rng.range(1.5, 3.0);
                 g.regrow = 0.85;
+                g.clonal = rng.range(0.6, 0.9); // algal film spreads clonally across the surface
                 g.nutrients = Self::sparse_nutrients(rng, 1);
                 g.form = form::MOSS; // flat mat
                 g.leaf_hue = rng.range(0.33, 0.5);
@@ -465,6 +492,9 @@ impl PlantGenome {
             fire_seed: 0.0,
             climb: 0.0,
             allelopathy: 0.0,
+            seed_weight: 0.1,  // tiny light grass seed
+            windborne: 0.3,    // blows a little
+            clonal: 0.6,       // turf creeps + fills by runners (the main way grass spreads)
             form: form::GROUNDCOVER,
             flower: 0.0,
             flower_hue: 0.3,
@@ -492,6 +522,9 @@ impl PlantGenome {
         // blossom variety drifts on trees (flowering/fruit trees); form is fixed (trees use the Tree marker)
         self.temp_pref = (self.temp_pref + rng.normal() * 0.08).clamp(0.0, 1.0);
         self.fruiting = (self.fruiting + rng.normal() * 0.1).clamp(0.0, 1.0);
+        // trees disperse by seed too: acorn (heavy, short) vs samara (light, windborne) drifts
+        self.seed_weight = (self.seed_weight + rng.normal() * 0.08).clamp(0.0, 1.0);
+        self.windborne = (self.windborne + rng.normal() * 0.08).clamp(0.0, 1.0);
         self.flower = (self.flower + rng.normal() * 0.1).clamp(0.0, 1.0);
         self.flower_hue = (self.flower_hue + rng.normal() * 0.08).clamp(0.0, 1.0);
         self.leaf_hue = (self.leaf_hue + rng.normal() * 0.05).clamp(0.0, 1.0);
@@ -525,6 +558,9 @@ impl PlantGenome {
         self.fire_seed = (self.fire_seed + rng.normal() * 0.08).clamp(0.0, 1.0);
         self.climb = (self.climb + rng.normal() * 0.08).clamp(0.0, 1.0);
         self.allelopathy = (self.allelopathy + rng.normal() * 0.08).clamp(0.0, 1.0);
+        self.seed_weight = (self.seed_weight + rng.normal() * 0.08).clamp(0.0, 1.0);
+        self.windborne = (self.windborne + rng.normal() * 0.08).clamp(0.0, 1.0);
+        self.clonal = (self.clonal + rng.normal() * 0.08).clamp(0.0, 1.0);
         self.flower = (self.flower + rng.normal() * 0.1).clamp(0.0, 1.0);
         self.flower_hue = (self.flower_hue + rng.normal() * 0.08).clamp(0.0, 1.0);
         self.leaf_hue = (self.leaf_hue + rng.normal() * 0.05).clamp(0.0, 1.0);
@@ -556,7 +592,11 @@ impl PlantGenome {
                 - 0.2 * self.nitrogen_fix
                 - 0.08 * self.fire_seed
                 - 0.1 * self.climb
-                - 0.12 * self.allelopathy)
+                - 0.12 * self.allelopathy
+                // dispersal genes tax growth too: provisioning a heavy seed, pappus/wings, runners
+                - 0.12 * self.seed_weight
+                - 0.06 * self.windborne
+                - 0.14 * self.clonal)
                 .clamp(0.12, 1.0)
     }
 }
