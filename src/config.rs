@@ -36,7 +36,7 @@ pub const FATIGUE_DRAG: f32 = 0.6;  // fraction of thrust output lost at full fa
 // ABOVE start energy means no one breeds at the handoff; each must forage up to it -> staggered births.
 pub const REPRO_THRESHOLD: f32 = 30.0; // energy to be eligible (BELOW the ~33-37 foraging energy so the fed majority can breed -> R>1; density taper + competition cap the growth, not a high threshold)
 pub const REPRO_COST: f32 = 16.0; // energy the parent spends per child (parent stays viable after: 30->14)
-pub const BIRTH_ENERGY: f32 = 24.0; // offspring's starting energy: buffer so newborns establish before starving
+pub const BIRTH_ENERGY: f32 = 28.0; // offspring's starting energy: buffer so newborns establish before starving (raised: newborn die-off was the R<1 driver keeping pop at the floor)
 pub const P_REPRO_CREATURE: f32 = 0.025; // per-tick reproduction chance while eligible (x density taper)
 pub const REPRO_MIN_AGE: u32 = 180; // min ticks of life before breeding (newborns establish first; paces waves)
 pub const CREATURE_CAP: usize = 130; // population ceiling (kept below grazing pressure that crashes plants)
@@ -76,11 +76,16 @@ pub const SWIM_LAND_COST: f32 = 5.0;   // energy/sec penalty at full swim on ful
 // --- eating / arms race / predation (see 13, M5) ---
 pub const BITE_K: f32 = 8.0; // eat/combat decisiveness = sigmoid(BITE_K*(bite - defense))
 pub const BITE_COST: f32 = 0.7; // energy/sec maintenance cost of bite strength (linear)
-pub const EAT_GAIN: f32 = 14.0; // energy per (mass * nutrient) consumed (raised: competent foragers clearly net-positive -> sustain + reproduce, needed for continuous stability)
+pub const EAT_GAIN: f32 = 19.0; // energy per (mass * nutrient) consumed. Raised so a TYPICAL (not just elite) forager is comfortably net-positive -> more creatures persist + breed, so the equilibrium is set by food competition (plants drawn below cap) instead of mass starvation pinning pop at the reseed floor.
 pub const MEAT_BONUS: f32 = 1.6; // meat (carrion) is richer + longer-lasting than plant food
 pub const ATTACK_RADIUS: f32 = 1.6; // must be adjacent to attack
-pub const PREDATION_GAIN: f32 = 22.0; // energy a predator gains from a kill
+pub const PREDATION_GAIN: f32 = 16.0; // energy a predator gains from a kill (moderate: a big windfall fuels boom-bust)
 pub const PREDATION_HUNGER: f32 = 20.0; // only creatures below this energy hunt (fed crowds don't cannibalize)
+// Predation needs a real combat EDGE, not just proximity. Success = sigmoid(BITE_K*(adv) - BIAS) where
+// adv = attacker combat - prey combat. With equal combat (a uniform population) success ~= sigmoid(-BIAS)
+// = low, so creatures can't cannibalize their own kind into a boom-bust crash; a genuine carnivore (high
+// bite + size vs smaller prey) still wins. Turns predation from population-wide churn into a real niche.
+pub const PREDATION_BIAS: f32 = 2.2; // combat-edge required: equal-combat success = sigmoid(-2.2) ~= 0.10
 // Kin-based social need (herd instinct). Being near genetically-SIMILAR creatures (kin) satisfies a
 // social creature + protects it from predators (herd vigilance); ISOLATION drains energy (loneliness).
 // Trade-off: social creatures must stay with their kind (constrains roaming) but gain safety; asocial

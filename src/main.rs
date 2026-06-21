@@ -16,6 +16,7 @@ mod persist;
 mod plant;
 mod rng;
 mod sim;
+mod sphere;
 mod terrain;
 mod viz;
 
@@ -45,7 +46,14 @@ fn main() {
         .unwrap_or(sim::MAX_GEN_HEADLESS);
     // --save=PATH writes survivors at run end; --load=PATH resumes from a saved population.
     let save = args.iter().find_map(|a| a.strip_prefix("--save=").map(String::from));
-    let load = args.iter().find_map(|a| a.strip_prefix("--load=").map(String::from));
+    let mut load = args.iter().find_map(|a| a.strip_prefix("--load=").map(String::from));
+    // Render mode with no explicit --load: auto-load the showcase seed if present, so `cargo run` opens
+    // straight into a full, breeding world (loaded continuous skips the warm-up) instead of replaying the
+    // generational warm-up first. --no-load forces a fresh warm-up start; headless never auto-loads.
+    const DEFAULT_SEED: &str = "evolved-continuous.json";
+    if !headless && load.is_none() && !args.iter().any(|a| a == "--no-load") && std::path::Path::new(DEFAULT_SEED).exists() {
+        load = Some(DEFAULT_SEED.to_string());
+    }
 
     let mut app = App::new();
     app.insert_resource(rng::Rng::seed(seed));

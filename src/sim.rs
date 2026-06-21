@@ -667,8 +667,9 @@ pub fn predation_step(
                 }
             }
             let prey_kin = (kin / SOCIAL_TARGET).min(1.0);
-            // success = attacker combat vs prey combat (bite doubles as defense), reduced by herd safety
-            if rng.f32() < sigmoid(BITE_K * (abite - bbite)) * (1.0 - SOCIAL_SAFETY * prey_kin) {
+            // success = attacker combat vs prey combat (bite doubles as defense), minus a required edge
+            // (PREDATION_BIAS: equal-combat creatures barely prey on each other), reduced by herd safety
+            if rng.f32() < sigmoid(BITE_K * (abite - bbite) - PREDATION_BIAS) * (1.0 - SOCIAL_SAFETY * prey_kin) {
                 killed.insert(be);
                 *gains.entry(ae).or_insert(0.0) += PREDATION_GAIN;
             }
@@ -1144,6 +1145,10 @@ pub fn generation_step(
     fire: Res<Fire>,
     weather: Res<Weather>,
     mut exit: MessageWriter<AppExit>,
+    // Best healthy snapshot seen this run (score, snapshot). --save writes THIS, not the final-tick
+    // population: continuous pop oscillates (~13..72), so saving at an arbitrary end-tick can capture a
+    // trough -> a near-empty seed that limps back up. Saving the peak gives a full, balanced living world.
+    mut best: Local<Option<(f32, crate::persist::Snapshot)>>,
 ) {
     gen.tick = gen.tick.wrapping_add(1); // global clock: drives season (plant_step) + continuous timing
 
@@ -1177,24 +1182,53 @@ pub fn generation_step(
                 "t {:>6} | pop {:>3} | energy {:.1} | life-fit {:.1} | age {:.0} | sens {:.1} | bite {:.2} | rig {:.2} | def {:.2} nut {:.2} qual {:.2} wet {:.2} | plants {} | soil {:.2} | rain {:.2} fire {:.3}",
                 gen.tick, pop, e / n, f / n, age / n, sens / n, bite / n, rig / n, avg_def, avg_nut, avg_qual, avg_wet, plant_n, soil.avg(), weather.rain, fire.avg()
             );
+            // Track the best healthy snapshot for --save. Score = pop, gated on well-fed (avg energy >= 30)
+            // so we never bank a starving crowd. Captured only when saving (snapshot clone is not free).
+            if gen.save.is_some() {
+                let avg_e = e / n;
+                let score = if avg_e >= 30.0 { pop as f32 } else { 0.0 };
+                if score > 0.0 && best.as_ref().map_or(true, |(s, _)| score > *s) {
+                    let mut creatures: Vec<(f32, Genome)> =
+                        cq.iter().map(|(_, _, fit, _, _, g, _, _, _)| (fit.0, g.clone())).collect();
+                    creatures.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+                    let plants: Vec<crate::persist::SavedPlant> = pq
+                        .iter()
+                        .map(|(g, st)| crate::persist::SavedPlant { g: g.clone(), mass: st.mass })
+                        .collect();
+                    *best = Some((
+                        score,
+                        crate::persist::Snapshot {
+                            generation: gen.tick / GEN_TICKS,
+                            creatures: creatures.into_iter().map(|(_, g)| g).collect(),
+                            plants,
+                        },
+                    ));
+                }
+            }
         }
         if done {
             if let Some(path) = &gen.save {
-                let mut creatures: Vec<(f32, Genome)> =
-                    cq.iter().map(|(_, _, fit, _, _, g, _, _, _)| (fit.0, g.clone())).collect();
-                creatures.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
-                let plants: Vec<crate::persist::SavedPlant> = pq
-                    .iter()
-                    .map(|(g, st)| crate::persist::SavedPlant { g: g.clone(), mass: st.mass })
-                    .collect();
-                crate::persist::save_snapshot(
-                    path,
-                    &crate::persist::Snapshot {
-                        generation: gen.tick / GEN_TICKS,
-                        creatures: creatures.into_iter().map(|(_, g)| g).collect(),
-                        plants,
-                    },
-                );
+                // Prefer the best healthy snapshot seen; fall back to the final state if none qualified.
+                if let Some((score, snap)) = best.take() {
+                    crate::persist::save_snapshot(path, &snap);
+                    info!("saved best snapshot: pop {} (score {:.0})", snap.creatures.len(), score);
+                } else {
+                    let mut creatures: Vec<(f32, Genome)> =
+                        cq.iter().map(|(_, _, fit, _, _, g, _, _, _)| (fit.0, g.clone())).collect();
+                    creatures.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+                    let plants: Vec<crate::persist::SavedPlant> = pq
+                        .iter()
+                        .map(|(g, st)| crate::persist::SavedPlant { g: g.clone(), mass: st.mass })
+                        .collect();
+                    crate::persist::save_snapshot(
+                        path,
+                        &crate::persist::Snapshot {
+                            generation: gen.tick / GEN_TICKS,
+                            creatures: creatures.into_iter().map(|(_, g)| g).collect(),
+                            plants,
+                        },
+                    );
+                }
             }
             info!("continuous headless done at tick {} (pop {})", gen.tick, pop);
             exit.write(AppExit::Success);

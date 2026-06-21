@@ -1,0 +1,296 @@
+//! Spherical world geometry. Creatures live on the SURFACE of a planet (radius PLANET_R) instead of a
+//! flat x,z plane. A position is a 3D point; its surface direction `d = pos.normalize()` gives latitude,
+//! longitude, the local tangent frame (east/north), and the surface normal. Movement is a great-circle
+//! step in the tangent plane. Terrain/temperature/moisture are seamless 3D-noise fields on the sphere
+//! (no edge, no wrap seam). The sun + moon orbit; day/night is positional (the lit half faces the sun).
+//!
+//! Earth-like proportions (stylized so the moon stays on-screen): moon radius ~0.27x planet, sun appears
+//! ~same angular size as the moon (the real Earth coincidence), poles get glancing sun -> naturally cold.
+#![allow(dead_code)] // wired into sim/viz incrementally; keep this module buildable + testable on its own
+use crate::terrain::HEIGHT_MAX;
+use bevy::prelude::*;
+
+pub const PLANET_R: f32 = 80.0; // planet radius (world units). Matches old WORLD_HALF so creature scale + costs carry over.
+pub const ELEV_MAX: f32 = HEIGHT_MAX; // max terrain elevation above the sea sphere (reuses the flat-world peak)
+pub const SEA_LEVEL: f32 = 0.30; // normalized elevation (0..1) below which terrain floods (ocean)
+
+// --- celestial bodies (relative Earth proportions, distances stylized down to stay visible) ---
+pub const MOON_R: f32 = 0.27 * PLANET_R; // moon ~1/4 planet radius (Earth: 0.273)
+pub const MOON_ORBIT: f32 = 6.0 * PLANET_R; // moon orbit radius (Earth ~60 R; compressed so it's framed)
+pub const SUN_DIST: f32 = 60.0 * PLANET_R; // sun far away (directional light); billboard sized to match moon's angular size
+pub const SUN_R: f32 = SUN_DIST / MOON_ORBIT * MOON_R; // sun billboard radius -> same on-sky size as the moon
+pub const DAY_TICKS: u32 = 2400; // ticks per planet rotation (one day) -- same cadence as the old flat day
+pub const MOON_PERIOD_DAYS: f32 = 8.0; // moon orbits once per 8 days (a visible monthly cycle, sped up)
+pub const AXIAL_TILT: f32 = 0.41; // ~23.5 deg in radians: gives seasons + keeps poles cold
+
+// ---------- lat/lon <-> 3D ----------
+
+/// Unit surface direction -> (lon, lat) in radians. lat in [-pi/2, pi/2] (poles at +/-Y), lon in (-pi, pi].
+pub fn dir_to_lonlat(d: Vec3) -> (f32, f32) {
+    let lat = d.y.clamp(-1.0, 1.0).asin();
+    let lon = d.z.atan2(d.x);
+    (lon, lat)
+}
+
+/// (lon, lat, elevation) -> world position. elevation is height above the sea sphere (world units).
+pub fn lonlat_to_pos(lon: f32, lat: f32, elevation: f32) -> Vec3 {
+    let (cl, sl) = (lat.cos(), lat.sin());
+    let d = Vec3::new(cl * lon.cos(), sl, cl * lon.sin());
+    d * (PLANET_R + elevation)
+}
+
+/// Surface normal (outward) at a world position.
+pub fn normal(pos: Vec3) -> Vec3 {
+    pos.normalize_or_zero()
+}
+
+/// Local tangent frame at surface direction `d`: (east, north), both unit + perpendicular to `d`.
+/// north points toward +Y pole; east points toward increasing longitude. Degenerate near the poles
+/// (east -> 0); callers moving exactly at a pole get an arbitrary but stable frame.
+pub fn tangent_frame(d: Vec3) -> (Vec3, Vec3) {
+    let axis = Vec3::Y;
+    let mut east = axis.cross(d);
+    if east.length_squared() < 1e-8 {
+        east = Vec3::X; // at a pole: pick any consistent tangent
+    }
+    let east = east.normalize();
+    let north = d.cross(east).normalize();
+    (east, north)
+}
+
+/// Tangent direction for a compass heading at `d`: heading 0 = north, +pi/2 = east.
+pub fn heading_tangent(d: Vec3, heading: f32) -> Vec3 {
+    let (east, north) = tangent_frame(d);
+    (north * heading.cos() + east * heading.sin()).normalize_or_zero()
+}
+
+/// Great-circle step: from world `pos`, move `dist` (world units) along compass `heading`. Returns the new
+/// surface direction (unit) + the new heading (parallel-transported so "forward" stays consistent).
+pub fn step(pos: Vec3, heading: f32, dist: f32) -> (Vec3, f32) {
+    let d = pos.normalize_or_zero();
+    let t = heading_tangent(d, heading);
+    let ang = dist / PLANET_R; // arc angle = arc length / radius
+    let (s, c) = (ang.sin(), ang.cos());
+    let new_d = (d * c + t * s).normalize();
+    // recompute heading in the new tangent frame from the transported forward vector
+    let new_t = (-d * s + t * c).normalize_or_zero();
+    let (east, north) = tangent_frame(new_d);
+    let new_heading = new_t.dot(east).atan2(new_t.dot(north));
+    (new_d, new_heading)
+}
+
+/// Great-circle distance (along the surface) between two world positions.
+pub fn surface_dist(a: Vec3, b: Vec3) -> f32 {
+    let da = a.normalize_or_zero();
+    let db = b.normalize_or_zero();
+    da.dot(db).clamp(-1.0, 1.0).acos() * PLANET_R
+}
+
+// ---------- 3D value-noise fBm (seamless on the sphere) ----------
+
+fn hash3(i: i32, j: i32, k: i32) -> f32 {
+    let mut h = (i.wrapping_mul(374761393))
+        .wrapping_add(j.wrapping_mul(668265263))
+        .wrapping_add(k.wrapping_mul(2147483647)) as u32;
+    h = (h ^ (h >> 13)).wrapping_mul(1274126177);
+    ((h ^ (h >> 16)) & 0xffff) as f32 / 65535.0
+}
+
+fn value_noise3(p: Vec3) -> f32 {
+    let (xi, yi, zi) = (p.x.floor(), p.y.floor(), p.z.floor());
+    let (xf, yf, zf) = (p.x - xi, p.y - yi, p.z - zi);
+    let (i, j, k) = (xi as i32, yi as i32, zi as i32);
+    let smooth = |t: f32| t * t * (3.0 - 2.0 * t);
+    let (u, v, w) = (smooth(xf), smooth(yf), smooth(zf));
+    let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
+    let c000 = hash3(i, j, k);
+    let c100 = hash3(i + 1, j, k);
+    let c010 = hash3(i, j + 1, k);
+    let c110 = hash3(i + 1, j + 1, k);
+    let c001 = hash3(i, j, k + 1);
+    let c101 = hash3(i + 1, j, k + 1);
+    let c011 = hash3(i, j + 1, k + 1);
+    let c111 = hash3(i + 1, j + 1, k + 1);
+    let x00 = lerp(c000, c100, u);
+    let x10 = lerp(c010, c110, u);
+    let x01 = lerp(c001, c101, u);
+    let x11 = lerp(c011, c111, u);
+    let y0 = lerp(x00, x10, v);
+    let y1 = lerp(x01, x11, v);
+    lerp(y0, y1, w)
+}
+
+/// Fractal Brownian motion in 3D, ~0..1. Sampled on the unit sphere -> seamless terrain (no seam/poles).
+pub fn fbm3(p: Vec3) -> f32 {
+    let mut sum = 0.0;
+    let mut amp = 0.5;
+    let mut freq = 1.0;
+    for _ in 0..4 {
+        sum += amp * value_noise3(p * freq);
+        amp *= 0.5;
+        freq *= 2.0;
+    }
+    sum / 0.9375
+}
+
+// ---------- terrain + climate fields on the sphere ----------
+
+const TERRAIN_FREQ: f32 = 2.2; // continents/oceans scale (lower = bigger landmasses)
+
+/// Normalized terrain elevation 0..1 at surface direction `d` (continents, oceans, mountains).
+pub fn elevation01(d: Vec3) -> f32 {
+    fbm3(d * TERRAIN_FREQ + Vec3::splat(11.3))
+}
+
+/// Terrain elevation in world units above the sea sphere (0 over ocean basins, up to ELEV_MAX on peaks).
+pub fn elevation(d: Vec3) -> f32 {
+    ((elevation01(d) - SEA_LEVEL).max(0.0) / (1.0 - SEA_LEVEL)) * ELEV_MAX
+}
+
+/// Is this surface point under the ocean?
+pub fn is_ocean(d: Vec3) -> bool {
+    elevation01(d) < SEA_LEVEL
+}
+
+/// Temperature 0..1 at `d`: warm at the equator, cold at the poles + at high elevation. The sub-solar
+/// point also warms locally (day side warmer) once a tick is supplied via `solar_warmth`.
+pub fn base_temperature(d: Vec3) -> f32 {
+    let (_lon, lat) = dir_to_lonlat(d);
+    let by_lat = lat.cos(); // 1 at equator, 0 at poles
+    let lapse = elevation(d) / ELEV_MAX * 0.4; // high ground is colder
+    (by_lat - lapse).clamp(0.0, 1.0)
+}
+
+/// Moisture 0..1 at `d`: oceans + low ground wet, a noise patch pattern on top (deserts emerge in dry
+/// patches away from the coast). Latitude bands (wet tropics/poles, dry subtropics) add Earth-like belts.
+pub fn moisture(d: Vec3) -> f32 {
+    let (_lon, lat) = dir_to_lonlat(d);
+    let coastal = 1.0 - (elevation(d) / ELEV_MAX).min(1.0); // low/coastal = wetter
+    let patch = fbm3(d * 3.7 - Vec3::splat(5.0));
+    // dry subtropical belts ~ +/-30 deg, wetter equator + poles
+    let belt = 0.5 + 0.5 * (lat * 3.0).cos();
+    (0.45 * coastal + 0.35 * patch + 0.20 * belt).clamp(0.0, 1.0)
+}
+
+// ---------- sun + moon ----------
+
+/// Sun direction (unit) at `tick`: the planet spins about its tilted axis, so the sun sweeps longitudes
+/// once per DAY_TICKS. Tilt keeps the sub-solar latitude near the equator, so the poles stay cold.
+pub fn sun_dir(tick: u32) -> Vec3 {
+    let a = (tick as f32 / DAY_TICKS as f32) * std::f32::consts::TAU;
+    // sun in the equatorial plane, lifted by axial tilt so high latitudes get glancing rays
+    Vec3::new(a.cos(), AXIAL_TILT.sin() * (a * 0.13).sin(), a.sin()).normalize()
+}
+
+/// Moon direction (unit) at `tick`: orbits slower than the day + on a slightly inclined plane, so it
+/// drifts against the day/night cycle (visible phases as it catches up to / falls behind the sun).
+pub fn moon_dir(tick: u32) -> Vec3 {
+    let period = DAY_TICKS as f32 * MOON_PERIOD_DAYS;
+    let a = (tick as f32 / period) * std::f32::consts::TAU;
+    Vec3::new(a.cos(), 0.18 * a.sin(), a.sin() * 0.98).normalize()
+}
+
+pub fn moon_pos(tick: u32) -> Vec3 {
+    moon_dir(tick) * MOON_ORBIT
+}
+
+/// Local daylight 0..1 at surface direction `d` for the given tick: how much the point faces the sun.
+pub fn daylight_at(d: Vec3, tick: u32) -> f32 {
+    d.dot(sun_dir(tick)).clamp(0.0, 1.0)
+}
+
+// ---------- clouds + cloud-driven rain ----------
+
+const CLOUD_FREQ: f32 = 3.0;     // cloud patch size (higher = smaller, more patches)
+const CLOUD_SPEED: f32 = 0.0009; // wind: radians/tick the cloud field rotates (drifts west->east)
+const CLOUD_COVER: f32 = 0.55;   // noise threshold: above this is cloudy (higher = sparser clouds)
+pub const CLOUD_RAIN_MIN: f32 = 0.55; // cloud cover above which rain can fall (thick cloud only)
+pub const RAIN_CHANCE: f32 = 0.10;    // per-eligible-cell chance of rain under a rain-thick cloud (~10%)
+
+/// Cloud cover 0..1 at surface direction `d` and `tick`: a scrolling 3D-fBm field that drifts with the
+/// wind (the planet's clouds move). 0 = clear sky, 1 = thick overcast. Deterministic -> headless + render
+/// agree. Drives local shade (visual + plant light) and is the ONLY source of rain (see `rains_at`).
+pub fn cloud_cover(d: Vec3, tick: u32) -> f32 {
+    // rotate the sample point about the spin axis so the pattern drifts over the surface
+    let a = tick as f32 * CLOUD_SPEED;
+    let (s, c) = (a.sin(), a.cos());
+    let rot = Vec3::new(c * d.x - s * d.z, d.y, s * d.x + c * d.z);
+    let n = fbm3(rot * CLOUD_FREQ + Vec3::splat(31.7));
+    ((n - CLOUD_COVER) / (1.0 - CLOUD_COVER)).clamp(0.0, 1.0)
+}
+
+/// Does it rain at `d` this tick? Rain comes ONLY from thick clouds: cover must exceed CLOUD_RAIN_MIN and a
+/// per-cell roll must land under RAIN_CHANCE (~10%). `roll` is the caller's per-cell uniform random in 0..1.
+pub fn rains_at(d: Vec3, tick: u32, roll: f32) -> bool {
+    cloud_cover(d, tick) > CLOUD_RAIN_MIN && roll < RAIN_CHANCE
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lonlat_roundtrip() {
+        for &(lon, lat) in &[(0.3f32, 0.4f32), (-2.1, -0.9), (1.7, 0.0)] {
+            let p = lonlat_to_pos(lon, lat, 0.0);
+            let (lon2, lat2) = dir_to_lonlat(p.normalize());
+            assert!((lon - lon2).abs() < 1e-3, "lon {lon} vs {lon2}");
+            assert!((lat - lat2).abs() < 1e-3, "lat {lat} vs {lat2}");
+        }
+    }
+
+    #[test]
+    fn step_stays_on_sphere_and_conserves_distance() {
+        let start = lonlat_to_pos(0.0, 0.1, 0.0);
+        let (d, _h) = step(start, 1.0, 5.0);
+        assert!((d.length() - 1.0).abs() < 1e-4, "step result must be a unit direction");
+        // a great-circle step of length L moves the surface point ~L along the surface
+        let moved = surface_dist(start, d * PLANET_R);
+        assert!((moved - 5.0).abs() < 0.2, "moved {moved}, expected ~5");
+    }
+
+    #[test]
+    fn tangent_is_perpendicular() {
+        let d = lonlat_to_pos(0.5, 0.6, 0.0).normalize();
+        let (east, north) = tangent_frame(d);
+        assert!(east.dot(d).abs() < 1e-4);
+        assert!(north.dot(d).abs() < 1e-4);
+        assert!(east.dot(north).abs() < 1e-3, "east/north should be orthogonal");
+    }
+
+    #[test]
+    fn poles_colder_than_equator() {
+        let eq = lonlat_to_pos(0.0, 0.0, 0.0).normalize();
+        let pole = lonlat_to_pos(0.0, 1.55, 0.0).normalize();
+        assert!(base_temperature(eq) > base_temperature(pole));
+    }
+
+    #[test]
+    fn clouds_vary_and_drift() {
+        // the cloud field spans clear..cloudy across the globe, and a fixed point changes over time (drift)
+        let mut min = 1.0f32;
+        let mut max = 0.0f32;
+        for i in 0..200 {
+            let lon = i as f32 * 0.3;
+            let lat = (i as f32 * 0.11).sin();
+            let cover = cloud_cover(lonlat_to_pos(lon, lat, 0.0).normalize(), 100);
+            min = min.min(cover);
+            max = max.max(cover);
+        }
+        assert!(min < 0.05 && max > 0.5, "clouds should range clear..thick (min {min}, max {max})");
+        let p = lonlat_to_pos(0.4, 0.2, 0.0).normalize();
+        let a = cloud_cover(p, 0);
+        let b = cloud_cover(p, 4000);
+        assert!((a - b).abs() > 1e-3, "clouds should drift over time");
+    }
+
+    #[test]
+    fn day_and_night_exist() {
+        // at any tick, some longitude faces the sun (day) and the antipode does not (night)
+        let s = sun_dir(600);
+        let day = (s * PLANET_R).normalize();
+        let night = -day;
+        assert!(daylight_at(day, 600) > 0.5);
+        assert!(daylight_at(night, 600) < 0.01);
+    }
+}
