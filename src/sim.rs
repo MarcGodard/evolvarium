@@ -656,13 +656,13 @@ fn spawn_plant(commands: &mut Commands, g: PlantGenome, mass: f32, pos: Vec3) {
     ));
 }
 
-// Spawn one grass tuft (lesser food). Carries the Grass marker so grass_step owns its lifecycle (not
-// plant_step) + its own cap. Unlike plants, oriented to the surface normal so blades stand up on the
-// sphere (add_grass_visuals, render mode, gives the shared tuft mesh).
+// Spawn one grass tuft. RENDER-ONLY ground cover: NO `Food` -> grass stays out of the per-tick food
+// scan/sensing entirely (8000+ tufts would otherwise crush the food clone + crash foraging). Edibility is
+// modeled by POSITION instead (live_step: a hungry creature on grass-bearing soil nibbles a trickle).
+// grass_step owns its lifecycle + cap; oriented to the surface normal so blades stand up on the sphere.
 fn spawn_grass(commands: &mut Commands, g: PlantGenome, mass: f32, pos: Vec3) {
     let up = pos.normalize_or_zero();
     commands.spawn((
-        Food,
         Grass,
         PlantState { mass, age: 0 },
         g,
@@ -858,10 +858,9 @@ pub fn spawn_world_render(
     }
 }
 
-// --- grass: lesser ground cover. Own lifecycle + cap (kept off PLANT_CAP). Grazed (via tree_bites,
-// set in live_step), killed by fire/drown/poor-soil so it persists only on plant-capable land, regrows,
-// and refills toward GRASS_CAP each tick -> ubiquitous turf + a thin fallback food. Runs BEFORE plant_step
-// (which clears tree_bites) so grass consumes its own grazing bites first. ---
+// --- grass: render-only ground cover (no Food; edibility modeled by position in live_step). Own lifecycle
+// + cap (kept off PLANT_CAP): killed by fire/drown/poor-soil so it persists only on plant-capable land,
+// grows/regrows, and refills toward GRASS_CAP each tick -> whole-planet turf. ---
 pub fn grass_step(
     mut commands: Commands,
     mut rng: ResMut<Rng>,
@@ -869,7 +868,6 @@ pub fn grass_step(
     mut soil: ResMut<Soil>,
     gw: Res<GroundWater>,
     fire: Res<Fire>,
-    tree_bites: Res<TreeBites>,
     mut q: Query<(Entity, &mut PlantState, &PlantGenome, &Transform), (With<Grass>, Without<Rot>)>,
 ) {
     let season = (gen.tick as f32 / GEN_TICKS as f32 * SEASON_FREQ).sin();
@@ -884,17 +882,6 @@ pub fn grass_step(
             commands.entity(e).despawn();
             count = count.saturating_sub(1);
             continue;
-        }
-        // grazing: a creature ate this tuft this tick (recorded in live_step). High regrow = small bites,
-        // but graze it below GRASS_MIN_MASS and it is gone (refill reseeds turf elsewhere).
-        if let Some(&bite) = tree_bites.0.get(&e) {
-            st.mass = (st.mass - bite).max(0.0);
-            if st.mass < GRASS_MIN_MASS {
-                commands.entity(e).despawn();
-                soil.add(ppos, DEATH_FERT * 0.3);
-                count = count.saturating_sub(1);
-                continue;
-            }
         }
         // mortality off plant-capable soil: dry/wet mismatch, poor site (rock/desert/cold), or submerged.
         // Keeps grass confined to the band where plants can grow. Dead grass just vanishes (no detritus).
@@ -1217,7 +1204,7 @@ pub fn live_step(
     mut tree_bites: ResMut<TreeBites>,
     mut soil: ResMut<Soil>,
     fire: Res<Fire>,
-    fq: Query<(Entity, &Transform, &PlantState, &PlantGenome, Option<&Rot>, Option<&Tree>, Option<&Ferment>, Option<&Grass>), (With<Food>, Without<Creature>)>,
+    fq: Query<(Entity, &Transform, &PlantState, &PlantGenome, Option<&Rot>, Option<&Tree>, Option<&Ferment>), (With<Food>, Without<Creature>)>,
 ) {
     let dt = DT;
     let ntypes = gen.ntypes();
@@ -1228,10 +1215,10 @@ pub fn live_step(
     // snapshot: (entity, pos, genome, mass, rot_age, tree, ferment_toxic). rot_age=Some + ferment=None ->
     // animal carrion (meat); rot_age=Some + ferment=Some -> fermenting plant matter (fruit/detritus);
     // tree=Some(edible) -> a tree; else a living plant.
-    let foods: Vec<(Entity, Vec3, PlantGenome, f32, Option<u32>, Option<bool>, Option<f32>, bool)> = fq
+    let foods: Vec<(Entity, Vec3, PlantGenome, f32, Option<u32>, Option<bool>, Option<f32>)> = fq
         .iter()
-        .map(|(e, t, st, pg, rot, tree, ferment, grass)| {
-            (e, t.translation, pg.clone(), st.mass, rot.map(|r| r.age), tree.map(|t| t.edible), ferment.map(|f| f.toxic), grass.is_some())
+        .map(|(e, t, st, pg, rot, tree, ferment)| {
+            (e, t.translation, pg.clone(), st.mass, rot.map(|r| r.age), tree.map(|t| t.edible), ferment.map(|f| f.toxic))
         })
         .collect();
     let mut eaten: HashSet<Entity> = HashSet::new();
@@ -1277,7 +1264,6 @@ pub fn live_step(
         let n_s = genome.sensors.len();
         let max_range = genome.sensors.iter().map(|s| s.range).fold(0.0f32, f32::max);
         let mut best: Option<(usize, f32)> = None;
-        let mut best_grass: Option<(usize, f32)> = None; // nearest GRASS (grazed underfoot; kept OUT of forage/sensing)
         let mut sd = vec![f32::INFINITY; n_s]; // nearest dist per sensor
         let mut skind = vec![0u8; n_s]; // food kind that nearest sensor-food is
         let _r = max_range.max(NEAR_QUERY);
@@ -1300,15 +1286,6 @@ pub fn live_step(
                     }
                     let to = f.1 - pos;
                     let d2 = to.length_squared();
-                    // grass is a passive underfoot graze, NOT a forage target: keep it out of `best` (the
-                    // single-nearest the creature navigates to + eats) and out of the sensor cones, else
-                    // ubiquitous grass is always nearest -> creatures never reach real plants -> starve.
-                    if f.7 {
-                        if best_grass.is_none_or(|(_, bd2)| d2 < bd2) {
-                            best_grass = Some((i, d2));
-                        }
-                        continue;
-                    }
                     if best.is_none_or(|(_, bd2)| d2 < bd2) {
                         best = Some((i, d2));
                     }
@@ -1408,6 +1385,7 @@ pub fn live_step(
             + TEMP_COST * (crate::sphere::base_temperature(pdir) - genome.temp_pref).abs() // thermal mismatch: poles vs equator niche
             + LONGEVITY_COST * (lifespan_mult - 1.0).max(0.0) // a long-lived body costs more to maintain
             + SWIM_LAND_COST * genome.swim * (1.0 - wet_here) // fins are a liability on dry land
+            + WATER_PRESSURE_COST * (1.0 - genome.swim) * (-h1 / crate::sphere::SEA_FLOOR_MAX).clamp(0.0, 1.0) // non-swimmers struggle in deep water (depth pressure)
             + FAT_UPKEEP * genome.adiposity * fat_frac // carrying fat costs upkeep (no free lunch)
             + STRESS_COST * diet.fatigue)
             * dt);
@@ -1567,9 +1545,8 @@ pub fn live_step(
                         eaten.insert(e); // prevent same-tick re-eat
                         if rot_age.is_some() {
                             commands.entity(e).despawn(); // carrion consumed
-                        } else if !foods[i].7 && foods.len() < PLANT_CAP && rng.f32() < pg.quality * SEED_VIA_GUT {
-                            // endozoochory (13): grazing a living plant may disperse a mutated offspring.
-                            // Grass excluded (foods[i].7): grass_step owns grass spread + cap, not the plant pool.
+                        } else if foods.len() < PLANT_CAP && rng.f32() < pg.quality * SEED_VIA_GUT {
+                            // endozoochory (13): grazing a living plant may disperse a mutated offspring
                             let mut child = pg.clone();
                             child.mutate(&mut rng);
                             let sp = disperse_pos(&mut rng, np, pg.spread, FOOD_Y); // seed carried + dropped nearby
@@ -1581,31 +1558,17 @@ pub fn live_step(
             }
         }
 
-        // passive grass graze: a thin underfoot supplement + FALLBACK. Grass is NOT a forage target
-        // (excluded from `best` above) and is grazed ONLY WHEN HUNGRY (energy below start) -- grass is
-        // everywhere, so an ungated graze would force-feed full creatures every tick and the overflow would
-        // pump growth-load (OVEREAT_G) into chronic gorging disease. As a hunger-gated fallback it has room,
-        // so NO overeat penalty applies. Defenseless + flat -> always succeeds; yield scaled by GRASS_EAT_GAIN.
-        if let Some((gi, gd2)) = best_grass {
-            let ge = foods[gi].0;
-            if energy.total() < START_ENERGY && gd2.sqrt() < EAT_RADIUS && !eaten.contains(&ge) {
-                let gg = foods[gi].2.clone(); // grass genome: one nutrient, low density
-                let gmass = foods[gi].3;
-                let frac = (1.0 - 0.85 * gg.regrow).clamp(0.12, 1.0); // turf: small bite, regrows
-                let bite_mass = gmass * frac;
-                *tree_bites.0.entry(ge).or_insert(0.0) += bite_mass; // grass_step applies the graze
-                let eff = if gen.diet { master_expression(&genome.uptake, &diet.reserves, RESERVE_REQ, MASTER_FLOOR) } else { 1.0 };
-                let base = bite_mass * gg.nutrient * (0.5 + gg.quality);
-                energy.add_sugar(EAT_GAIN * GRASS_EAT_GAIN * base * eff, SUGAR_CAP, fat_max); // hungry -> has room, no gorge
-                fit.0 += base * eff * GRASS_EAT_GAIN;
-                if gen.diet {
-                    let fert = soil.get(np);
-                    let soil_f = 1.0 - SOIL_NUTRI + SOIL_NUTRI * (fert / FERT_CAP).min(1.0);
-                    let toxin = absorb_and_toxin(&mut diet.reserves, &genome.uptake, &gg, soil_f, base);
-                    energy.burn(toxin);
-                    diet.g += toxin * TOXIN_G;
-                }
-                eaten.insert(ge);
+        // passive grass graze: a thin FALLBACK. Grass is render-only (not in the food scan), so its
+        // edibility is modeled by POSITION: a HUNGRY creature standing on grass-bearing soil (plant-capable,
+        // non-ocean land = where grass grows) nibbles a small sugar trickle. Hunger-gated so well-fed
+        // creatures ignore it (no gorging), and it never distracts foraging (grass isn't sensed at all).
+        if energy.total() < START_ENERGY {
+            let gdir = np.normalize_or_zero();
+            let hab = crate::sphere::plant_habitability(gdir);
+            if !crate::sphere::is_ocean(gdir) && hab > GRASS_HAB_MIN {
+                let gain = GRASS_GRAZE * hab * dt; // thin trickle, scaled by how grassy the ground is
+                energy.add_sugar(gain, SUGAR_CAP, fat_max);
+                fit.0 += gain * 0.1;
             }
         }
 

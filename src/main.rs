@@ -173,7 +173,9 @@ fn setup_scene(
     ));
     // ocean shell: a translucent blue sphere at sea level (land pokes above it, basins flood below). Glossy
     // (low roughness + high reflectance) so the sun glints off it; viz::animate_ocean breathes a slow swell.
-    let sea_r = sphere::PLANET_R + sphere::SEA_LEVEL * sphere::ELEV_MAX;
+    // sea surface = the waterline reference at PLANET_R: land (elevation >= 0) pokes above, ocean floor
+    // (elevation < 0, signed bathymetry) sinks below -> the shell meets the globe exactly at the coast.
+    let sea_r = sphere::PLANET_R;
     commands.spawn((
         Mesh3d(meshes.add(Sphere::new(sea_r).mesh().ico(6).unwrap())),
         MeshMaterial3d(materials.add(StandardMaterial {

@@ -13,6 +13,7 @@ use bevy::prelude::*;
 pub const PLANET_R: f32 = 80.0; // planet radius (world units). Matches old WORLD_HALF so creature scale + costs carry over.
 pub const ELEV_MAX: f32 = HEIGHT_MAX; // max terrain elevation above the sea sphere (reuses the flat-world peak)
 pub const SEA_LEVEL: f32 = 0.41; // normalized elevation (0..1) below which terrain floods (ocean) -> ~50% sea
+pub const SEA_FLOOR_MAX: f32 = 9.0; // max ocean DEPTH below the sea surface at the abyssal center (world units)
 // Founding homeland direction: a temperate mid-latitude spot, kept as gentle habitable lowland by a land
 // landmark so founders never spawn on a peak or in the sea. Shared by terrain features + sim::homeland_center.
 pub const HOMELAND_DIR: [f32; 3] = [0.30, 0.50, 0.40];
@@ -171,9 +172,20 @@ pub fn elevation01(d: Vec3) -> f32 {
     (fbm3(d * TERRAIN_FREQ + Vec3::splat(11.3)) + terrain_features(d)).clamp(0.0, 1.0)
 }
 
-/// Terrain elevation in world units above the sea sphere (0 over ocean basins, up to ELEV_MAX on peaks).
+/// Terrain height in world units RELATIVE TO THE SEA SURFACE (the waterline reference at radius PLANET_R).
+/// Positive on land (0 at the coast up to ELEV_MAX on peaks); NEGATIVE under the ocean (0 at the coast down
+/// to -SEA_FLOOR_MAX at the abyssal center) -> one continuous signed bathymetry. Earlier this clamped ocean
+/// to 0 (a flat seafloor at PLANET_R) while the render shell floated SEA_LEVEL*ELEV_MAX above it, so a wide
+/// coastal band of LAND (elev01 SEA_LEVEL..~0.65) sat UNDER the shell: visually flooded yet classed as dry
+/// land (no swim/tint, land plants + walkers stranded "in" the sea). Signing the field sinks the seafloor
+/// below the shell and puts the waterline exactly at the coast, so render + sim agree on what is underwater.
 pub fn elevation(d: Vec3) -> f32 {
-    ((elevation01(d) - SEA_LEVEL).max(0.0) / (1.0 - SEA_LEVEL)) * ELEV_MAX
+    let e = elevation01(d);
+    if e >= SEA_LEVEL {
+        (e - SEA_LEVEL) / (1.0 - SEA_LEVEL) * ELEV_MAX // land: 0 at the coast .. ELEV_MAX on peaks
+    } else {
+        -((SEA_LEVEL - e) / SEA_LEVEL) * SEA_FLOOR_MAX // ocean: 0 at the coast .. -SEA_FLOOR_MAX at the abyss
+    }
 }
 
 /// Is this surface point under the ocean?
@@ -186,7 +198,7 @@ pub fn is_ocean(d: Vec3) -> bool {
 pub fn base_temperature(d: Vec3) -> f32 {
     let (_lon, lat) = dir_to_lonlat(d);
     let by_lat = lat.cos(); // 1 at equator, 0 at poles
-    let lapse = elevation(d) / ELEV_MAX * 0.4; // high ground is colder
+    let lapse = elevation(d).max(0.0) / ELEV_MAX * 0.4; // high ground is colder (ocean depth: no lapse)
     (by_lat - lapse).clamp(0.0, 1.0)
 }
 
@@ -194,7 +206,7 @@ pub fn base_temperature(d: Vec3) -> f32 {
 /// patches away from the coast). Latitude bands (wet tropics/poles, dry subtropics) add Earth-like belts.
 pub fn moisture(d: Vec3) -> f32 {
     let (_lon, lat) = dir_to_lonlat(d);
-    let coastal = 1.0 - (elevation(d) / ELEV_MAX).min(1.0); // low/coastal = wetter
+    let coastal = 1.0 - (elevation(d).max(0.0) / ELEV_MAX).min(1.0); // low/coastal = wetter (ocean = fully wet)
     let patch = fbm3(d * 3.7 - Vec3::splat(5.0));
     // dry subtropical belts ~ +/-30 deg, wetter equator + poles
     let belt = 0.5 + 0.5 * (lat * 3.0).cos();

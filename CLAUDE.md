@@ -18,6 +18,11 @@ This overrides the parent workspace's per-commit-approval rule for this repo. Us
 - Commit at coherent stopping points (a feature/fix done + verified), not mid-broken-state.
 - Before committing, the tree must be green: `cargo build` clean, `cargo test` passing, and a headless smoke
   run (`cargo run -- --headless --gens=1`) OK.
+- Keep verification runs SHORT. The sim got heavier (grass, climate, bathymetry) and the worktree is often
+  shared, so several `evolvarium` processes contend for cores -> long runs crawl. Default to `--gens=1` for a
+  smoke and `--gens=3` to `--gens=5` for a quick balance sanity check; only reach for `--gens=15+` when a
+  change is genuinely balance-critical and a short run can't show the trend. Headless logs are block-buffered
+  to a pipe (flush at exit), so prefer a short run that finishes over tailing a long one.
 - Write honest commit messages (end body with the standard Co-Authored-By trailer).
 - Push to `origin main`; also mirror to the backup branch when convenient: `git push origin main:build`.
 - Note: this worktree may be shared with another agent at times — if files outside your change are

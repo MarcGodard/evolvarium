@@ -90,6 +90,10 @@ pub const SIZE_MOVE: f32 = 1.2;    // movement cost multiplier scales by (1 + th
 pub const SWIM_WET_LEVEL: f32 = 4.0;   // terrain height below which it counts as wet/aquatic (near WATER_LEVEL 2.8)
 pub const SWIM_SPEED: f32 = 0.8;       // speed bonus fraction at full swim in water (fast fish)
 pub const SWIM_LAND_COST: f32 = 5.0;   // energy/sec penalty at full swim on fully-dry land (clumsy on land)
+// Water pressure: a non-swimmer (low swim gene) caught in OPEN water struggles + tires, scaling with DEPTH
+// below the surface (0 at the shallow coast .. 1 at the abyss). Mirror of SWIM_LAND_COST: swimmers are exempt
+// (built for it), so deep ocean is hostile to land creatures while shallow coastal water stays crossable.
+pub const WATER_PRESSURE_COST: f32 = 6.0; // energy/sec penalty at full depth for a full non-swimmer in water
 
 // --- eating / arms race / predation (see 13, M5) ---
 pub const BITE_K: f32 = 8.0; // eat/combat decisiveness = sigmoid(BITE_K*(bite - defense))
@@ -117,13 +121,12 @@ pub const SEED_VIA_GUT: f32 = 0.5; // max chance (x quality) an eaten plant disp
 pub const PLANT_START_MASS: f32 = 0.6;
 pub const PLANT_MIN_MASS: f32 = 0.15; // below this a grazed plant is fully consumed (carrot eaten whole)
 
-// --- grass: lesser ground cover. Ubiquitous on plant-capable soil; thin fallback food (own cap so it
-// neither counts against PLANT_CAP nor floods the food web). Yield kept low in PlantGenome::grass. ---
-pub const GRASS_CAP: usize = 8000; // target tuft count (whole-planet cover; main CPU lever: eat scan clones all food)
-pub const GRASS_EAT_GAIN: f32 = 0.35; // grass graze yield scale vs a plant bite (lesser: a thin supplement)
+// --- grass: render-only whole-planet ground cover (NOT in the food scan -> cheap at high counts). Edible
+// only as a thin POSITION-based fallback (live_step): a hungry creature on grass-bearing soil nibbles. ---
+pub const GRASS_CAP: usize = 8000; // target tuft count for whole-planet cover (render only; size set at attach)
 pub const GRASS_START_MASS: f32 = 0.4;
-pub const GRASS_MIN_MASS: f32 = 0.1; // below this a grazed tuft is gone (regrows from refill elsewhere)
 pub const GRASS_HAB_MIN: f32 = 0.25; // min plant_habitability to seed/keep grass = "soil capable of plants"
+pub const GRASS_GRAZE: f32 = 1.6; // energy/sec a HUNGRY creature nibbles from grassy soil (x habitability); thin fallback
 
 // --- trees: long-lived, near-uneatable plants ---
 pub const N_TREES: usize = 240; // initial trees (whole-planet seeding, scattered worldwide)

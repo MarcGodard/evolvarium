@@ -218,7 +218,7 @@ fn walk_move(mode: Res<CameraMode>, keys: Res<ButtonInput<KeyCode>>, time: Res<T
         if keys.pressed(KeyCode::KeyS) { w.dir = crate::sphere::step(w.dir, w.yaw, -dist * ch).0; w.eye_alt -= dist * sv; }
         if keys.pressed(KeyCode::KeyA) { w.dir = crate::sphere::step(w.dir, w.yaw - FRAC_PI_2, dist).0; }
         if keys.pressed(KeyCode::KeyD) { w.dir = crate::sphere::step(w.dir, w.yaw + FRAC_PI_2, dist).0; }
-        let water_top = crate::sphere::SEA_LEVEL * crate::sphere::ELEV_MAX; // sea surface height over the ocean floor
+        let water_top = (-crate::sphere::elevation(w.dir)).max(0.0); // local water depth: sea surface above the seafloor
         w.eye_alt = w.eye_alt.clamp(SWIM_FLOOR, water_top + SWIM_CEIL);
     } else {
         w.eye_alt = WALK_EYE; // on land (or wading out of the sea): stand at a fixed eye height

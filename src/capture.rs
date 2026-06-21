@@ -110,7 +110,7 @@ fn setup_capture_view(
             w.dir = ocean_dir();
             w.yaw = cfg.yaw;
             w.pitch = cfg.pitch;
-            w.eye_alt = 2.0; // below the sea surface (water_top ~4.92) -> underwater
+            w.eye_alt = 2.0; // 2u above the seafloor; deep-ocean depth ~SEA_FLOOR_MAX -> well below the surface -> underwater
         }
     } else if cfg.orbit {
         *mode = CameraMode::Orbit;

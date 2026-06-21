@@ -71,7 +71,7 @@ impl Plugin for VizPlugin {
                     draw_sensors,
                     add_plant_visuals,
                     size_plants,
-                    (add_grass_visuals, size_grass),
+                    add_grass_visuals,
                     (day_night_lighting, time_of_day, toggle_shadows, walk_ambient, update_daycycle, track_underwater, update_sky, toggle_underwater_tint, animate_ocean, update_globe_climate),
                     rain_visuals,
                     fire_visuals,
@@ -295,27 +295,18 @@ pub fn grass_tuft_mesh() -> Mesh {
     mesh
 }
 
-// Give any grass tuft lacking a mesh the shared tuft mesh + green material. Covers initial turf AND
-// tufts spawned by grass_step's refill.
+// Give any grass tuft lacking a mesh the shared tuft mesh + green material AND set its transform ONCE
+// (grass is static, so size it at attach -- not per-frame -- so 8000 tufts cost nothing each frame).
+// LENGTH + girth vary with SOIL (habitability + moisture): lush + tall on rich ground, short on marginal.
+// Rooted on the surface + stood on the sphere normal.
 fn add_grass_visuals(
     mut commands: Commands,
     mesh: Option<Res<GrassMesh>>,
     mat: Option<Res<GrassMaterial>>,
-    q: Query<Entity, (With<Grass>, Without<Mesh3d>)>,
+    mut q: Query<(Entity, &PlantState, &mut Transform), (With<Grass>, Without<Mesh3d>)>,
 ) {
     let (Some(mesh), Some(mat)) = (mesh, mat) else { return };
-    for e in &q {
-        commands
-            .entity(e)
-            .insert((Mesh3d(mesh.0.clone()), MeshMaterial3d(mat.0.clone())));
-    }
-}
-
-// Grass LENGTH varies with SOIL: lush + tall on rich, moist, plant-capable ground; short + sparse on
-// marginal soil (a visible read of where the land is good). Plant mass (which itself grew faster on good
-// soil) nudges it a little more. Keeps the tuft rooted + standing on the sphere normal.
-fn size_grass(mut q: Query<(&PlantState, &mut Transform), With<Grass>>) {
-    for (st, mut tf) in &mut q {
+    for (e, st, mut tf) in &mut q {
         let up = tf.translation.normalize_or_zero();
         let base = crate::sphere::surface_pos(up, 0.0);
         let soil = (0.5 * crate::sphere::plant_habitability(up) + 0.5 * crate::sphere::moisture(up)).clamp(0.0, 1.0);
@@ -324,6 +315,9 @@ fn size_grass(mut q: Query<(&PlantState, &mut Transform), With<Grass>>) {
         tf.scale = Vec3::new(girth, len, girth);
         tf.rotation = Quat::from_rotation_arc(Vec3::Y, up);
         tf.translation = base + up * 0.02; // roots on the surface
+        commands
+            .entity(e)
+            .insert((Mesh3d(mesh.0.clone()), MeshMaterial3d(mat.0.clone())));
     }
 }
 
@@ -453,6 +447,8 @@ fn rain_visuals(gen: Res<GenState>, mut gizmos: Gizmos) {
 #[derive(Component)]
 struct CloudPuff {
     dir: Vec3,
+    moist: f32, // ground moisture below this puff; wetter ground feeds a bigger, taller cloud
+    grow: f32,  // 0..1 smoothed fullness; ramps toward target so clouds build + dissolve (no pop-in)
 }
 
 fn cloud_alt() -> f32 {
@@ -488,7 +484,7 @@ fn spawn_clouds(
                 // A true ~50%-opacity soft cloud shadow needs alpha-HASHED (dithered) shadows = a small custom
                 // shadow shader; until that lands, clouds stay non-casting so they read soft + transparent.
                 bevy::light::NotShadowCaster,
-                CloudPuff { dir },
+                CloudPuff { dir, moist: crate::sphere::moisture(dir), grow: 0.0 },
             ));
             let _ = (i, j);
         }
@@ -496,13 +492,22 @@ fn spawn_clouds(
 }
 
 fn update_clouds(
+    time: Res<Time>,
     gen: Res<GenState>,
     mut mats: ResMut<Assets<StandardMaterial>>,
-    mut q: Query<(&CloudPuff, &MeshMaterial3d<StandardMaterial>, &mut Visibility, &mut Transform)>,
+    mut q: Query<(&mut CloudPuff, &MeshMaterial3d<StandardMaterial>, &mut Visibility, &mut Transform)>,
 ) {
-    for (puff, mm, mut vis, mut tf) in &mut q {
+    let dt = time.delta_secs();
+    for (mut puff, mm, mut vis, mut tf) in &mut q {
         let c = crate::sphere::cloud_cover(puff.dir, gen.tick);
-        if c < 0.18 {
+        // Target fullness: weather (cloud cover) scaled by ground moisture below (wet ground feeds taller
+        // clouds). Below the cover threshold target is 0 -> the puff shrinks + fades back out, not vanishes.
+        let target = if c < 0.18 { 0.0 } else { c * (0.55 + 0.45 * puff.moist) };
+        // Ramp grow toward target over seconds so clouds build up + dissolve smoothly (no pop-in at full
+        // size). Build slow, dissipate a touch faster, like real cumulus.
+        let rate = if target > puff.grow { 0.6 } else { 1.1 };
+        puff.grow += (target - puff.grow) * (dt * rate).min(1.0);
+        if puff.grow < 0.02 {
             if *vis != Visibility::Hidden {
                 *vis = Visibility::Hidden;
             }
@@ -512,10 +517,10 @@ fn update_clouds(
             *vis = Visibility::Inherited;
         }
         if let Some(m) = mats.get_mut(&mm.0) {
-            // wispier, more transparent clouds (was up to 0.7 -> read as solid); thickest cap ~0.5
-            m.base_color = Color::srgba(0.95, 0.96, 1.0, (0.10 + 0.4 * c).min(0.5));
+            // Opacity tracks grow so a forming cloud fades in from clear; wispy, thickest cap ~0.5.
+            m.base_color = Color::srgba(0.95, 0.96, 1.0, (0.45 * puff.grow).min(0.5));
         }
-        let s = 7.0 + 11.0 * c; // thicker cloud = bigger puff
+        let s = 2.0 + 16.0 * puff.grow; // start as a small wisp, grow into a full puff
         tf.scale = Vec3::new(s, s * 0.45, s); // flattened like a cloud
     }
 }
@@ -753,8 +758,8 @@ fn track_underwater(
 ) {
     let sub = *mode == crate::camera::CameraMode::Walk
         && walkers.single().is_ok_and(|w| {
-            let water_top = crate::sphere::SEA_LEVEL * crate::sphere::ELEV_MAX;
-            crate::sphere::is_ocean(w.dir) && w.eye_alt < water_top
+            let depth = (-crate::sphere::elevation(w.dir)).max(0.0); // local water depth (sea surface above the seafloor)
+            crate::sphere::is_ocean(w.dir) && w.eye_alt < depth
         });
     if underwater.0 != sub {
         underwater.0 = sub;
