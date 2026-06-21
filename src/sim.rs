@@ -895,7 +895,9 @@ pub fn live_step(
         // aquatic factor at this spot: 1 in ocean / wet lowland, 0 on high dry ground (low elevation = wet)
         let h0 = crate::sphere::elevation(pdir);
         let wet_here = ((SWIM_WET_LEVEL - h0) / SWIM_WET_LEVEL).clamp(0.0, 1.0);
-        let speed = MOVE_SPEED * (1.0 + SWIM_SPEED * genome.swim * wet_here);
+        // metabolic tempo: frugal (metab>0.5) trades top speed for cheaper basal; fast (metab<0.5) the reverse
+        let metab_f = genome.metab - 0.5; // -0.5 fast .. +0.5 frugal
+        let speed = MOVE_SPEED * (1.0 + SWIM_SPEED * genome.swim * wet_here) * (1.0 - 0.5 * metab_f);
 
         // act: turn, then take a great-circle step along the heading over the planet surface
         head.0 = wrap_angle(head.0 + turn * TURN_SPEED * dt);
@@ -915,7 +917,7 @@ pub fn live_step(
         let rock = crate::sphere::rockiness(nd);
         let lifespan_mult = 0.4 + 1.2 * genome.longevity; // 0.5 -> 1.0 (baseline); used for upkeep + aging
         let sense_range: f32 = genome.sensors.iter().map(|s| s.range).sum();
-        energy.0 -= (BASAL_COST
+        energy.0 -= (BASAL_COST * (1.0 - 0.6 * metab_f) // frugal metabolism lowers the cost of living
             + SIZE_BASAL * genome.size // bigger body costs more just to maintain
             + MOVE_COST * (1.0 + SIZE_MOVE * genome.size) * thrust * thrust // more mass to push
             + BITE_COST * genome.bite
@@ -1214,6 +1216,7 @@ pub fn generation_step(
             let mut age = 0.0;
             let mut temp = 0.0;
             let mut lng = 0.0;
+            let mut met = 0.0;
             let mut abslat = 0.0; // mean |latitude| of the population (0 equator .. ~1.57 pole) -> spread check
             for (t, en, fit, _h, _a, g, _b, diet, _l) in cq.iter() {
                 e += en.0;
@@ -1224,6 +1227,7 @@ pub fn generation_step(
                 age += diet.age as f32;
                 temp += g.temp_pref;
                 lng += g.longevity;
+                met += g.metab;
                 abslat += crate::sphere::dir_to_lonlat(t.translation.normalize_or_zero()).1.abs();
             }
             let plant_n = pq.iter().len().max(1);
@@ -1232,8 +1236,8 @@ pub fn generation_step(
             let avg_qual: f32 = pq.iter().map(|(g, _)| g.quality).sum::<f32>() / plant_n as f32;
             let avg_wet: f32 = pq.iter().map(|(g, _)| g.wet).sum::<f32>() / plant_n as f32;
             info!(
-                "t {:>6} | pop {:>3} | energy {:.1} | life-fit {:.1} | age {:.0} | sens {:.1} | bite {:.2} | rig {:.2} | temp {:.2} lng {:.2} lat {:.2} | def {:.2} nut {:.2} qual {:.2} wet {:.2} | plants {} | soil {:.2} | rain {:.2} fire {:.3}",
-                gen.tick, pop, e / n, f / n, age / n, sens / n, bite / n, rig / n, temp / n, lng / n, abslat / n, avg_def, avg_nut, avg_qual, avg_wet, plant_n, soil.avg(), weather.rain, fire.avg()
+                "t {:>6} | pop {:>3} | energy {:.1} | life-fit {:.1} | age {:.0} | sens {:.1} | bite {:.2} | rig {:.2} | temp {:.2} lng {:.2} met {:.2} lat {:.2} | def {:.2} nut {:.2} qual {:.2} wet {:.2} | plants {} | soil {:.2} | rain {:.2} fire {:.3}",
+                gen.tick, pop, e / n, f / n, age / n, sens / n, bite / n, rig / n, temp / n, lng / n, met / n, abslat / n, avg_def, avg_nut, avg_qual, avg_wet, plant_n, soil.avg(), weather.rain, fire.avg()
             );
             // Track the best healthy snapshot for --save. Score = pop, gated on well-fed (avg energy >= 30)
             // so we never bank a starving crowd. Captured only when saving (snapshot clone is not free).
