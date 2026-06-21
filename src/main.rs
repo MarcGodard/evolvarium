@@ -63,6 +63,12 @@ fn main() {
     if shots && headless && load.is_none() && std::path::Path::new(DEFAULT_SEED).exists() {
         load = Some(DEFAULT_SEED.to_string());
     }
+    // --diverse: hand-seed a multi-niche showcase (swimmers/cold/warm/browsers placed in matching regions).
+    // Auto-loads the showcase seed for COMPETENT brains, then overrides trait genes + placement per niche.
+    let diverse = args.iter().any(|a| a == "--diverse");
+    if diverse && load.is_none() && std::path::Path::new(DEFAULT_SEED).exists() {
+        load = Some(DEFAULT_SEED.to_string());
+    }
 
     let mut app = App::new();
     app.insert_resource(rng::Rng::seed(seed));
@@ -83,6 +89,7 @@ fn main() {
         max_gens,
         save,
         load,
+        diverse,
     });
 
     app.insert_resource(snapshot::ShotCfg { enabled: shots, at_tick: shot_tick, prefix: shot_prefix });

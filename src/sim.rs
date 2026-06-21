@@ -33,6 +33,7 @@ pub struct GenState {
     pub max_gens: u32,   // headless run length in generations (--gens=N); continuous uses N*GEN_TICKS
     pub save: Option<String>, // --save=PATH: write survivors at headless run end (BACKLOG P2)
     pub load: Option<String>, // --load=PATH: resume from a saved population instead of random
+    pub diverse: bool,        // --diverse: hand-seed niche-adapted creatures across the globe (multi-niche showcase)
 }
 
 impl GenState {
@@ -286,6 +287,40 @@ fn rand_pos(rng: &mut Rng, offset: f32) -> Vec3 {
     crate::sphere::surface_pos(d, offset)
 }
 
+// --- hand-seeded DIVERSE world (--diverse): place niche-adapted creatures in matching regions so the
+// showcase starts with coexisting niches (swimmers in wet coast, cold creatures at the poles, warm
+// grazers at the equator, tall browsers temperate) instead of one converged winner. Genes are overridden
+// for the niche; the brain is kept from a competent base genome so they actually forage + survive. ---
+
+// A LAND position matching a niche: low (wet/coastal) vs high ground, near a target |latitude|.
+fn niche_pos(rng: &mut Rng, low_elev: bool, target_lat: f32, offset: f32) -> Vec3 {
+    for _ in 0..50 {
+        let d = crate::sphere::random_dir_in_cap(rng, Vec3::Y, std::f32::consts::PI);
+        if crate::sphere::is_ocean(d) {
+            continue;
+        }
+        let (_lon, lat) = crate::sphere::dir_to_lonlat(d);
+        let elev = crate::sphere::elevation(d);
+        let elev_ok = if low_elev { elev < 3.0 } else { elev >= 1.0 };
+        if (lat.abs() - target_lat).abs() < 0.3 && elev_ok {
+            return crate::sphere::surface_pos(d, offset);
+        }
+    }
+    rand_pos(rng, offset) // fallback: any land
+}
+
+// Override `g`'s trait genes for niche `i%5` and return a matching spawn position. Keeps g's brain/sensors.
+fn diverse_creature(mut g: Genome, i: usize, rng: &mut Rng) -> (Genome, Vec3) {
+    let (low_elev, target_lat) = match i % 5 {
+        0 => { g.swim = 0.9; g.temp_pref = 0.85; g.height = 0.3; (true, 0.15) }  // warm coastal swimmer ("fish")
+        1 => { g.swim = 0.9; g.temp_pref = 0.15; g.height = 0.3; (true, 1.05) }  // cold coastal swimmer
+        2 => { g.swim = 0.1; g.temp_pref = 0.85; g.height = 0.25; (false, 0.15) } // warm land grazer
+        3 => { g.swim = 0.1; g.temp_pref = 0.15; g.height = 0.25; (false, 1.05) } // cold highland creature
+        _ => { g.swim = 0.1; g.temp_pref = 0.5; g.height = 0.9; (false, 0.5) }    // temperate tall browser
+    };
+    (g, niche_pos(rng, low_elev, target_lat, CREATURE_Y))
+}
+
 fn diet_state(g: &Genome) -> DietState {
     DietState { expr: g.expr0, g: 0.0, age: 0, fatigue: 0.0 }
 }
@@ -389,8 +424,9 @@ pub fn spawn_world_headless(mut commands: Commands, mut rng: ResMut<Rng>, mut ge
     if skip_warmup {
         gen.generation = WARMUP_GENS;
     }
-    for g in genomes {
-        let p = homeland_pos(&mut rng, CREATURE_Y); // founding pop starts in one region, then spreads
+    for (i, g) in genomes.into_iter().enumerate() {
+        // --diverse: niche-adapt each creature + place it in its region; else founding pop in the homeland.
+        let (g, p) = if gen.diverse { diverse_creature(g, i, &mut rng) } else { (g, homeland_pos(&mut rng, CREATURE_Y)) };
         let h = rng.range(-std::f32::consts::PI, std::f32::consts::PI);
         let brain = Brain { net: g.net.clone(), prev_dist: f32::INFINITY };
         let mut diet = diet_state(&g);
@@ -412,33 +448,37 @@ pub fn spawn_world_headless(mut commands: Commands, mut rng: ResMut<Rng>, mut ge
         ));
     }
     let ntypes = gen.ntypes();
+    // diverse mode spreads life globally (creatures are placed in niches worldwide, so food must be too).
+    let food_pos = |rng: &mut Rng| if gen.diverse { rand_pos(rng, FOOD_Y) } else { homeland_pos(rng, FOOD_Y) };
     match &snap {
         Some(s) if !s.plants.is_empty() => {
             for sp in &s.plants {
-                let p = homeland_pos(&mut rng, FOOD_Y);
+                let p = food_pos(&mut rng);
                 spawn_plant(&mut commands, sp.g.clone(), sp.mass, p);
             }
         }
         _ => {
             for _ in 0..FOOD {
-                let p = homeland_pos(&mut rng, FOOD_Y);
+                let p = food_pos(&mut rng);
                 let pg = PlantGenome::random(&mut rng, ntypes);
                 spawn_plant(&mut commands, pg, rng.range(0.3, 1.4) * PLANT_START_MASS, p); // varied mass desyncs the food supply
             }
         }
     }
-    spawn_trees(&mut commands, &mut rng);
+    spawn_trees(&mut commands, &mut rng, gen.diverse);
 }
 
-// Scatter the initial trees (half tall fruit trees, half uneatable evergreens) on habitable homeland.
-fn spawn_trees(commands: &mut Commands, rng: &mut Rng) {
+// Scatter the initial trees (half tall fruit trees, half uneatable evergreens) on habitable land. global=true
+// (diverse mode) spreads them worldwide; else they cluster in the homeland with the founding population.
+fn spawn_trees(commands: &mut Commands, rng: &mut Rng, global: bool) {
+    let tree_pos = |rng: &mut Rng| if global { rand_pos(rng, FOOD_Y) } else { homeland_pos(rng, FOOD_Y) };
     for i in 0..N_TREES {
-        let mut p = homeland_pos(rng, FOOD_Y);
+        let mut p = tree_pos(rng);
         for _ in 0..6 {
             if crate::sphere::plant_habitability(p.normalize_or_zero()) > 0.4 {
                 break;
             }
-            p = homeland_pos(rng, FOOD_Y);
+            p = tree_pos(rng);
         }
         // alternate fruit tree / evergreen; each gets a fresh evolvable genome (evolves from here)
         let g = tree_genome(rng);
@@ -475,8 +515,8 @@ pub fn spawn_world_render(
     if skip_warmup {
         gen.generation = WARMUP_GENS;
     }
-    for g in genomes {
-        let p = homeland_pos(&mut rng, CREATURE_Y); // founding pop starts in one region, then spreads
+    for (i, g) in genomes.into_iter().enumerate() {
+        let (g, p) = if gen.diverse { diverse_creature(g, i, &mut rng) } else { (g, homeland_pos(&mut rng, CREATURE_Y)) };
         let h = rng.range(-std::f32::consts::PI, std::f32::consts::PI);
         let brain = Brain { net: g.net.clone(), prev_dist: f32::INFINITY };
         let mut diet = diet_state(&g);
@@ -502,22 +542,23 @@ pub fn spawn_world_render(
         ));
     }
     let ntypes = gen.ntypes();
+    let food_pos = |rng: &mut Rng| if gen.diverse { rand_pos(rng, FOOD_Y) } else { homeland_pos(rng, FOOD_Y) };
     match &snap {
         Some(s) if !s.plants.is_empty() => {
             for sp in &s.plants {
-                let p = homeland_pos(&mut rng, FOOD_Y);
+                let p = food_pos(&mut rng);
                 spawn_plant(&mut commands, sp.g.clone(), sp.mass, p);
             }
         }
         _ => {
             for _ in 0..FOOD {
-                let p = homeland_pos(&mut rng, FOOD_Y);
+                let p = food_pos(&mut rng);
                 let pg = PlantGenome::random(&mut rng, ntypes);
                 spawn_plant(&mut commands, pg, rng.range(0.3, 1.4) * PLANT_START_MASS, p); // varied mass desyncs the food supply
             }
         }
     }
-    spawn_trees(&mut commands, &mut rng);
+    spawn_trees(&mut commands, &mut rng, gen.diverse);
 }
 
 // --- plants: grow, reproduce (disperse mutated offspring), reseed if the web nearly collapses (13) ---
