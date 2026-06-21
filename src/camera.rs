@@ -83,6 +83,10 @@ fn spawn_camera(mut commands: Commands) {
     commands.spawn((
         Camera3d::default(),
         Transform::default(),
+        // Tonemapping: the Bevy default (TonyMcMapface) is filmic path-to-white -> it desaturates bright areas
+        // toward white, bleaching the vivid plant/ground colors in daylight. ReinhardLuminance keeps hue +
+        // saturation in the highlights for the punchy stylized look.
+        bevy::core_pipeline::tonemapping::Tonemapping::ReinhardLuminance,
         // far clip pushed out so the distant sun + starfield render (they sit thousands of units away)
         Projection::from(PerspectiveProjection { far: 12000.0, ..default() }),
         // soft ambient (per-camera in 0.18) so the planet's night side is not pitch black
