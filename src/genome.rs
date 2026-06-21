@@ -52,6 +52,8 @@ pub struct Genome {
     pub swim: f32,           // 0..1 aquatic adaptation: fast + cheap in water/wet lowland, clumsy + costly on dry land
     #[serde(default)]
     pub social: f32,         // 0..1 herd instinct: near genetic KIN = predation safety (vigilance); ISOLATED = loneliness energy drain. Drives flocking + speciation; punishes the lone cannibal.
+    #[serde(default = "half")]
+    pub temp_pref: f32,      // 0=cold-adapted (poles) .. 1=warm-adapted (equator). Local temp far from this costs energy. Drives a LATITUDINAL niche: poles harsh but uncrowded, equator mild but contested (no free lunch).
 }
 
 // serde defaults for traits absent in old saves
@@ -100,6 +102,7 @@ impl Genome {
             size: rng.range(0.2, 0.6),
             swim: rng.f32() * 0.3,
             social: rng.f32(),
+            temp_pref: rng.f32(), // founders span cold..warm preferences -> spread across latitudes
         }
     }
 
@@ -158,6 +161,9 @@ impl Genome {
         }
         if rng.f32() < rate {
             self.social = (self.social + rng.normal() * 0.12).clamp(0.0, 1.0);
+        }
+        if rng.f32() < rate {
+            self.temp_pref = (self.temp_pref + rng.normal() * 0.12).clamp(0.0, 1.0);
         }
         // structural: add / remove a sensor (and the matching input-weight columns)
         if rng.f32() < 0.06 && self.sensors.len() < MAX_SENSORS {

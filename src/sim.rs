@@ -926,7 +926,8 @@ pub fn live_step(
             + SENSE_COST * sense_range
             + BRAIN_COST * genome.net.ih.len() as f32 // bigger brain = more upkeep
             + HEIGHT_COST * genome.height
-            + LIGHT_COST * (light - genome.light_pref).abs() // global daylight (clouds don't perturb the creature cost: unpredictable local light destabilized populations)
+            + LIGHT_COST * (light - genome.light_pref).abs() // positional daylight at this creature's location
+            + TEMP_COST * (crate::sphere::base_temperature(pdir) - genome.temp_pref).abs() // thermal mismatch: poles vs equator niche
             + SWIM_LAND_COST * genome.swim * (1.0 - wet_here) // fins are a liability on dry land
             + STRESS_COST * diet.fatigue)
             * dt;
@@ -1215,13 +1216,17 @@ pub fn generation_step(
             let mut bite = 0.0;
             let mut rig = 0.0;
             let mut age = 0.0;
-            for (_t, en, fit, _h, _a, g, _b, diet, _l) in cq.iter() {
+            let mut temp = 0.0;
+            let mut abslat = 0.0; // mean |latitude| of the population (0 equator .. ~1.57 pole) -> spread check
+            for (t, en, fit, _h, _a, g, _b, diet, _l) in cq.iter() {
                 e += en.0;
                 f += fit.0;
                 sens += g.n_sensors() as f32;
                 bite += g.bite;
                 rig += g.rigidity;
                 age += diet.age as f32;
+                temp += g.temp_pref;
+                abslat += crate::sphere::dir_to_lonlat(t.translation.normalize_or_zero()).1.abs();
             }
             let plant_n = pq.iter().len().max(1);
             let avg_def: f32 = pq.iter().map(|(g, _)| g.defense).sum::<f32>() / plant_n as f32;
@@ -1229,8 +1234,8 @@ pub fn generation_step(
             let avg_qual: f32 = pq.iter().map(|(g, _)| g.quality).sum::<f32>() / plant_n as f32;
             let avg_wet: f32 = pq.iter().map(|(g, _)| g.wet).sum::<f32>() / plant_n as f32;
             info!(
-                "t {:>6} | pop {:>3} | energy {:.1} | life-fit {:.1} | age {:.0} | sens {:.1} | bite {:.2} | rig {:.2} | def {:.2} nut {:.2} qual {:.2} wet {:.2} | plants {} | soil {:.2} | rain {:.2} fire {:.3}",
-                gen.tick, pop, e / n, f / n, age / n, sens / n, bite / n, rig / n, avg_def, avg_nut, avg_qual, avg_wet, plant_n, soil.avg(), weather.rain, fire.avg()
+                "t {:>6} | pop {:>3} | energy {:.1} | life-fit {:.1} | age {:.0} | sens {:.1} | bite {:.2} | rig {:.2} | temp {:.2} lat {:.2} | def {:.2} nut {:.2} qual {:.2} wet {:.2} | plants {} | soil {:.2} | rain {:.2} fire {:.3}",
+                gen.tick, pop, e / n, f / n, age / n, sens / n, bite / n, rig / n, temp / n, abslat / n, avg_def, avg_nut, avg_qual, avg_wet, plant_n, soil.avg(), weather.rain, fire.avg()
             );
             // Track the best healthy snapshot for --save. Score = pop, gated on well-fed (avg energy >= 30)
             // so we never bank a starving crowd. Captured only when saving (snapshot clone is not free).

@@ -19,6 +19,7 @@ pub const FOOD_Y: f32 = 0.4;
 // --- day/night + light ---
 pub const DAY_TICKS: u32 = 2400; // ticks per full day-night cycle (40s at 60Hz render: slow, watchable sunrise->sunset)
 pub const LIGHT_COST: f32 = 0.8; // energy/sec per unit mismatch between local light and a creature's light_pref
+pub const TEMP_COST: f32 = 0.9; // energy/sec per unit mismatch between local temperature and temp_pref (thermal niche: poles harsh for warm-adapted, equator harsh for cold-adapted)
 
 // --- fatigue/stress (rest instinct) ---
 // Exertion accrues fatigue, rest sheds it. Trade-off teeth: fatigue burns stress energy AND saps
