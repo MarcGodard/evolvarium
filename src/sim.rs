@@ -329,16 +329,48 @@ fn niche_pos(rng: &mut Rng, low_elev: bool, target_lat: f32, offset: f32) -> Vec
     rand_pos(rng, offset) // fallback: any land
 }
 
+// A SHALLOW-WATER position for the swimmer niche: in the sea but ABOVE the barren abyss, where aquatic flora
+// grows -> swimmers spawn on their food. (niche_pos placed them on dry land, where swim costs SWIM_LAND_COST
+// and they starved -> aquatic always died out.)
+fn niche_water_pos(rng: &mut Rng, target_lat: f32, offset: f32) -> Vec3 {
+    for _ in 0..120 {
+        let d = crate::sphere::random_dir_in_cap(rng, Vec3::Y, std::f32::consts::PI);
+        let e = crate::sphere::elevation01(d);
+        if e >= crate::sphere::SEA_LEVEL || e < crate::sphere::AQUATIC_FLOOR {
+            continue; // want submerged-but-not-abyssal (the flora band)
+        }
+        let (_lon, lat) = crate::sphere::dir_to_lonlat(d);
+        if (lat.abs() - target_lat).abs() < 0.45 {
+            return crate::sphere::surface_pos(d, offset);
+        }
+    }
+    // fallback: any shallow-water cell with food
+    for _ in 0..240 {
+        let d = crate::sphere::random_dir_in_cap(rng, Vec3::Y, std::f32::consts::PI);
+        let e = crate::sphere::elevation01(d);
+        if e < crate::sphere::SEA_LEVEL && e >= crate::sphere::AQUATIC_FLOOR {
+            return crate::sphere::surface_pos(d, offset);
+        }
+    }
+    rand_pos(rng, offset)
+}
+
 // Override `g`'s trait genes for niche `i%5` and return a matching spawn position. Keeps g's brain/sensors.
 fn diverse_creature(mut g: Genome, i: usize, rng: &mut Rng) -> (Genome, Vec3) {
-    let (low_elev, target_lat) = match i % 5 {
-        0 => { g.swim = 0.9; g.temp_pref = 0.85; g.height = 0.3; (true, 0.15) }  // warm coastal swimmer ("fish")
-        1 => { g.swim = 0.9; g.temp_pref = 0.15; g.height = 0.3; (true, 1.05) }  // cold coastal swimmer
-        2 => { g.swim = 0.1; g.temp_pref = 0.85; g.height = 0.25; (false, 0.15) } // warm land grazer
-        3 => { g.swim = 0.1; g.temp_pref = 0.15; g.height = 0.25; (false, 1.05) } // cold highland creature
-        _ => { g.swim = 0.1; g.temp_pref = 0.5; g.height = 0.9; (false, 0.5) }    // temperate tall browser
-    };
-    (g, niche_pos(rng, low_elev, target_lat, CREATURE_Y))
+    // niches 0,1 are swimmers -> seed them IN shallow water (on the aquatic flora); the rest are land niches.
+    match i % 5 {
+        0 => {
+            g.swim = 0.9; g.temp_pref = 0.85; g.height = 0.3; // warm-sea swimmer ("fish")
+            (g, niche_water_pos(rng, 0.15, CREATURE_Y))
+        }
+        1 => {
+            g.swim = 0.9; g.temp_pref = 0.25; g.height = 0.3; // cool-sea swimmer
+            (g, niche_water_pos(rng, 0.8, CREATURE_Y))
+        }
+        2 => { g.swim = 0.1; g.temp_pref = 0.85; g.height = 0.25; (g, niche_pos(rng, true, 0.15, CREATURE_Y)) } // warm land grazer
+        3 => { g.swim = 0.1; g.temp_pref = 0.15; g.height = 0.25; (g, niche_pos(rng, false, 1.05, CREATURE_Y)) } // cold highland
+        _ => { g.swim = 0.1; g.temp_pref = 0.5; g.height = 0.9; (g, niche_pos(rng, false, 0.5, CREATURE_Y)) }    // tall browser
+    }
 }
 
 fn diet_state(g: &Genome) -> DietState {
