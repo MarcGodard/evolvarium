@@ -153,6 +153,7 @@ pub struct TreeMeshes {
     pub trunk: Handle<Mesh>,
     pub broadleaf: Handle<Mesh>, // round canopy for fruit trees
     pub conifer: Handle<Mesh>,   // cone canopy for evergreens
+    pub vine: Handle<Mesh>,      // helix vine that spirals up the trunk (only some trees)
 }
 
 // Give any plant lacking a mesh its visuals: shared sphere + a material colored by its genome
@@ -200,6 +201,17 @@ fn add_plant_visuals(
                         .id();
                     commands.entity(e).add_child(c);
                 }
+            }
+            // some trees host a climbing vine spiraling up the trunk (vine only ever appears WITH a tree).
+            // Presence keyed off the tree's flower_hue gene -> deterministic + varied (~40% of trees).
+            if g.flower_hue > 0.58 {
+                let vmat = materials.add(StandardMaterial {
+                    base_color: Color::srgb(0.16, 0.45, 0.12),
+                    perceptual_roughness: 0.85,
+                    ..default()
+                });
+                let vine = commands.spawn((Mesh3d(tm.vine.clone()), MeshMaterial3d(vmat), Transform::IDENTITY)).id();
+                commands.entity(e).add_child(vine);
             }
             continue;
         }
@@ -476,6 +488,13 @@ struct MeshBuf {
     nor: Vec<[f32; 3]>,
     col: Vec<[f32; 4]>, // grayscale shade (rgb=v), multiplied into the material color
 }
+// Baked shade -> vertex color. Maps an input brightness 0..1 to a multiplier that only DARKENS (never
+// brightens past ~0.92), so the shading reads as soft depth/AO into the genome color instead of washing it
+// out toward white. Low end keeps crevices dark for volume.
+fn shade_col(v: f32) -> [f32; 4] {
+    let s = (0.45 + 0.45 * v).clamp(0.4, 0.92);
+    [s, s, s, 1.0]
+}
 impl MeshBuf {
     fn new() -> Self {
         MeshBuf { pos: Vec::new(), nor: Vec::new(), col: Vec::new() }
@@ -505,7 +524,7 @@ fn push_sphere(b: &mut MeshBuf, idx: &mut Vec<u32>, center: Vec3, r: f32, rings:
             let p = center + n * r;
             b.pos.push([p.x, p.y, p.z]);
             b.nor.push([n.x, n.y, n.z]);
-            b.col.push([v, v, v, 1.0]);
+            b.col.push(shade_col(v));
         }
     }
     let cols = sectors + 1;
@@ -520,27 +539,32 @@ fn push_sphere(b: &mut MeshBuf, idx: &mut Vec<u32>, center: Vec3, r: f32, rings:
     }
 }
 
-// Append a cone (base at `base`, pointing up `height`, base radius r), shade fading base->tip dark->light.
+// Append a SMOOTH cone (base at `base`, pointing up `height`, base radius r). Ring vertices carry radial
+// slant normals (not flat per-face normals) so the surface shades with a smooth rounded gradient -> reads
+// as a 3D cone, not a flat cardboard triangle. shade fades base->apex (dark->light).
 fn push_cone(b: &mut MeshBuf, idx: &mut Vec<u32>, base: Vec3, r: f32, height: f32, seg: usize, v: f32) {
-    let start = b.pos.len() as u32;
     let apex = base + Vec3::Y * height;
-    for si in 0..seg {
-        let th0 = std::f32::consts::TAU * si as f32 / seg as f32;
-        let th1 = std::f32::consts::TAU * (si + 1) as f32 / seg as f32;
-        let p0 = base + Vec3::new(th0.cos() * r, 0.0, th0.sin() * r);
-        let p1 = base + Vec3::new(th1.cos() * r, 0.0, th1.sin() * r);
-        let n = ((p1 - apex).cross(p0 - apex)).normalize_or_zero();
-        for (p, sh) in [(apex, v * 1.1), (p0, v * 0.8), (p1, v * 0.8)] {
-            b.pos.push([p.x, p.y, p.z]);
-            b.nor.push([n.x, n.y, n.z]);
-            let s = sh.min(1.0);
-            b.col.push([s, s, s, 1.0]);
-        }
+    // cone slant normal at angle th: outward (scaled by height) + up (scaled by r)
+    let slant = |th: f32| Vec3::new(th.cos() * height, r, th.sin() * height).normalize_or_zero();
+    let ring0 = b.pos.len() as u32;
+    for si in 0..=seg {
+        let th = std::f32::consts::TAU * si as f32 / seg as f32;
+        let p = base + Vec3::new(th.cos() * r, 0.0, th.sin() * r);
+        let n = slant(th);
+        b.pos.push([p.x, p.y, p.z]);
+        b.nor.push([n.x, n.y, n.z]);
+        b.col.push(shade_col(v * 0.85));
     }
-    let _ = start;
-    let base_i = b.pos.len() as u32 - (seg as u32 * 3);
-    for k in 0..seg as u32 {
-        idx.extend_from_slice(&[base_i + k * 3, base_i + k * 3 + 1, base_i + k * 3 + 2]);
+    let apex0 = b.pos.len() as u32;
+    for si in 0..seg {
+        let th = std::f32::consts::TAU * (si as f32 + 0.5) / seg as f32; // apex normal aimed at face center
+        let n = slant(th);
+        b.pos.push([apex.x, apex.y, apex.z]);
+        b.nor.push([n.x, n.y, n.z]);
+        b.col.push(shade_col(v * 1.05));
+    }
+    for si in 0..seg as u32 {
+        idx.extend_from_slice(&[ring0 + si, ring0 + si + 1, apex0 + si]);
     }
 }
 
@@ -596,8 +620,7 @@ pub fn dome_mesh() -> Mesh {
             let p = Vec3::new(sp * ct, cp * 0.7, sp * st); // squashed dome
             b.pos.push([p.x, p.y, p.z]);
             b.nor.push([n.x, n.y, n.z]);
-            let v = 0.8 + 0.2 * cp;
-            b.col.push([v, v, v, 1.0]);
+            b.col.push(shade_col(0.75 + 0.25 * cp));
         }
     }
     let cols = sectors + 1;
@@ -638,9 +661,35 @@ pub fn cactus_mesh() -> Mesh {
 pub fn conifer_mesh() -> Mesh {
     let mut b = MeshBuf::new();
     let mut idx = Vec::new();
-    push_cone(&mut b, &mut idx, Vec3::new(0.0, 0.0, 0.0), 1.4, 1.5, 10, 0.7);
-    push_cone(&mut b, &mut idx, Vec3::new(0.0, 0.65, 0.0), 1.1, 1.4, 10, 0.82);
-    push_cone(&mut b, &mut idx, Vec3::new(0.0, 1.3, 0.0), 0.75, 1.3, 10, 0.95);
+    // 4 smooth tiers, base radius shrinking; each apex rises ~2x the gap to the next base so the skirts
+    // overlap and bury the trunk between them. Higher segment count -> rounded, not faceted.
+    push_cone(&mut b, &mut idx, Vec3::new(0.0, 0.0, 0.0), 1.45, 1.4, 16, 0.7);
+    push_cone(&mut b, &mut idx, Vec3::new(0.0, 0.55, 0.0), 1.15, 1.35, 16, 0.8);
+    push_cone(&mut b, &mut idx, Vec3::new(0.0, 1.1, 0.0), 0.85, 1.3, 16, 0.9);
+    push_cone(&mut b, &mut idx, Vec3::new(0.0, 1.65, 0.0), 0.5, 1.2, 16, 1.0);
+    b.finish(idx)
+}
+
+// A climbing vine: a helix of small leaf-blobs spiraling up a trunk (local space matching the centered
+// trunk, y in ~[-0.95, 0.85], hugging radius `rad`). Shared mesh attached to vine-bearing trees -> the
+// vine only ever appears WITH a tree, and costs nothing per-tree (one shared mesh, one material).
+pub fn vine_mesh(rad: f32) -> Mesh {
+    let mut b = MeshBuf::new();
+    let mut idx = Vec::new();
+    let turns = 3.0;
+    let n = 26;
+    for i in 0..=n {
+        let t = i as f32 / n as f32;
+        let y = -0.95 + 1.8 * t;
+        let a = turns * std::f32::consts::TAU * t;
+        let c = Vec3::new(a.cos() * rad, y, a.sin() * rad);
+        push_sphere(&mut b, &mut idx, c, 0.05, 3, 5, 0.8); // vine strand bead
+        if i % 3 == 0 {
+            // a leaf blob poking outward every few beads
+            let out = Vec3::new(a.cos(), 0.0, a.sin()) * (rad + 0.07);
+            push_sphere(&mut b, &mut idx, Vec3::new(out.x, y, out.z), 0.07, 3, 5, 1.0);
+        }
+    }
     b.finish(idx)
 }
 

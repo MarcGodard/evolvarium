@@ -199,7 +199,14 @@ pub const SUCC_BUFFER: f32 = 0.9;        // succulence drought buffer: water sto
 pub const TEMP_FLOOR: f32 = 0.45;        // floor on a plant's thermal growth factor (off-niche grows slow, not zero)
 pub const TEMP_KILL: f32 = 0.01;         // per-tick death scale for climate-niche mismatch beyond tolerance
 pub const TEMP_TOL: f32 = 0.3;           // temp_pref mismatch under this is harmless
+// Trees get a climate niche too, but SOFTER than ground plants (long-lived, deep roots): wider harmless
+// band + a gentler per-tick kill, so a tree dies back only well off its thermal niche (frozen pole / desert
+// heat), not at the first mismatch. Growth still tapers off-niche via the shared TEMP_FLOOR factor.
+pub const TREE_TEMP_TOL: f32 = 0.4;      // tree temp_pref mismatch under this is harmless (wider than plants)
+pub const TREE_TEMP_KILL: f32 = 0.004;   // per-tick death scale for a tree beyond its (wide) thermal tolerance
 pub const NFIX_RATE: f32 = 0.6;          // soil fertility/sec a full nitrogen-fixer (legume) adds at its spot
+pub const DESICCATE_KILL: f32 = 0.1;     // per-tick death for an aquatic plant (high wet) stranded on dry land
+                                         // (mirror of drown): aquatic flora needs water, so it can't carpet land
 // Dynamic ground water (rain cycle): a wetness layer on TOP of the static terrain moisture. The sun
 // evaporates it (faster at noon), storms refill it. Rocky cells shed runoff (no gain); grassy cells
 // soak it up -> after a heavy rain, low-lying grassland turns wet and favors wet-liking plants, which

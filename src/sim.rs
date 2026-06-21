@@ -912,6 +912,7 @@ pub fn spawn_world_render(
             (Vec3::new(-0.3, -0.15, 0.55), 0.7, 0.85),
         ])),
         conifer: meshes.add(crate::viz::conifer_mesh()), // stacked-cone Christmas-tree silhouette
+        vine: meshes.add(crate::viz::vine_mesh(0.16)),    // helix vine hugging the trunk (radius ~ trunk)
     });
     // shared grass tuft mesh + one green material for ALL tufts (grass is ubiquitous; size_grass scales
     // each tuft's length by local soil). Double-sided so the thin blades show from both faces.
@@ -1153,11 +1154,21 @@ pub fn plant_step(
                     continue;
                 }
             }
+            // tree climate niche: trees stay moisture-immune (long-lived, deep roots) but DO feel temperature.
+            // tmiss = how far local temp sits from this tree's temp_pref. Far off its (wide) thermal band a
+            // tree dies back -> no forests on the frozen pole or in the desert heat; near its band it's spared.
+            let tmiss = (crate::sphere::base_temperature(pdir) - g.temp_pref).abs();
+            if rng.f32() < TREE_TEMP_KILL * (tmiss - TREE_TEMP_TOL).max(0.0) {
+                commands.entity(e).despawn();
+                continue;
+            }
+            // off-niche grows slower too (shared floor: never zero, just sluggish) -> trees fastest in their band.
+            let temp_grow = TEMP_FLOOR + (1.0 - TEMP_FLOOR) * (1.0 - tmiss);
             // trees: moisture-immune (long-lived), grow slowly + large. Two reproduction paths:
             //  - ambient: fertility-weighted, density-limited wind-fall near the parent;
             //  - dispersal-on-eat: a fruit tree that was grazed this tick may fling a seed FAR (animal-
             //    carried). Being reachable+eaten thus pays in reproduction -> bounds how tall trees evolve.
-            st.mass += g.growth_rate() * boost * lf * TREE_GROWTH_SCALE * DT; // trees grow slowly (long-lived)
+            st.mass += g.growth_rate() * boost * lf * temp_grow * TREE_GROWTH_SCALE * DT; // trees grow slowly (long-lived)
             st.age += 1;
             let r2 = TREE_DENSITY_R * TREE_DENSITY_R;
             let local = tree_positions.iter().filter(|p| p.distance_squared(tf.translation) < r2).count();
@@ -1216,6 +1227,11 @@ pub fn plant_step(
         let e01 = crate::sphere::elevation01(pdir);
         let submersion = ((crate::sphere::SEA_LEVEL - e01) / crate::sphere::SEA_LEVEL).clamp(0.0, 1.0);
         let drown = DROWN_KILL * submersion * (1.0 - g.wet);
+        // desiccation (mirror of drown): an aquatic plant (high wet) stranded on DRY land (not submerged AND
+        // low moisture) dries out and dies -> aquatic flora can't carpet the land. Marsh/wet ground (high m)
+        // and shallow water spare it, so reeds at the water's edge survive.
+        let aquatic = ((g.wet - 0.85) / 0.15).clamp(0.0, 1.0);
+        let desiccate = DESICCATE_KILL * aquatic * (1.0 - submersion) * (1.0 - (m / 0.6).min(1.0));
         // climate niche: a plant grows best where local temperature matches temp_pref (alpine cushion in the
         // cold, cactus in the heat); off-niche it grows slowly and, far off its band, dies back.
         let temp = crate::sphere::base_temperature(pdir);
@@ -1224,6 +1240,7 @@ pub fn plant_step(
         let p_mort = MOISTURE_KILL * (stress - MOISTURE_TOLERANCE).max(0.0)
             + HABITAT_KILL * (0.3 - hab).max(0.0)
             + drown
+            + desiccate
             + TEMP_KILL * (tmiss - TEMP_TOL).max(0.0);
         if rng.f32() < p_mort {
             // allelopathic litter: a chemical-warfare plant leaves extra-toxic detritus (juglone-style leaf
@@ -1261,7 +1278,11 @@ pub fn plant_step(
             let mut child = g.clone();
             child.mutate(&mut rng);
             let pos = disperse_pos(&mut rng, ppos, g.spread, FOOD_Y);
-            births.push((child, pos));
+            // aquatic plants (high wet) only seed into water; a seed that lands on dry ground is dropped
+            // (mirror of land-only trees). Parent still pays the budding cost either way.
+            if !(g.wet > 0.85 && !crate::sphere::is_ocean(pos.normalize_or_zero())) {
+                births.push((child, pos));
+            }
             st.mass *= PLANT_REPRO_FRAC;
         }
     }
