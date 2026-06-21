@@ -39,7 +39,7 @@ impl Plugin for VizPlugin {
             .init_resource::<ShowLegend>()
             .init_resource::<SunOffset>()
             .insert_resource(ShowShadows(true)) // walk shadows on by default (O toggles)
-            .add_systems(Startup, (log_viz_help, spawn_stats_ui, spawn_world_stats_ui, spawn_legend_ui, spawn_clouds, set_initial_speed))
+            .add_systems(Startup, (log_viz_help, spawn_stats_ui, spawn_world_stats_ui, spawn_legend_ui, spawn_daycycle_ui, spawn_clouds, set_initial_speed))
             .add_systems(
                 Update,
                 (
@@ -49,7 +49,7 @@ impl Plugin for VizPlugin {
                     draw_sensors,
                     add_plant_visuals,
                     size_plants,
-                    (day_night_lighting, time_of_day, toggle_shadows, walk_ambient),
+                    (day_night_lighting, time_of_day, toggle_shadows, walk_ambient, update_daycycle),
                     rain_visuals,
                     fire_visuals,
                     update_clouds,
@@ -585,6 +585,63 @@ struct StatsText;
 #[derive(Component)]
 struct WorldStatsText;
 
+// Top-center day/night phase readout (walk mode). Tells you where in the cycle you are at a glance.
+#[derive(Component)]
+struct DayCycleText;
+
+fn spawn_daycycle_ui(mut commands: Commands) {
+    // full-width row, centered -> child text sits middle-top
+    commands
+        .spawn(Node {
+            position_type: PositionType::Absolute,
+            top: Val::Px(6.0),
+            width: Val::Percent(100.0),
+            justify_content: JustifyContent::Center,
+            ..default()
+        })
+        .with_child((
+            Text::new(""),
+            TextFont { font_size: 22.0, ..default() },
+            TextColor(Color::WHITE),
+            DayCycleText,
+        ));
+}
+
+// Set the phase label + color from local daylight at the walker (visual sky time). Hidden in orbit (there
+// you see the whole terminator anyway). rising vs falling splits dawn/dusk + morning/afternoon.
+fn update_daycycle(
+    gen: Res<GenState>,
+    offset: Res<SunOffset>,
+    mode: Res<crate::camera::CameraMode>,
+    walkers: Query<&crate::camera::WalkCam>,
+    mut q: Query<(&mut Text, &mut TextColor), With<DayCycleText>>,
+) {
+    let Ok((mut text, mut color)) = q.single_mut() else { return };
+    if *mode != crate::camera::CameraMode::Walk {
+        text.0.clear(); // orbit: no single time-of-day
+        return;
+    }
+    let dir = walkers.single().map(|w| w.dir.normalize_or_zero()).unwrap_or(Vec3::Y);
+    let day = crate::sphere::DAY_TICKS as i64;
+    let vtick = (gen.tick as i64 + offset.0).rem_euclid(day) as u32;
+    let d = crate::sphere::daylight_at(dir, vtick);
+    let ahead = crate::sphere::daylight_at(dir, ((vtick as i64 + 30).rem_euclid(day)) as u32);
+    let rising = ahead > d;
+    let (label, c) = if d < 0.04 {
+        ("NIGHT", Color::srgb(0.55, 0.62, 0.95))
+    } else if d < 0.22 {
+        if rising { ("DAWN", Color::srgb(1.0, 0.6, 0.35)) } else { ("DUSK", Color::srgb(1.0, 0.45, 0.3)) }
+    } else if d < 0.5 {
+        if rising { ("MORNING", Color::srgb(1.0, 0.85, 0.5)) } else { ("AFTERNOON", Color::srgb(1.0, 0.8, 0.45)) }
+    } else {
+        ("MIDDAY", Color::srgb(1.0, 0.95, 0.6))
+    };
+    if text.0 != label {
+        text.0 = label.into();
+    }
+    color.0 = c;
+}
+
 fn spawn_world_stats_ui(mut commands: Commands) {
     commands.spawn((
         Text::new("world..."),
@@ -610,6 +667,10 @@ struct LegendText;
 
 const LEGEND: &str = "\
 EVOLVARIUM  -  legend   (press H to close)
+
+TOP-CENTER (walk mode)
+  time-of-day phase where you stand: NIGHT / DAWN /
+  MORNING / MIDDAY / AFTERNOON / DUSK (colored by sun).
 
 DASHBOARD (bottom-left)
   speed       sim pace; 1x = real-time. PAUSED = stopped.
