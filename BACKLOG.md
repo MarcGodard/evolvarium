@@ -36,6 +36,28 @@ live in `config.rs`; the live conversion plan is `SPHERE-PLAN.md`.
       **wet now gates water survival** (drown mortality x submersion x (1-wet)): land flora drowns in the
       sea, aquatic flora (high wet) thrives -> wet splits land vs aquatic plants. Trees are land-only.
 
+### Creature overhaul M4 (2026-06-22)
+- [x] **12 new genes** (all serde-default, save-safe): detox, carnivory, pelt, armor, venom (physiology/
+      defense); limbs, climb, eyes, head (morphology); skin_hue, skin_sat, pattern (appearance). Each has a
+      benefit + a cost (no free lunch) and, where it makes sense, a visible phenotype.
+- [x] **Toxic load** (`DietState.toxic_load`): ingested toxins (toxic plants, rotten meat, fermented
+      spoilage, venomous prey) accumulate + linger, draining energy + driving disease + a death hazard,
+      cleared slowly (faster with `detox`). Replaces the old instant-only toxin hit.
+- [x] **Rabbit starvation**: meat energy gated by the `carnivory` gut; processing protein with an empty carb
+      buffer makes metabolic toxic load -> an all-meat creature with no plant carbs poisons + starves.
+- [x] **size = energy use**: basal upkeep scales allometrically with body size (size^1.5).
+- [x] Gene effects wired: pelt insulation/heat/water, armor predation defense, venom predator deterrent,
+      limbs land traction, climb predator-evasion + fruit-tree reach, eyes detection bonus, head cheaper brain.
+- [x] **New brain inputs** (4 -> 9 globals): own toxic_load, canopy shade, nearest-threat dist+bearing, in-
+      water. Need-for-shade has teeth (open-sun heat cost relieved by canopy). Old saved nets zero-padded on
+      load (`Genome::ensure_net_shape`); migration unit-tested.
+- [x] **Genetic creature visuals**: composed body (skin color from genes, venom warning tint, fur/armor
+      shading), head sphere (size + pattern two-tone), 1..6 eyes, 2..8 splayed legs — all from the genome.
+- [x] **Tuning-harness creature arm**: `creature_cohort` (overrides + reflex presets), patch placement,
+      continuous in-scenario breeding, survival/master/trait-drift metrics + best survivors;
+      `--merge-creatures` harvests winners into a population snapshot. `tools/tune-creatures.workflow.js`
+      fans out one tuner per niche. Fresh 120-creature, 10-biome `evolved-continuous.json` built from it.
+
 ### Metabolism overhaul (2026-06-21, a42d7aa)
 - [x] **Three energy stores** (`Energy{fast,sugar,fat}`): burn order fast->sugar->fat; fast leaks even at
       rest (volatile, can't bank); fat mobilizes slow (`power()` caps thrust -> fat-only is sluggish) +
