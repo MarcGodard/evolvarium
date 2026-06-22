@@ -7,7 +7,11 @@ use crate::rng::Rng;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-pub const PLANT_CAP: usize = 1400; // carrying capacity (bounds population), scaled to the doubled arena
+pub const PLANT_CAP: usize = 4000; // carrying capacity (bounds population): dense whole-planet food so creatures
+                                   // scattered across the globe (a loaded population) find food where they land.
+                                   // Bounded for perf: plant_step (+ mating search) scales with this each tick.
+pub const WHOLE_PLANET_SEED_MULT: usize = 20; // a loaded/diverse world seeds 20x the founding FOOD count so the
+                                              // planet establishes dense everywhere (many land in survivable biomes)
 pub const PLANT_MIN: usize = 140; // reseed floor so the food web can't fully collapse
 pub const P_REPRO: f32 = 0.015; // per-tick reproduction chance for a mature plant
 const GROWTH_BASE: f32 = 1.2; // mass/sec at full growth allocation
