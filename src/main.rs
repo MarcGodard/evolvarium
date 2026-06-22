@@ -164,8 +164,9 @@ fn main() {
     // isolated controlled mini-world, seed ONLY the cohort, run the minimal plant chain, write result, exit.
     if let Some(path) = scenario_path {
         let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("scenario read failed ({}): {}", path, e));
-        let scn: scenario::Scenario = serde_json::from_str(&text).unwrap_or_else(|e| panic!("scenario parse failed ({}): {}", path, e));
+        let mut scn: scenario::Scenario = serde_json::from_str(&text).unwrap_or_else(|e| panic!("scenario parse failed ({}): {}", path, e));
         let scen_seed = if seed_given { seed } else { scn.seed };
+        scn.seed = scen_seed; // stamp the EFFECTIVE seed so the result JSON echoes the real run seed (not the file default)
         let grazers = scn.world.grazers;
         app.insert_resource(rng::Rng::seed(scen_seed));
         // scenario GenState: headless clock, continuous OFF (so grazers don't reseed), no garden/library.

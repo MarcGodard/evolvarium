@@ -23,6 +23,7 @@ use crate::sim::GenState;
 pub struct Scenario {
     #[serde(default = "default_seed")]
     pub seed: u64,
+    #[serde(default = "default_ticks")]
     pub ticks: u32, // run length; cohort lifetime budget (~6 sim-days at 30000)
     #[serde(default = "default_target")]
     pub target_count: usize, // growth goal the agent tunes the cohort toward
@@ -72,6 +73,9 @@ pub struct PlantSpec {
 
 fn default_seed() -> u64 {
     1
+}
+fn default_ticks() -> u32 {
+    12000
 }
 fn default_target() -> usize {
     30
