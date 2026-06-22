@@ -313,9 +313,22 @@ pub fn spawn_scenario_world(
                 None if spec.tree => crate::sim::tree_genome(&mut rng),
                 None => PlantGenome::random(&mut rng, NFOOD as u8),
             };
-            let g = apply_overrides(base, &spec.genome);
-            stats.seeded.push(g.clone());
+            let mut g = apply_overrides(base, &spec.genome);
             let pos = place(&mut rng, crate::sim::FOOD_Y);
+            // F45: in a CREATURE scenario the plant_cohort is just FOOD, not the tuning subject. Untuned
+            // archetype climate defaults collapse in a hostile band (Cactus/Reed died) and the creatures then
+            // starve. Pin the food's climate genes to THIS spot's band (unless the spec overrode them) so the
+            // food survives. Gated on a creature cohort being present, so the PLANT tuner (no creature_cohort,
+            // which relies on temp_pref drift as a signal) is unaffected.
+            if !cfg.scenario.creature_cohort.is_empty() {
+                if !spec.genome.contains_key("temp_pref") {
+                    g.temp_pref = crate::sphere::base_temperature(pos.normalize_or_zero());
+                }
+                if !spec.genome.contains_key("wet") {
+                    g.wet = w.wetness.clamp(0.05, 0.95);
+                }
+            }
+            stats.seeded.push(g.clone());
             if spec.tree {
                 crate::sim::spawn_tree(&mut commands, rng.range(2.0, 5.0), pos, true, g);
             } else {

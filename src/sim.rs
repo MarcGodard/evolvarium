@@ -779,6 +779,12 @@ pub(crate) fn tree_genome(rng: &mut Rng) -> PlantGenome {
 
 // Spawn one tree (long-lived plant + Tree marker) from a genome. edible=true fruit tree, false=evergreen.
 pub(crate) fn spawn_tree(commands: &mut Commands, mass: f32, pos: Vec3, edible: bool, g: PlantGenome) {
+    // F33: only EDIBLE (fruit) trees benefit from fruiting (fruit drop + animal dispersal). On an evergreen
+    // it is pure growth tax (0.2*fruiting in growth_rate) with no payoff -> zero it so evergreens grow vigorous.
+    let mut g = g;
+    if !edible {
+        g.fruiting = 0.0;
+    }
     commands.spawn((
         Food,
         Tree { edible },
