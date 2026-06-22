@@ -992,10 +992,11 @@ pub fn cliff_mesh() -> Mesh {
         let x = -1.0 + 2.0 * i as f32 / n as f32;
         let h = 0.8 + 0.55 * hash(i); // jagged crest height
         let zc = -0.08 + 0.2 * hash(i + 71); // crest leans back a bit, varied -> uneven overhang
-        let zf = -0.2 - 0.14 * hash(i + 19); // foot juts forward, varied -> ragged base
+        let zf = -0.14 - 0.1 * hash(i + 19); // foot juts forward, varied -> ragged base
         crest.push(Vec3::new(x, h, zc));
-        foot.push(Vec3::new(x, 0.0, zf));
-        back.push(Vec3::new(x, 0.15 + 0.1 * hash(i + 33), depth));
+        // foot + back dip well BELOW y0 -> a buried skirt so the base never floats off bumpy terrain
+        foot.push(Vec3::new(x, -0.6, zf));
+        back.push(Vec3::new(x, -0.3, depth));
     }
     let quad = |b: &mut MeshBuf, idx: &mut Vec<u32>, p0: Vec3, p1: Vec3, p2: Vec3, p3: Vec3, v: f32| {
         let nrm = (p1 - p0).cross(p3 - p0).normalize_or_zero();

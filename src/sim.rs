@@ -1389,7 +1389,7 @@ pub fn spawn_world_render(
             let sx = rng.range(7.0, 10.0); // length (mesh spans x in [-1,1] -> world ~2*sx)
             let sy = rng.range(5.0, 7.0); // height
             let sz = rng.range(5.5, 8.0); // depth back into highland
-            let mut tf = Transform::from_translation(base - up * (sy * 0.12)); // foot sits in the slope
+            let mut tf = Transform::from_translation(base - up * (sy * 0.3)); // bury the skirt so the base never floats
             tf.rotation = Quat::from_axis_angle(up, yaw) * base_rot;
             tf.scale = Vec3::new(sx, sy, sz);
             commands.spawn((Mesh3d(cliff_m.clone()), MeshMaterial3d(rock_mat.clone()), tf, bevy::light::NotShadowCaster));
