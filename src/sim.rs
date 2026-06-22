@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::components::{Alive, Brain, Creature, DietState, Energy, Ferment, Fitness, Food, Grass, Heading, Locomotion, Rot, Seed, Tree};
 use crate::genome::{forward, learn, master_expression, Genome, CONE_HALF, GLOBAL_INPUTS, NFOOD, NUTRIENTS, SIG_PER_SENSOR};
-use crate::plant::{PlantGenome, PlantState, P_REPRO, PLANT_CAP, PLANT_MIN};
+use crate::plant::{PlantGenome, PlantState, P_REPRO, PLANT_CAP, PLANT_MIN, WHOLE_PLANET_SEED_MULT};
 use crate::rng::Rng;
 
 // Tuning constants live in config.rs; re-exported so existing `sim::FOO` refs still resolve.
@@ -548,6 +548,19 @@ fn diverse_creature(mut g: Genome, i: usize, rng: &mut Rng) -> (Genome, Vec3) {
     }
 }
 
+// Spawn position for a LOADED (already-evolved) creature: scatter it planet-wide into a spot that MATCHES its
+// OWN genome (so a saved population repopulates the whole globe, not just the homeland), WITHOUT overwriting
+// any genes (unlike diverse_creature). Latitude from temp_pref (warm -> equator, cold -> poles); swimmers go
+// to shallow water; alpine builds onto highland.
+fn loaded_creature_pos(g: &Genome, rng: &mut Rng) -> Vec3 {
+    let lat = ((1.0 - g.temp_pref) * 1.3).clamp(0.0, 1.45); // warm pref -> low |lat|, cold pref -> high |lat|
+    if g.swim > 0.6 {
+        niche_water_pos(rng, lat, CREATURE_Y)
+    } else {
+        niche_pos(rng, g.alpine < 0.5, lat, CREATURE_Y) // alpine -> highland, else lowland
+    }
+}
+
 fn diet_state(_g: &Genome) -> DietState {
     // newborns start with reserves stocked to the satisfaction level, so they aren't instantly deficient
     DietState { reserves: [RESERVE_REQ; NUTRIENTS], g: 0.0, age: 0, fatigue: 0.0, starve: 0, toxic_load: 0.0 }
@@ -945,13 +958,21 @@ pub fn spawn_world_headless(mut commands: Commands, mut rng: ResMut<Rng>, mut ge
     };
     // loading a saved population into continuous mode skips the warm-up (the genomes are already
     // competent) -> drop straight into a living world. Desync energy + age so they don't act in lockstep.
-    let skip_warmup = gen.continuous && snap.as_ref().is_some_and(|s| !s.creatures.is_empty());
+    let loaded = snap.as_ref().is_some_and(|s| !s.creatures.is_empty());
+    let skip_warmup = gen.continuous && loaded;
     if skip_warmup {
         gen.generation = WARMUP_GENS;
     }
     for (i, g) in genomes.into_iter().enumerate() {
         // --diverse: niche-adapt each creature + place it in its region; else founding pop in the homeland.
-        let (g, p) = if gen.diverse { diverse_creature(g, i, &mut rng) } else { (g, homeland_pos(&mut rng, CREATURE_Y)) };
+        let (g, p) = if gen.diverse {
+            diverse_creature(g, i, &mut rng)
+        } else if loaded {
+            let p = loaded_creature_pos(&g, &mut rng); // a saved population repopulates the whole globe
+            (g, p)
+        } else {
+            (g, homeland_pos(&mut rng, CREATURE_Y)) // fresh founding: one homeland start, spreads over time
+        };
         let mut g = g;
         g.ensure_net_shape(); // migrate older saved nets to the current brain-input width
         let h = rng.range(-std::f32::consts::PI, std::f32::consts::PI);
@@ -985,7 +1006,7 @@ pub fn spawn_world_headless(mut commands: Commands, mut rng: ResMut<Rng>, mut ge
         // WHOLE planet (plants in every biome). A fresh founding run (no saved plants) keeps the homeland start
         // (life begins in one area + spreads). Trees already seed whole-planet (spawn_trees).
         let resuming = snap.as_ref().is_some_and(|s| !s.plants.is_empty());
-        let whole_planet = gen.diverse || resuming;
+        let whole_planet = gen.diverse || resuming || loaded; // a loaded population => seed plants planet-wide too
         let food_pos = |rng: &mut Rng| plant_spawn_pos(rng, !whole_planet, FOOD_Y); // land + shallow water (aquatic flora)
         match &snap {
             Some(s) if !s.plants.is_empty() => {
@@ -998,7 +1019,8 @@ pub fn spawn_world_headless(mut commands: Commands, mut rng: ResMut<Rng>, mut ge
                 }
             }
             _ => {
-                for _ in 0..FOOD {
+                let n_seed = if whole_planet { FOOD * WHOLE_PLANET_SEED_MULT } else { FOOD };
+                for _ in 0..n_seed {
                     let p = food_pos(&mut rng);
                     let pg = site_plant(&mut rng, lib.as_ref(), p.normalize_or_zero()); // tuned-library or biome archetype
                     spawn_plant(&mut commands, pg, rng.range(0.3, 1.4) * PLANT_START_MASS, p); // varied mass desyncs the food supply
@@ -1166,14 +1188,22 @@ pub fn spawn_world_render(
     };
     // loading a saved population into continuous mode skips warm-up (genomes already competent) ->
     // drop straight into a living world. Desync energy + age so they don't act in lockstep.
-    let skip_warmup = gen.continuous && snap.as_ref().is_some_and(|s| !s.creatures.is_empty());
+    let loaded = snap.as_ref().is_some_and(|s| !s.creatures.is_empty());
+    let skip_warmup = gen.continuous && loaded;
     if skip_warmup {
         gen.generation = WARMUP_GENS;
     }
     // --garden showcase: just a few creatures wandering the garden, not the whole population.
     let n_creatures = if gen.garden { 4 } else { usize::MAX };
     for (i, g) in genomes.into_iter().take(n_creatures).enumerate() {
-        let (g, p) = if gen.diverse { diverse_creature(g, i, &mut rng) } else { (g, homeland_pos(&mut rng, CREATURE_Y)) };
+        let (g, p) = if gen.diverse {
+            diverse_creature(g, i, &mut rng)
+        } else if loaded {
+            let p = loaded_creature_pos(&g, &mut rng); // a saved population repopulates the whole globe
+            (g, p)
+        } else {
+            (g, homeland_pos(&mut rng, CREATURE_Y)) // fresh founding: one homeland start, spreads over time
+        };
         let mut g = g;
         g.ensure_net_shape(); // migrate older saved nets to the current brain-input width
         let h = rng.range(-std::f32::consts::PI, std::f32::consts::PI);
@@ -1208,7 +1238,7 @@ pub fn spawn_world_render(
         // WHOLE planet (plants in every biome). A fresh founding run (no saved plants) keeps the homeland start
         // (life begins in one area + spreads). Trees already seed whole-planet (spawn_trees).
         let resuming = snap.as_ref().is_some_and(|s| !s.plants.is_empty());
-        let whole_planet = gen.diverse || resuming;
+        let whole_planet = gen.diverse || resuming || loaded; // a loaded population => seed plants planet-wide too
         let food_pos = |rng: &mut Rng| plant_spawn_pos(rng, !whole_planet, FOOD_Y); // land + shallow water (aquatic flora)
         match &snap {
             Some(s) if !s.plants.is_empty() => {
@@ -1221,7 +1251,8 @@ pub fn spawn_world_render(
                 }
             }
             _ => {
-                for _ in 0..FOOD {
+                let n_seed = if whole_planet { FOOD * WHOLE_PLANET_SEED_MULT } else { FOOD };
+                for _ in 0..n_seed {
                     let p = food_pos(&mut rng);
                     let pg = site_plant(&mut rng, lib.as_ref(), p.normalize_or_zero()); // tuned-library or biome archetype
                     spawn_plant(&mut commands, pg, rng.range(0.3, 1.4) * PLANT_START_MASS, p); // varied mass desyncs the food supply
@@ -1359,6 +1390,19 @@ pub fn plant_step(
             }
             if let Some(s) = stats.as_deref_mut() {
                 s.death("fire");
+            }
+            commands.entity(e).despawn();
+            if tree.is_none() {
+                plant_count = plant_count.saturating_sub(1);
+            }
+            continue;
+        }
+        // hard freeze: the polar ice core is frozen solid -> any plant or tree here dies outright (no
+        // forageable flora on the ice cap). Absolute temperature kill, independent of temp_pref, so even a
+        // cold-adapted species freezes here; the tundra/frost-edge band above FREEZE_TEMP keeps its cold flora.
+        if crate::sphere::base_temperature(pdir) < FREEZE_TEMP {
+            if let Some(s) = stats.as_deref_mut() {
+                s.death("frozen");
             }
             commands.entity(e).despawn();
             if tree.is_none() {
@@ -2030,6 +2074,18 @@ pub fn live_step(
             }
             // the jostle hurts: a crowd-tolerant (social) herder barely feels it, a loner gets drained
             energy.burn(COLLIDE_COST * overlap_sum * (1.0 - genome.social) * dt);
+        }
+
+        // drowning (hard kill): a NON-aquatic creature (swim below SWIM_DROWN_MIN) that ends up in genuinely
+        // deep OPEN ocean drowns outright. Shallow/coastal water stays crossable (the gradual
+        // WATER_PRESSURE_COST handles wading); only deep submersion past DROWN_DEPTH is lethal, so only real
+        // swimmers live at sea. Dead-by-water leaves no carrion (the corpse sinks to the abyss, unforageable).
+        if genome.swim < SWIM_DROWN_MIN {
+            let sub = ((crate::sphere::SEA_LEVEL - crate::sphere::elevation01(nd)) / crate::sphere::SEA_LEVEL).clamp(0.0, 1.0);
+            if sub > DROWN_DEPTH {
+                alive.0 = false;
+                continue;
+            }
         }
 
         // metabolism: basal + movement (convex in speed) + bite upkeep + rocky crossing + vision upkeep.

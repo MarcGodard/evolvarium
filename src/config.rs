@@ -96,6 +96,12 @@ pub const SWIM_LAND_COST: f32 = 5.0;   // energy/sec penalty at full swim on ful
 // below the surface (0 at the shallow coast .. 1 at the abyss). Mirror of SWIM_LAND_COST: swimmers are exempt
 // (built for it), so deep ocean is hostile to land creatures while shallow coastal water stays crossable.
 pub const WATER_PRESSURE_COST: f32 = 6.0; // energy/sec penalty at full depth for a full non-swimmer in water
+// Drowning (hard kill): a NON-aquatic creature (swim below this) caught in genuinely deep OPEN ocean drowns
+// instantly. The gradual WATER_PRESSURE_COST still bites in shallow/coastal water (crossable), but the open
+// sea is lethal to land animals -> only real swimmers (swim >= SWIM_DROWN_MIN) live there. DROWN_DEPTH keeps
+// the kill to true open water (deep submersion), so wading the shoreline edge is safe.
+pub const SWIM_DROWN_MIN: f32 = 0.5;   // min swim gene to survive open water; below it = drown
+pub const DROWN_DEPTH: f32 = 0.25;     // min submersion (0 coast .. 1 abyss) before the drown kill applies
 
 // --- eating / arms race / predation (see 13, M5) ---
 pub const BITE_K: f32 = 8.0; // eat/combat decisiveness = sigmoid(BITE_K*(bite - defense))
@@ -251,6 +257,11 @@ pub const SUCC_BUFFER: f32 = 0.9;        // succulence drought buffer: water sto
 pub const TEMP_FLOOR: f32 = 0.45;        // floor on a plant's thermal growth factor (off-niche grows slow, not zero)
 pub const TEMP_KILL: f32 = 0.01;         // per-tick death scale for climate-niche mismatch beyond tolerance
 pub const TEMP_TOL: f32 = 0.3;           // temp_pref mismatch under this is harmless
+// Hard freeze (instant kill): below this absolute temperature the GROUND is frozen solid -> no plant or tree
+// survives (the polar ice core is barren). Set just inside the solid-ice core (below the temp<0.25 fuel cutoff)
+// so the tundra/frost-edge band (0.25..0.34) keeps its cold-adapted flora (alpine cushion, moss); only the
+// genuinely frozen cap kills outright. Independent of temp_pref -- even a cold-lover freezes on the ice.
+pub const FREEZE_TEMP: f32 = 0.22;       // base_temperature below this = frozen -> plants/trees die instantly
 // Trees get a climate niche too, but SOFTER than ground plants (long-lived, deep roots): wider harmless
 // band + a gentler per-tick kill, so a tree dies back only well off its thermal niche (frozen pole / desert
 // heat), not at the first mismatch. Growth still tapers off-niche via the shared TEMP_FLOOR factor.
