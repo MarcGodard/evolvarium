@@ -420,6 +420,9 @@ pub const EYE_COST: f32 = 0.3;        // energy/sec basal at full eyes (eyes are
 // head: a bigger head houses the brain more efficiently (cuts per-neuron BRAIN_COST) but adds basal mass.
 pub const HEAD_BRAIN_RELIEF: f32 = 0.5; // fraction of BRAIN_COST removed at full head (roomy braincase)
 pub const HEAD_BASAL: f32 = 0.4;        // energy/sec basal at full head (carrying a big head)
+// magnetoreception: a magnetite organ + neural processing for the magnetic-latitude + compass brain inputs.
+// Scaled by mag_expression (the `magneto` gene switch), so the sense is only worth keeping where it pays off.
+pub const MAG_COST: f32 = 0.25;         // energy/sec basal at full magneto expression (no free lunch)
 
 // --- M4 brain inputs + need-for-shade (Phase 3) ---
 // threat sense: a nearby creature with enough COMBAT edge over you registers as a predator -> the brain can

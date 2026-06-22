@@ -1998,6 +1998,9 @@ pub fn live_step(
             (0.0, 0.0)
         };
 
+        // magnetoreception (gated by the `magneto` gene): expression scales both inputs + the upkeep cost,
+        // so a switched-off sense feeds ~0 (brain ignores it) for ~0 cost.
+        let mexpr = crate::genome::mag_expression(genome.magneto);
         // build inputs from the EVOLVABLE sensors: each is a directional eye that reports nearest food
         // in its cone (+ what type). The GA decides how many sensors + where they point.
         let mut input: Vec<f32> = Vec::with_capacity(n_s * SIG_PER_SENSOR + GLOBAL_INPUTS);
@@ -2023,6 +2026,9 @@ pub fn live_step(
         input.push(threat_dist); // nearest bigger-predator inv-distance -> flee
         input.push(threat_bear); // bearing to that predator (-1..1) -> which way to flee
         input.push(wet_here); // submersion / in-water
+        // magneto globals (last, matching ensure_net_shape padding order). ~0 when the sense is off:
+        input.push(crate::sphere::mag_latitude(pdir) * mexpr); // magnetic latitude "map" (-1 .. +1)
+        input.push(wrap_angle(crate::sphere::mag_north_bearing(pdir) - head.0) / std::f32::consts::PI * mexpr); // compass: rel. bearing to magnetic north
 
         // think (per-life learned brain, dynamic topology matching this genome's sensor count)
         let (h, out) = forward(&brain.net, &input);
@@ -2145,6 +2151,7 @@ pub fn live_step(
             + VENOM_UPKEEP * genome.venom // making toxins costs
             + EYE_COST * genome.eyes // eyes are metabolically pricey
             + HEAD_BASAL * genome.head // carrying a big head
+            + MAG_COST * mexpr // magnetoreception organ + neural processing (no free lunch)
             + LONGEVITY_COST * (lifespan_mult - 1.0).max(0.0) // a long-lived body costs more to maintain
             + SWIM_LAND_COST * genome.swim * (1.0 - wet_here) // fins are a liability on dry land
             + WATER_PRESSURE_COST * (1.0 - genome.swim) * (-h1 / crate::sphere::SEA_FLOOR_MAX).clamp(0.0, 1.0) // non-swimmers struggle in deep water (depth pressure)

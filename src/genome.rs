@@ -19,9 +19,10 @@ pub const SIG_PER_SENSOR: usize = 2; // each sensor reports [inv-dist, food type
 // global (non-sensor) brain inputs, appended after the per-sensor signals:
 // [energy, daylight, fatigue, bias, toxic_load, shade, threat_dist, threat_bearing, wet]
 // energy+light+fatigue -> diurnal/nocturnal rest; toxic_load -> avoid poison; shade -> seek canopy in heat;
-// threat_dist/bearing -> flee a bigger predator; wet -> sense being in water. (M4 widened 4 -> 9; old saved
-// nets are zero-padded for the 5 new columns on load, see Genome::ensure_net_shape.)
-pub const GLOBAL_INPUTS: usize = 9;
+// threat_dist/bearing -> flee a bigger predator; wet -> sense being in water; mag_lat + compass -> magnetic
+// navigation (gated by the `magneto` gene). (M4 widened 4 -> 9; magneto added 2 -> 11; old saved nets are
+// zero-padded for the new columns on load, see Genome::ensure_net_shape.)
+pub const GLOBAL_INPUTS: usize = 11;
 pub const CONE_HALF: f32 = 0.7; // sensor field-of-view half-angle (rad)
 const RANGE_MIN: f32 = 4.0;
 const RANGE_MAX: f32 = 48.0; // long-range vision is possible (big world); its energy cost is the trade-off (see sim SENSE_COST)
@@ -100,6 +101,10 @@ pub struct Genome {
     pub skin_sat: f32,       // 0..1 body saturation (render). Default 0.5.
     #[serde(default = "zero")]
     pub pattern: f32,        // 0..1 markings intensity: stripes/spots (render). Default 0.
+    #[serde(default = "zero")]
+    pub magneto: f32,        // 0..1 magnetoreception switch: above a soft knee, feeds 2 brain inputs (magnetic
+                             // latitude "map" + compass heading) for navigation; costs MAG_COST upkeep
+                             // (magnetite organ + neural processing). Default 0 = sense off (old saves unchanged).
 }
 
 // serde defaults for traits absent in old saves
@@ -149,6 +154,14 @@ pub fn master_expression(uptake: &[f32; NUTRIENTS], reserves: &[f32; NUTRIENTS],
 
 pub fn n_inputs(n_sensors: usize) -> usize {
     n_sensors * SIG_PER_SENSOR + GLOBAL_INPUTS
+}
+
+/// Magnetoreception expression from the `magneto` gene: a soft switch (smoothstep over a 0.2..0.6 knee).
+/// Below the knee the sense is effectively off (0), above it full (1). Scales the 2 magnetic brain inputs
+/// AND the MAG_COST upkeep, so a half-built organ gives little signal for partial cost (selection sharpens it).
+pub fn mag_expression(magneto: f32) -> f32 {
+    let t = ((magneto - 0.2) / 0.4).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 // Pad every ih row to `want_in` input columns (excl. the trailing +1 bias), inserting `fill` for each new
@@ -255,6 +268,7 @@ impl Genome {
             skin_hue: rng.f32(),      // span the color wheel
             skin_sat: rng.range(0.3, 0.9),
             pattern: rng.f32() * 0.6, // span plain..marked
+            magneto: rng.f32() * 0.3, // mostly sense-off founders, a few magnetoreceptive -> selection can switch it on
         }
     }
 
@@ -321,6 +335,7 @@ impl Genome {
         c.skin_hue = pick(rng, a.skin_hue, b.skin_hue);
         c.skin_sat = pick(rng, a.skin_sat, b.skin_sat);
         c.pattern = pick(rng, a.pattern, b.pattern);
+        c.magneto = pick(rng, a.magneto, b.magneto);
         for i in 0..NUTRIENTS {
             c.uptake[i] = pick(rng, a.uptake[i], b.uptake[i]);
         }
@@ -433,6 +448,9 @@ impl Genome {
         }
         if rng.f32() < rate {
             self.pattern = (self.pattern + rng.normal() * 0.12).clamp(0.0, 1.0);
+        }
+        if rng.f32() < rate {
+            self.magneto = (self.magneto + rng.normal() * 0.12).clamp(0.0, 1.0);
         }
         // structural: add / remove a sensor (and the matching input-weight columns)
         if rng.f32() < 0.06 && self.sensors.len() < MAX_SENSORS {
@@ -605,11 +623,12 @@ mod tests {
 
     #[test]
     fn ensure_net_shape_pads_old_narrow_nets() {
-        // simulate an OLD save (pre-M4: 5 fewer global inputs) by stripping those columns, then migrate.
+        // simulate an OLD save (pre-M4 + pre-magneto: 7 fewer global inputs) by stripping those columns,
+        // then migrate. (5 M4 globals: toxic_load/shade/threat_dist/threat_bear/wet; 2 magneto: lat/compass.)
         let mut rng = Rng::seed(7);
         let mut g = Genome::random(&mut rng);
         let want = n_inputs(g.n_sensors());
-        let strip = 5; // the 5 new M4 globals
+        let strip = 7; // 5 M4 globals + 2 magneto globals
         for row in g.net.ih.iter_mut().chain(g.plast.ih.iter_mut()) {
             let at = row.len() - 1 - strip; // before the trailing bias
             row.drain(at..at + strip);
