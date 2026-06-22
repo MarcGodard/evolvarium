@@ -107,6 +107,10 @@ needs ZERO harness edits (just the usual `#[serde(default)]` + a `mutate()` drif
 - `tools/tune-plants.workflow.js` — one tuner agent per niche (core land, aquatic, trees, mixed pairs),
   synthesize merges winners into the library.
 - `tools/coevolve-niche.workflow.js` — within-niche competition (contrasting cohorts + grazers per biome).
+- `tools/audit-plants.workflow.js` — QA: fan out one agent per behavioral RULE (climate niches, drown/
+  desiccate, succulence, grazing arms race, growth trade-offs, dispersal, tree size/land-only/sterility,
+  no-zombies); each runs a controlled A/B scenario + judges PASS/FAIL/UNCLEAR. Run it to verify the flora
+  obeys the design rules after sim changes.
 - Whole-planet co-evolution: just run `--headless --gens=N --load=evolved-continuous.json --save=run.json`
   (the living sim IS co-evolution), then `--merge-snapshot=run.json`.
 
