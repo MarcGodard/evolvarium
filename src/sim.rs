@@ -1990,7 +1990,12 @@ pub fn live_step(
         }
         loco.path += np.distance(pos); // accumulate 3D distance walked (diagnostic)
         ct.translation = np;
-        ct.rotation = Quat::from_rotation_arc(Vec3::Y, nd); // stand upright on the sphere (long axis = surface normal)
+        // orient the whole body: local +Y = surface normal (stand upright), local +Z = travel direction
+        // (head/eyes sit at +Z) so the creature FACES where it walks instead of yawing arbitrarily.
+        let up = nd; // outward surface normal (unit)
+        let fwd = crate::sphere::heading_tangent(nd, nh); // unit tangent along the heading
+        let right = up.cross(fwd).normalize_or_zero();
+        ct.rotation = Quat::from_mat3(&Mat3::from_cols(right, up, fwd));
 
         // metabolism: basal + movement (convex in speed) + bite upkeep + rocky crossing + vision upkeep.
         // Longer/more sensors see farther but cost energy (SENSE_COST x total range) -> range is a trade-off.
