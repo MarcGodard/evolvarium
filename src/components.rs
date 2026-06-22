@@ -1,4 +1,4 @@
-// ECS components for the M1 foraging sim.
+// ECS components, M1 foraging sim.
 use bevy::prelude::*;
 
 #[derive(Component)]
@@ -7,48 +7,55 @@ pub struct Creature;
 #[derive(Component)]
 pub struct Food;
 
-// Tree marker: a long-lived plant. Two kinds: edible=true is a tall fruit tree only TALL creatures
-// (sensors >= TREE_REACH) can reach + eat; edible=false is an evergreen that NOTHING can eat (pure
-// structure / refuge). Moisture-immune; grows large; reproduces slowly into its own kind. (BACKLOG trees)
+// Tree marker, long-lived plant. edible=true: tall fruit tree, only TALL creatures (sensors >= TREE_REACH)
+// reach + eat. edible=false: evergreen, NOTHING eats (pure structure/refuge). Moisture-immune, grows large,
+// reproduces slow into own kind. See BACKLOG trees.
 #[derive(Component, Clone, Copy)]
 pub struct Tree {
     pub edible: bool,
 }
 
-// Grass marker: a lesser ground plant. Shares PlantGenome/PlantState/Food (so the eat path treats it
-// like any plant) but lives on its own cap + lifecycle step (grass_step). Lesser = one nutrient, low
-// energy, ~0 defense, ~0 height, high regrow (turf survives grazing). Ubiquitous on plant-capable soil.
+// Grass marker, lesser ground plant. Shares PlantGenome/PlantState/Food (eat path treats like any plant)
+// but own cap + lifecycle (grass_step). Lesser = one nutrient, low energy, ~0 defense, ~0 height, high
+// regrow (turf survives grazing). Ubiquitous on plant-capable soil.
 #[derive(Component)]
 pub struct Grass;
 
-// Carrion marker + rot clock. A dead creature drops carrion: fresh = rich meat (no defense), but as
-// `age` climbs its nutrition fades and toxin rises -> rotten meat poisons the eater (BACKLOG P3).
-// Despawns once fully decomposed. Distinguishes carrion from living plants (which carry no Rot).
+// Seaweed/kelp marker, OCEAN analog of grass. Same PlantGenome/PlantState, own cap + lifecycle
+// (seaweed_step) + own visuals (add_seaweed_visuals: tall swaying fronds). Submerged (anchored to seafloor,
+// above abyssal floor), feeds swimmers via position-based ocean graze. Reliable balance-isolated sea food
+// carpet, never goes through fragile plant_step lifecycle.
+#[derive(Component)]
+pub struct Seaweed;
+
+// Carrion marker + rot clock. Dead creature drops carrion: fresh = rich meat (no defense). As `age` climbs,
+// nutrition fades + toxin rises -> rotten meat poisons eater (BACKLOG P3). Despawns once fully decomposed.
+// Marks carrion vs living plants (no Rot).
 #[derive(Component)]
 pub struct Rot {
     pub age: u32,
 }
 
 // Plant-matter food that FERMENTS instead of rotting into meat: fallen fruit + dead-plant detritus.
-// Shares the Rot clock. Fresh -> sugar; mid-age fermentation window -> FAST energy (ethanol) + toxicity;
-// over-rotted -> spoiled/gone. `toxic` scales the toxicity (fruit low, detritus high). Its presence is
-// how the eat dispatch tells plant matter (-> fast/sugar) from animal carrion (-> fat).
+// Shares Rot clock. Fresh -> sugar; mid-age fermentation window -> FAST energy (ethanol) + toxicity;
+// over-rotted -> spoiled/gone. `toxic` scales toxicity (fruit low, detritus high). Presence tells eat
+// dispatch: plant matter (-> fast/sugar) vs animal carrion (-> fat).
 #[derive(Component)]
 pub struct Ferment {
     pub toxic: f32,
 }
 
-// The viable seed a fallen fruit carries: the PARENT'S FULL genome. The fruit's own Food genome is height/
-// defense-zeroed (so it renders flat on the ground + anyone can eat it), so the real genes ride here. When a
-// creature eats a RIPE fruit (past RIPEN_FRAC), this genome is planted nearby (animal dispersal). Eaten unripe
-// -> the seed is not yet viable, so there is no Seed to plant (no reproduction).
+// Viable seed a fallen fruit carries: PARENT'S FULL genome. Fruit's own Food genome is height/defense-zeroed
+// (renders flat on ground, anyone eats), so real genes ride here. Creature eats RIPE fruit (past RIPEN_FRAC)
+// -> this genome planted nearby (animal dispersal). Eaten unripe -> seed not viable, no Seed to plant (no
+// reproduction).
 #[derive(Component)]
 pub struct Seed(pub crate::plant::PlantGenome);
 
-// Three energy currencies (metabolic stores), each a distinct burn/storage trade-off (no free lunch):
-//   fast  = fermented-fruit / ethanol: burned FIRST + leaks even at rest, tiny cap -> can't bank, quick power.
+// Three energy stores, each a burn/storage trade-off (no free lunch):
+//   fast  = fermented-fruit/ethanol: burned FIRST + leaks at rest, tiny cap -> can't bank, quick power.
 //   sugar = staple (plants deliver ONLY sugar): medium burn, medium cap.
-//   fat   = the bank: burned LAST + mobilizes SLOW (low power output), big cap (easy to store) but adds upkeep.
+//   fat   = the bank: burned LAST + mobilizes SLOW (low power output), big cap, adds upkeep.
 // Burn order fast->sugar->fat. Death when total() <= 0. Refilled by eating (routed by food source).
 use crate::config::{FAT_POWER, STORE_LOSS};
 #[derive(Component)]
@@ -58,8 +65,8 @@ pub struct Energy {
     pub fat: f32,
 }
 
-// Starting split of a total energy budget across the three stores (sums to 1.0). Lean-ish: most as
-// sugar (staple), a small quick-burn buffer, a modest fat reserve.
+// Start split of total energy across stores (sums to 1.0). Lean: most sugar (staple), small fast buffer,
+// modest fat reserve.
 const SPLIT_FAST: f32 = 0.13;
 const SPLIT_SUGAR: f32 = 0.47;
 const SPLIT_FAT: f32 = 0.40;
@@ -69,12 +76,12 @@ impl Energy {
         self.fast + self.sugar + self.fat
     }
 
-    // Build stores from a single total budget (spawn/birth/generation-reset use this).
+    // Build stores from total budget (spawn/birth/gen-reset).
     pub fn from_total(t: f32) -> Self {
         Energy { fast: t * SPLIT_FAST, sugar: t * SPLIT_SUGAR, fat: t * SPLIT_FAT }
     }
 
-    // Drain `cost` across stores fast->sugar->fat. Returns leftover shortfall (cost not covered -> starving).
+    // Drain `cost` fast->sugar->fat. Returns shortfall (uncovered -> starving).
     pub fn burn(&mut self, cost: f32) -> f32 {
         let mut c = cost.max(0.0);
         let f = self.fast.min(c);
@@ -89,13 +96,12 @@ impl Energy {
         c
     }
 
-    // Instantly-available power: fat mobilizes SLOWLY (FAT_POWER<1) so a fat-only creature can't sprint.
-    // Used to cap thrust -> "slow burning" teeth.
+    // Instant power: fat mobilizes SLOW (FAT_POWER<1), fat-only creature can't sprint. Caps thrust.
     pub fn power(&self) -> f32 {
         self.fast + self.sugar + FAT_POWER * self.fat
     }
 
-    // Add to fast, capped. Returns wasted excess (no room).
+    // Add to fast, capped. Returns wasted excess.
     pub fn add_fast(&mut self, amt: f32, cap: f32) -> f32 {
         let room = (cap - self.fast).max(0.0);
         let take = amt.min(room);
@@ -103,7 +109,7 @@ impl Energy {
         amt - take
     }
 
-    // Add to fat, capped. Returns wasted excess (no room).
+    // Add to fat, capped. Returns wasted excess.
     pub fn add_fat(&mut self, amt: f32, cap: f32) -> f32 {
         let room = (cap - self.fat).max(0.0);
         let take = amt.min(room);
@@ -111,8 +117,8 @@ impl Energy {
         amt - take
     }
 
-    // Add to sugar; overflow above sugar_cap converts to fat at STORE_LOSS (storing is lossy, no free lunch).
-    // Returns wasted excess in intake-equivalent units (-> growth-load via OVEREAT_G).
+    // Add to sugar; overflow above sugar_cap converts to fat at STORE_LOSS (storing lossy). Returns wasted
+    // excess in intake-equivalent units (-> growth-load via OVEREAT_G).
     pub fn add_sugar(&mut self, amt: f32, sugar_cap: f32, fat_cap: f32) -> f32 {
         let room = (sugar_cap - self.sugar).max(0.0);
         let take = amt.min(room);
@@ -127,47 +133,47 @@ impl Energy {
     }
 }
 
-// Food eaten this generation = selection fitness.
+// Food eaten this gen = selection fitness.
 #[derive(Component)]
 pub struct Fitness(pub f32);
 
-// Facing angle (radians) in the x-z plane. NN turn output rotates it.
+// Facing angle (radians), x-z plane. NN turn output rotates it.
 #[derive(Component)]
 pub struct Heading(pub f32);
 
-// Starved creatures stop acting but keep their fitness until generation end.
+// Starved creatures stop acting, keep fitness until gen end.
 #[derive(Component)]
 pub struct Alive(pub bool);
 
-// Per-life working brain: weights start as a copy of the genome's w0, then learn during life
-// (reward-gated Hebbian). Discarded at death; NOT inherited. The GA selects genomes that
-// LEARN well, not the learned weights themselves (Baldwin effect, see 04).
+// Per-life working brain: weights start as copy of genome w0, learn during life (reward-gated Hebbian).
+// Discarded at death, NOT inherited. GA selects genomes that LEARN well, not learned weights (Baldwin
+// effect, see 04).
 use crate::genome::Net;
 #[derive(Component)]
 pub struct Brain {
     pub net: Net, // working copy of genome weights, tuned by lifetime learning
-    pub prev_dist: f32, // distance to nearest food last tick, for approach-reward shaping
-    // combat intents stashed each tick in live_step (out[2]/out[3]) for predation_step to read same-tick.
-    pub attack: f32,  // NN attack intent 0..1: hunts when above ATTACK_INTENT_THRESH
+    pub prev_dist: f32, // dist to nearest food last tick, approach-reward shaping
+    // combat intents stashed each tick in live_step (out[2]/out[3]), predation_step reads same-tick.
+    pub attack: f32,  // NN attack intent 0..1: hunts above ATTACK_INTENT_THRESH
     pub defend: f32,  // NN brace intent 0..1: raises defense, costs mobility
     // pending combat reward set by predation_step (kill/defend/whiff), consumed + cleared next live_step
     // learn() call. 1-tick delay, same pattern as prev_dist.
     pub fight_reward: f32,
 }
 
-// Per-life locomotion diagnostic: where the creature was born + total path walked. Lets us measure
-// roaming vs circling: net displacement / path ratio ~1 = straight rover, ~0 = spinning in place.
+// Per-life locomotion diagnostic: birth pos + total path walked. Measures roaming vs circling: net
+// displacement/path ratio ~1 = straight rover, ~0 = spinning in place.
 #[derive(Component)]
 pub struct Locomotion {
     pub start: Vec3,
     pub path: f32,
 }
 
-// Per-life diet state. reserves[i] = current pool of nutrient i (topped by eating x uptake, depleted each
-// tick by use). The master expression gene (genome::master_expression) reads reserves vs the uptake genes'
-// demand -> gates how much energy a creature extracts from food. Low reserves on a demanded nutrient =
-// deficiency -> growth-load (soft-gradient disease). g = accumulated growth-signaling load (mismatch +
-// deficiency + toxin -> disease). age in ticks (aging hazard). fatigue = exertion debt 0..1 (rest instinct).
+// Per-life diet state. reserves[i] = pool of nutrient i (topped by eating x uptake, depleted each tick).
+// master expression gene (genome::master_expression) reads reserves vs uptake-gene demand -> gates energy
+// extracted from food. Low reserves on demanded nutrient = deficiency -> growth-load (soft-gradient
+// disease). g = accumulated growth-signaling load (mismatch + deficiency + toxin -> disease). age in ticks
+// (aging hazard). fatigue = exertion debt 0..1 (rest instinct).
 use crate::genome::NUTRIENTS;
 #[derive(Component)]
 pub struct DietState {
@@ -175,15 +181,15 @@ pub struct DietState {
     pub g: f32,
     pub age: u32,
     pub fatigue: f32,
-    // consecutive ticks pinned below the starvation floor. A creature that can't pay its metabolism clamps
-    // its stores to 0 (burn shortfall discarded) and a grass trickle can lift it a hair above 0 each tick,
-    // dodging the <=0 death check forever (a "grass zombie"). This counter kills a chronically near-empty
-    // creature after a grace period, while a forager that briefly dips to 0 between meals recovers + resets.
+    // consecutive ticks pinned below starvation floor. Creature that can't pay metabolism clamps stores to 0
+    // (burn shortfall discarded); grass trickle lifts a hair above 0 each tick, dodging <=0 death check
+    // forever ("grass zombie"). Counter kills chronically near-empty creature after grace period; forager
+    // that briefly dips to 0 between meals recovers + resets.
     pub starve: u16,
     // accumulated TOXIC LOAD (M4): ingested toxins (toxic plants, rotten meat, fermented spoilage, venomous
-    // prey) and metabolic ammonia from protein-without-carbs (rabbit starvation) build up here instead of an
-    // instant energy hit. Drains energy + drives disease + a death hazard while high; cleared slowly each
-    // tick (faster with the detox gene). Lets poisons accumulate + linger like real toxic load.
+    // prey) + metabolic ammonia from protein-without-carbs (rabbit starvation) build here, not instant energy
+    // hit. Drains energy + drives disease + death hazard while high; cleared slow each tick (faster w/ detox
+    // gene). Poisons accumulate + linger like real toxic load.
     pub toxic_load: f32,
 }
 
@@ -201,7 +207,7 @@ mod tests {
         assert!((e.fast - 0.0).abs() < 1e-6);
         assert!((e.sugar - 1.0).abs() < 1e-6);
         assert!((e.fat - 5.0).abs() < 1e-6);
-        // burn 10 -> drains the rest (1 sugar + 5 fat = 6), shortfall 4
+        // burn 10 -> drains rest (1 sugar + 5 fat = 6), shortfall 4
         let short2 = e.burn(10.0);
         assert!((short2 - 4.0).abs() < 1e-6);
         assert_eq!(e.total(), 0.0);

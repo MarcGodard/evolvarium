@@ -1,11 +1,10 @@
-// Render-only visualization: make evolved variability visible.
-//   - creature COLOR = dominant diet specialization (hue) + rigidity (saturation: specialist=vivid)
-//   - creature SIZE  = sensor count (more eyes = bigger/more complex body)
-//   - press G        = draw each creature's sensor rays (the evolved eye layout)
-// All cosmetic; never touches sim state.
+// Render-only viz: make evolved variability visible. NEVER touches sim state.
+//   creature COLOR = dominant diet (hue) + rigidity (sat: specialist=vivid)
+//   creature SIZE  = sensor count (more eyes -> bigger body)
+//   G = draw sensor rays (evolved eye layout)
 use bevy::prelude::*;
 
-use crate::components::{Alive, Creature, DietState, Energy, Fitness, Food, Grass, Heading, Rot, Seed, Tree};
+use crate::components::{Alive, Creature, DietState, Energy, Fitness, Food, Grass, Heading, Rot, Seaweed, Seed, Tree};
 use crate::genome::{master_expression, Genome, NUTRIENTS};
 use crate::plant::{flower_color, form, plant_color, PlantGenome, PlantState};
 use crate::sim::{grid_cell_surface, Fire, GenState, GroundWater, EYE_MIN, EYE_SPAN, LIMB_MIN, LIMB_SPAN, ROT_GONE};
@@ -13,55 +12,55 @@ use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
-// Visual time-of-day offset (ticks) added to the sun ONLY for lighting + the sun/moon sky. Sim daylight
-// (creature rest, plant growth) still reads raw tick. Lets walk mode snap to local noon + scrub the sun
-// for nice low-angle shadows without fast-forwarding the sim. 0 = sky matches sim time (orbit default).
+// Visual time-of-day offset (ticks) added to sun ONLY for lighting + sun/moon sky. Sim daylight
+// (creature rest, plant growth) still reads raw tick. Lets walk snap to local noon + scrub sun for
+// low-angle shadows without fast-forwarding sim. 0 = sky matches sim time (orbit default).
 #[derive(Resource, Default)]
 pub struct SunOffset(pub i64);
 
-// Walk-mode shadow toggle (O). Default OFF so the sunlit world is always visible; the directional shadow
-// range can black out the ground receiver, so shadows are opt-in. camera::update_shadow_mode reads this.
+// Walk shadow toggle (O). Directional shadow range can black out ground receiver -> shadows opt-in.
+// camera::update_shadow_mode reads this.
 #[derive(Resource, Default)]
 pub struct ShowShadows(pub bool);
 
-// True while the walk eye is submerged below the sea surface. Drives the blue tint overlay + murky sky.
+// True while walk eye submerged below sea surface. Drives blue tint overlay + murky sky.
 #[derive(Resource, Default)]
 pub struct Underwater(pub bool);
 
-// The ocean shell entity (animate_ocean breathes a slow swell on it).
+// Ocean shell entity. animate_ocean breathes slow swell on it.
 #[derive(Component)]
 pub struct Ocean;
 
-// The planet globe entity. It casts a shadow in BOTH camera modes (camera::update_planet_caster), so the
-// planet shadows its own night side (no sun "through" the planet) in orbit AND, in walk, the terrain just
-// past the local horizon falls into the planet's shadow at dawn/dusk. The old walk self-shadow acne is held
-// off by a higher per-mode shadow_normal_bias (camera::update_shadow_mode).
+// Planet globe entity. Casts shadow in BOTH camera modes (camera::update_planet_caster) -> planet
+// shadows own night side (no sun through planet) in orbit, and in walk terrain past local horizon
+// falls into planet shadow at dawn/dusk. Walk self-shadow acne held off by per-mode shadow_normal_bias
+// (camera::update_shadow_mode).
 #[derive(Component)]
 pub struct Planet;
 
-// Full-screen translucent blue node shown only when the eye is underwater -> tints the whole frame blue.
+// Full-screen translucent blue node, shown only when eye underwater -> tints whole frame blue.
 #[derive(Component)]
 struct UnderwaterTint;
 
-// Markers for the celestial bodies (animated by day_night_lighting).
+// Celestial body markers. Animated by day_night_lighting.
 #[derive(Component)]
 pub struct SunLight;
 #[derive(Component)]
 pub struct Moon;
 #[derive(Component)]
-pub struct SunDisc; // the visible glowing sun (follows the light direction)
-// auroral magnetic latitude (~66 deg): the curtains sit at this |mag latitude|. Shared by spawn + anim.
+pub struct SunDisc; // visible glowing sun (follows light direction)
+// Auroral magnetic latitude (radians, ~66 deg): curtains sit at this |mag latitude|. Shared spawn + anim.
 pub const AURORA_LAT: f32 = 1.15;
-// aurora base altitude above the surface (world units; PLANET_R is 80). Curtains rise CURTAIN_H tall from
-// here, so the tops reach high in the sky like a real aurora (which spans ~100..300 km).
+// Aurora base altitude above surface (world units; PLANET_R=80). Curtains rise CURTAIN_H tall from here
+// -> tops reach high like real aurora (~100..300 km).
 pub const AURORA_LIFT: f32 = 4.0;
-// One dancing curtain segment of the auroral oval. Many per pole, each with its own random phase/drift/hue so
-// the band ripples + glides + flickers instead of glowing as one uniform ring. Animated by update_aurora_curtains.
+// One dancing curtain segment of auroral oval. Many per pole, each own random phase/drift/hue -> band
+// ripples + glides + flickers, not one uniform ring. Animated by update_aurora_curtains.
 #[derive(Component)]
 pub struct AuroraCurtain {
     pub pole: Vec3,  // magnetic pole this curtain rings
-    pub ang: f32,    // base angle around the oval
-    pub drift: f32,  // slow sideways glide rate (random sign/speed) -> curtains travel along the band
+    pub ang: f32,    // base angle around oval
+    pub drift: f32,  // sideways glide rate (random sign/speed) -> curtains travel along band
     pub phase: f32,  // flicker phase offset
     pub width: f32,  // tangential width (random per curtain -> uneven ray structure)
     pub freq: f32,   // flicker frequency
@@ -76,7 +75,7 @@ impl Plugin for VizPlugin {
             .init_resource::<ShowLegend>()
             .init_resource::<SunOffset>()
             .init_resource::<Underwater>()
-            .insert_resource(ShowShadows(true)) // walk shadows on by default (O toggles)
+            .insert_resource(ShowShadows(true)) // shadows on by default (O toggles)
             .add_systems(Startup, (log_viz_help, spawn_stats_ui, spawn_world_stats_ui, spawn_legend_ui, spawn_daycycle_ui, spawn_underwater_tint, spawn_clouds, set_initial_speed))
             .add_systems(
                 Update,
@@ -85,9 +84,7 @@ impl Plugin for VizPlugin {
                     add_creature_visuals,
                     toggle_sensors,
                     draw_sensors,
-                    add_plant_visuals,
-                    size_plants,
-                    add_grass_visuals,
+                    (add_plant_visuals, size_plants, add_grass_visuals, add_seaweed_visuals, size_creatures),
                     (day_night_lighting, time_of_day, toggle_shadows, walk_ambient, update_daycycle, track_underwater, update_sky, toggle_underwater_tint, animate_ocean, update_globe_climate, update_aurora_curtains),
                     rain_visuals,
                     fire_visuals,
@@ -106,24 +103,24 @@ impl Plugin for VizPlugin {
     }
 }
 
-// Per-form plant mesh library (inserted by spawn_world_render): one silhouette per plant::form so the
-// flora reads as a real botanical mix (ferns, reeds, cacti, lily pads, kelp, ...) instead of identical
-// balls. `forms` is indexed by the genome's `form` byte; flower/berry/cap are shared embellishment meshes.
+// Per-form plant mesh library (inserted by spawn_world_render): one silhouette per plant::form ->
+// flora reads as botanical mix (ferns, reeds, cacti, lily pads, kelp...) not identical balls.
+// `forms` indexed by genome `form` byte; flower/berry/cap are shared embellishment meshes.
 #[derive(Resource)]
 pub struct PlantForms {
     pub forms: Vec<Handle<Mesh>>, // indexed by plant::form::*
-    pub flower: Handle<Mesh>,     // bloom blob (flowering plants)
-    pub berry: Handle<Mesh>,      // fruit blob (fruiting bushes)
+    pub flower: Handle<Mesh>,     // bloom blob
+    pub berry: Handle<Mesh>,      // fruit blob
     pub cap: Handle<Mesh>,        // mushroom cap
 }
 
-// Shared creature capsule mesh (inserted by spawn_world_render) so add_creature_visuals can dress
-// creatures born mid-sim (spawn_creature adds no mesh) -> newborns + B-seeded creatures become visible.
+// Shared creature capsule mesh (inserted by spawn_world_render). add_creature_visuals dresses creatures
+// born mid-sim (spawn_creature adds no mesh) -> newborns + B-seeded creatures become visible.
 #[derive(Resource)]
 pub struct CreatureMesh(pub Handle<Mesh>);
 
-// Genetic body-part meshes (M4): each creature gets a head + eyes + legs as child entities so head size,
-// eye count, and leg count are visible. Base sizes are ~unit; add_creature_visuals scales per genome.
+// Genetic body-part meshes (M4): head + eyes + legs as child entities -> head size, eye count, leg
+// count visible. Base sizes ~unit; add_creature_visuals scales per genome.
 #[derive(Resource)]
 pub struct CreatureParts {
     pub head: Handle<Mesh>,
@@ -131,26 +128,40 @@ pub struct CreatureParts {
     pub leg: Handle<Mesh>,
 }
 
-// Skin color + body-plan scale from a genome (M4). Shared by add_creature_visuals + restyle_creatures so
-// newborns look right immediately. Skin color comes from the skin_hue/skin_sat genes; venom pushes toward an
-// aposematic orange-red warning + vivid saturation; a pelt (fur) mutes + lightens; armor darkens; swimmers
-// shift cyan + take a fish body plan. Body scale = size x height (+ armor bulk), narrower/longer for swimmers.
+// Skin color + body-plan scale from genome (M4). Shared by add_creature_visuals + restyle_creatures ->
+// newborns look right immediately. Color from skin_hue/skin_sat genes; venom -> aposematic orange-red
+// warning + vivid sat; pelt (fur) mutes + lightens; armor darkens; swimmers shift cyan + fish body plan.
+// Body scale = size x height (+ armor bulk), narrower/longer for swimmers.
 fn creature_look(g: &Genome) -> (Color, Vec3) {
     let warn = g.venom.clamp(0.0, 1.0);
-    let mut hue = g.skin_hue * 360.0 * (1.0 - warn) + 25.0 * warn; // venom -> warning orange/red (~25 deg)
-    hue = hue * (1.0 - g.swim) + 200.0 * g.swim; // swimmers shift toward cyan (aquatic look)
+    let mut hue = g.skin_hue * 360.0 * (1.0 - warn) + 25.0 * warn; // venom -> warning orange/red (25 deg)
+    hue = hue * (1.0 - g.swim) + 200.0 * g.swim; // swimmers -> cyan (200 deg)
     let sat = ((0.25 + 0.6 * g.skin_sat + 0.4 * warn) * (1.0 - 0.4 * g.pelt)).clamp(0.0, 1.0); // venom vivid, fur muted
-    let light = (0.5 + 0.15 * g.pelt - 0.12 * g.armor).clamp(0.2, 0.8); // furry lighter, armored darker
+    let light = (0.5 + 0.15 * g.pelt - 0.12 * g.armor).clamp(0.2, 0.8); // fur lighter, armor darker
     let girth = (0.7 + 0.06 * g.n_sensors() as f32) * (0.6 + 0.9 * g.size) * (1.0 + 0.2 * g.armor);
     let sx = girth * (1.0 - 0.25 * g.swim);
     let sy = girth * (0.7 + 1.6 * g.height) * (1.0 - 0.3 * g.swim);
-    let sz = girth * (1.0 + 0.8 * g.swim); // swim = flatter + longer (fish shape)
+    let sz = girth * (1.0 + 0.8 * g.swim); // swim -> flatter + longer (fish shape)
     (Color::hsl(hue.rem_euclid(360.0), sat, light), Vec3::new(sx, sy, sz))
 }
 
-// Give any creature lacking a mesh its visuals (shared capsule + own genome-colored material). Covers
-// creatures BORN mid-sim and B-seeded ones (spawn_creature adds no render mesh). Without this they are
-// invisible while alive and only appear once dead (carrion gets its own mesh).
+const CREATURE_BORN_SCALE: f32 = 0.45; // newborns render at 45% adult size
+const CREATURE_MATURE_TICKS: f32 = 220.0; // grow to full size by this age (ticks)
+
+// Creatures GROW IN over early life (juvenile -> adult), no pop-in at full size. Visual only: rescales
+// whole body per frame by age factor (parts are children, scale with it); never touches genome `size`
+// or combat. Recomputes genome target scale x born->1.0 age lerp -> composes with restyle_creatures
+// (sets full scale on genome change); this just shrinks juveniles.
+fn size_creatures(mut q: Query<(&DietState, &Genome, &mut Transform), With<Creature>>) {
+    for (diet, g, mut tf) in &mut q {
+        let grow = (CREATURE_BORN_SCALE + (1.0 - CREATURE_BORN_SCALE) * diet.age as f32 / CREATURE_MATURE_TICKS).min(1.0);
+        tf.scale = creature_look(g).1 * grow;
+    }
+}
+
+// Dress any creature lacking a mesh: shared capsule + genome-colored material. Covers creatures BORN
+// mid-sim + B-seeded (spawn_creature adds no render mesh). Without this: invisible while alive, appear
+// only once dead (carrion gets own mesh).
 fn add_creature_visuals(
     mut commands: Commands,
     mesh: Option<Res<CreatureMesh>>,
@@ -162,11 +173,11 @@ fn add_creature_visuals(
     for (e, g, mut tf) in &mut q {
         let (color, scale) = creature_look(g);
         tf.scale = scale;
-        // children inherit the parent's non-uniform body scale; cancel it per-part so head/eyes/legs aren't
-        // distorted. part_tf places a part at WORLD offset `wo` with WORLD dimensions `dim` (base meshes ~unit).
+        // children inherit parent non-uniform body scale; cancel per-part so head/eyes/legs not distorted.
+        // part_tf places part at WORLD offset `wo` with WORLD dims `dim` (base meshes ~unit).
         let inv = Vec3::new(1.0 / scale.x.max(0.01), 1.0 / scale.y.max(0.01), 1.0 / scale.z.max(0.01));
         let part_tf = |wo: Vec3, dim: Vec3| Transform { translation: wo * inv, scale: dim * inv, ..default() };
-        let body = 0.6 + 0.9 * g.size; // overall build factor (parts scale with the creature)
+        let body = 0.6 + 0.9 * g.size; // overall build factor
         let srgb = |c: Color, k: f32| {
             let s = c.to_srgba();
             Color::srgb(s.red * k, s.green * k, s.blue * k)
@@ -174,7 +185,7 @@ fn add_creature_visuals(
 
         commands.entity(e).insert((Mesh3d(mesh.0.clone()), MeshMaterial3d(materials.add(color))));
 
-        // HEAD: a sphere up front + on top (local +Z, +Y), two-toned by the pattern gene (a marking).
+        // HEAD: sphere up front + on top (local +Z, +Y), two-toned by pattern gene (marking).
         let head_d = (0.45 + 0.55 * g.head) * body;
         let head_y = 0.7 * scale.y;
         let head_z = 0.35 * scale.z + 0.45 * head_d;
@@ -187,11 +198,11 @@ fn add_creature_visuals(
             .id();
         commands.entity(e).add_child(head);
 
-        // EYES: 1..6 bright spheres proud of the head's front face (a second row above 3 eyes).
+        // EYES: 1..6 bright spheres proud of head front face (second row above 3 eyes).
         let n_eyes = (EYE_MIN + EYE_SPAN * g.eyes).round().clamp(1.0, 6.0) as usize;
         let eye_mat = materials.add(StandardMaterial {
             base_color: Color::srgb(0.97, 0.98, 1.0),
-            emissive: LinearRgba::rgb(0.5, 0.52, 0.6), // glow so eyes read at a distance
+            emissive: LinearRgba::rgb(0.5, 0.52, 0.6), // glow -> eyes read at distance
             ..default()
         });
         let eye_d = 0.34 * head_d;
@@ -200,24 +211,24 @@ fn add_creature_visuals(
             let row = if k >= 3 { 1.0 } else { 0.0 };
             let ex = frac * 0.30 * head_d;
             let ey = head_y + 0.10 * head_d + row * 0.26 * head_d;
-            let ez = head_z + 0.46 * head_d; // sit proud on the front of the head sphere
+            let ez = head_z + 0.46 * head_d; // proud on front of head sphere
             let eye = commands
                 .spawn((Mesh3d(parts.eye.clone()), MeshMaterial3d(eye_mat.clone()), part_tf(Vec3::new(ex, ey, ez), Vec3::splat(eye_d))))
                 .id();
             commands.entity(e).add_child(eye);
         }
 
-        // LEGS: 2..8 thin legs splayed in a ring around the LOWER body sides (just outside the body radius),
-        // poking down toward the ground so they read as limbs, not a buried fringe. Longer for climbers.
+        // LEGS: 2..8 thin legs ringed around LOWER body sides (just outside body radius), poking down ->
+        // read as limbs, not buried fringe. Longer for climbers.
         let n_legs = (LIMB_MIN + LIMB_SPAN * g.limbs).round().clamp(2.0, 8.0) as usize;
         let leg_len = (0.45 + 0.45 * g.climb) * body;
         let leg_r = 0.10 * body;
         let leg_mat = materials.add(srgb(color, 0.55));
         for k in 0..n_legs {
             let a = (k as f32 / n_legs as f32) * std::f32::consts::TAU;
-            let lx = a.cos() * 0.52 * scale.x; // just outside the body silhouette
+            let lx = a.cos() * 0.52 * scale.x; // just outside body silhouette
             let lz = a.sin() * 0.52 * scale.z;
-            let cy = -0.35 * scale.y - 0.5 * leg_len; // hang from the lower body
+            let cy = -0.35 * scale.y - 0.5 * leg_len; // hang from lower body
             let leg = commands
                 .spawn((
                     Mesh3d(parts.leg.clone()),
@@ -230,45 +241,46 @@ fn add_creature_visuals(
     }
 }
 
-// Tree part meshes (inserted by spawn_world_render): a trunk + two canopy shapes.
+// Tree part meshes (inserted by spawn_world_render): trunk + two canopy shapes.
 #[derive(Resource)]
 pub struct TreeMeshes {
     pub trunk: Handle<Mesh>,
     pub broadleaf: Handle<Mesh>, // round canopy for fruit trees
     pub conifer: Handle<Mesh>,   // cone canopy for evergreens
-    pub vine: Handle<Mesh>,      // helix vine that spirals up the trunk (only some trees)
+    pub vine: Handle<Mesh>,      // helix vine spiraling up trunk (only some trees)
 }
 
-// Give any plant lacking a mesh its visuals: shared sphere + a material colored by its genome
-// (hue=kind, brightness=nutrient, warmth=defense). Covers initial plants AND new offspring.
+// Dress any plant lacking a mesh: form silhouette + genome-colored material (hue=kind,
+// brightness=nutrient, warmth=defense). Covers initial plants AND new offspring.
 fn add_plant_visuals(
     mut commands: Commands,
     forms: Option<Res<PlantForms>>,
     trees: Option<Res<TreeMeshes>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    q: Query<(Entity, &PlantGenome, Option<&Tree>, Option<&Seed>), (With<Food>, Without<Mesh3d>, Without<Grass>)>, // grass has its own visuals (add_grass_visuals)
+    q: Query<(Entity, &PlantGenome, Option<&Tree>, Option<&Seed>), (With<Food>, Without<Mesh3d>, Without<Grass>, Without<Seaweed>)>, // grass + seaweed have own visuals
 ) {
     let Some(forms) = forms else { return };
     for (e, g, tree, seed) in &q {
-        // tree = a brown trunk (this entity) + a canopy child. Fruit trees get a round broadleaf crown
-        // (greener + a hint of the genome's leaf hue), evergreens a dark cone. Trees ignore `form`.
+        // tree = brown trunk (this entity) + canopy child. Fruit trees get round broadleaf crown
+        // (greener + hint of genome leaf hue), evergreens a dark cone. Trees ignore `form`.
         if let (Some(t), Some(tm)) = (tree, &trees) {
             commands.entity(e).insert((
                 Mesh3d(tm.trunk.clone()),
                 MeshMaterial3d(materials.add(Color::srgb(0.40, 0.26, 0.13))),
             ));
-            // broadleaf crown is centered (sits high in the canopy); the stacked-cone conifer has its base
-            // at y=0 so it rests on the trunk top (lower attach point).
-            // trunk is centered (half-height 1.0); canopies attach so they envelop most of the trunk,
-            // leaving only a short stub of bare trunk -> a tree, not a hat on a pole.
+            // broadleaf crown centered (sits high in canopy); stacked-cone conifer base at y=0 rests on
+            // trunk top (lower attach). Trunk centered (half-height 1.0); canopies attach to envelop most
+            // of trunk, leaving short bare-trunk stub -> a tree, not a hat on a pole.
             let (canopy, cmat, cy) = if t.edible {
                 (tm.broadleaf.clone(), materials.add(plant_color(g)), 1.0)
             } else {
-                // conifer cones are open shells: draw double-sided so the hollow shows the dark-green inner
-                // face (no see-through to the trunk/sky), and the spine cone fills the core.
+                // conifer cones are open shells: double-sided so hollow shows dark-green inner face (no
+                // see-through to trunk/sky); spine cone fills core. Evergreen needle-green: brighter
+                // blue-green reads as foliage not black blob; roughness 0.6 near foliage default (0.5) so
+                // sun catches soft sheen like broadleaf. Old 0.9 matte + dark base: noon sun never lit it.
                 let m = materials.add(StandardMaterial {
-                    base_color: Color::srgb(0.10, 0.40, 0.24), // ~10% lighter forest green (was 0.06,0.30,0.18)
-                    perceptual_roughness: 0.9,
+                    base_color: Color::srgb(0.16, 0.52, 0.30),
+                    perceptual_roughness: 0.6,
                     double_sided: true,
                     cull_mode: None,
                     ..default()
@@ -279,7 +291,7 @@ fn add_plant_visuals(
                 .spawn((Mesh3d(canopy), MeshMaterial3d(cmat), Transform::from_xyz(0.0, cy, 0.0)))
                 .id();
             commands.entity(e).add_child(child);
-            // a flowering (blossom) fruit tree gets a ring of bloom blobs in its crown
+            // flowering (blossom) fruit tree gets ring of bloom blobs in crown
             if t.edible && g.flower > 0.4 {
                 let fmat = materials.add(StandardMaterial {
                     base_color: flower_color(g),
@@ -299,8 +311,8 @@ fn add_plant_visuals(
                     commands.entity(e).add_child(c);
                 }
             }
-            // some trees host a climbing vine spiraling up the trunk (vine only ever appears WITH a tree).
-            // Presence keyed off the tree's flower_hue gene -> deterministic + varied (~40% of trees).
+            // some trees host climbing vine up trunk (vine appears only WITH a tree). Presence keyed off
+            // flower_hue gene > 0.58 -> deterministic + varied (~40% of trees).
             if g.flower_hue > 0.58 {
                 let vmat = materials.add(StandardMaterial {
                     base_color: Color::srgb(0.16, 0.45, 0.12),
@@ -312,16 +324,16 @@ fn add_plant_visuals(
             }
             continue;
         }
-        // --- regular plant: pick the silhouette by form, color the foliage by genome ---
+        // --- regular plant: silhouette by form, foliage color by genome ---
         let fi = (g.form as usize).min(forms.forms.len().saturating_sub(1));
         let leafy = matches!(
             g.form,
             form::FERN | form::REED | form::KELP | form::ROSETTE | form::LILYPAD | form::GROUNDCOVER | form::MOSS
         );
-        // a fallen FRUIT (carries a Seed) renders as a BRIGHT fruity blob (ripe colors) so it pops on the
-        // ground + reads as food, not foliage. Living plants use the aposematic foliage color (toxicity).
+        // fallen FRUIT (carries Seed) renders as BRIGHT fruity blob (ripe colors) -> pops on ground +
+        // reads as food, not foliage. Living plants use aposematic foliage color (toxicity).
         let body_color = if seed.is_some() {
-            let c = flower_color(g).to_srgba(); // reuse the bright genetic palette for varied ripe-fruit color
+            let c = flower_color(g).to_srgba(); // reuse bright genetic palette for varied ripe-fruit color
             Color::srgb(c.red, c.green, c.blue)
         } else {
             plant_color(g)
@@ -330,16 +342,15 @@ fn add_plant_visuals(
             base_color: body_color,
             perceptual_roughness: 0.9,
             emissive: if seed.is_some() { LinearRgba::rgb(0.10, 0.06, 0.0) } else { LinearRgba::BLACK }, // fruit glows a touch
-            double_sided: leafy, // thin leaf/frond/disc meshes render from both faces
+            double_sided: leafy, // thin leaf/frond/disc meshes need both faces
             cull_mode: if leafy { None } else { Some(bevy::render::render_resource::Face::Back) },
             ..default()
         });
         commands.entity(e).insert((Mesh3d(forms.forms[fi].clone()), MeshMaterial3d(mat)));
-        // bloom child for a flowering plant (placed near the top of the unit mesh, in local space)
+        // bloom child for flowering plant (near top of unit mesh, local space)
         if g.flower > 0.25 && !matches!(g.form, form::KELP | form::MOSS) {
-            // local-y of each mesh's TOP, so the bloom sits ON the plant (not floating above it). The flower
-            // stalk is a CENTERED cylinder (top at y=0.5); clumps/cactus reach ~1.0; clusters ~0.5; flat
-            // forms hug the ground.
+            // local-y of each mesh TOP -> bloom sits ON plant (no float). Flower stalk = CENTERED cylinder
+            // (top at y=0.5); clumps/cactus ~1.0; clusters ~0.5; flat forms hug ground.
             let top = match g.form {
                 form::FLOWER_STALK => 0.5, // centered cylinder, top at half-height
                 form::REED | form::SUCCULENT | form::FERN => 0.85,
@@ -361,8 +372,8 @@ fn add_plant_visuals(
                 ))
                 .id();
             commands.entity(e).add_child(child);
-            // bright YELLOW center disc sitting on the petals (classic flower: glowing center + colorful petals).
-            // Reuses the small berry sphere; emissive so it reads as a sunny eye even in shade.
+            // bright YELLOW center disc on petals (classic flower: glowing center + colorful petals).
+            // Reuses small berry sphere; emissive -> reads as sunny eye even in shade.
             let bloom = 0.28 + 0.45 * g.flower;
             let center = commands
                 .spawn((
@@ -377,8 +388,8 @@ fn add_plant_visuals(
                 .id();
             commands.entity(e).add_child(center);
         }
-        // berry children for a fruiting land bush; skip aquatic/flat forms. Bright ripe-berry colors that pop:
-        // toxic berries warn deep magenta/violet, edible ones glow ripe red/orange (a little emissive sheen).
+        // berry children for fruiting land bush; skip aquatic/flat forms. Toxic berries warn deep
+        // magenta/violet, edible glow ripe red/orange (slight emissive sheen).
         if g.fruiting > 0.3 && matches!(g.form, form::SHRUB | form::HERB | form::FLOWER_STALK) {
             let (berry, bem) = if g.toxicity > 0.5 {
                 (Color::srgb(0.62, 0.05, 0.78), LinearRgba::rgb(0.20, 0.0, 0.28)) // toxic: vivid violet warning
@@ -398,7 +409,7 @@ fn add_plant_visuals(
                 commands.entity(e).add_child(c);
             }
         }
-        // mushroom cap (domed) resting on the stem top
+        // mushroom cap (domed) on stem top
         if g.form == form::MUSHROOM {
             let c = commands
                 .spawn((
@@ -412,8 +423,8 @@ fn add_plant_visuals(
     }
 }
 
-// Hide a creature's mesh when it dies (P1.4); restore on rebirth at the generation boundary
-// (Alive flips back true). Its carrion (a separate Food entity) appears in its place.
+// Hide creature mesh on death (P1.4); restore on rebirth at generation boundary (Alive flips back true).
+// Carrion (separate Food entity) appears in its place.
 fn hide_dead(mut q: Query<(&Alive, &mut Visibility), With<Creature>>) {
     for (alive, mut vis) in &mut q {
         let want = if alive.0 { Visibility::Inherited } else { Visibility::Hidden };
@@ -423,8 +434,8 @@ fn hide_dead(mut q: Query<(&Alive, &mut Visibility), With<Creature>>) {
     }
 }
 
-// Carrion/detritus (Rot) color tells its rot stage: fresh = meaty red, rotten = dark muddy green.
-// So the rot chain (P3) reads at a glance: bright red corpse -> darkening -> gone.
+// Carrion/detritus (Rot) color = rot stage: fresh = meaty red, rotten = dark muddy green. Rot chain (P3)
+// reads at a glance: bright red corpse -> darkening -> gone.
 fn color_carrion(mut mats: ResMut<Assets<StandardMaterial>>, q: Query<(&Rot, &MeshMaterial3d<StandardMaterial>)>) {
     for (rot, mm) in &q {
         let f = (rot.age as f32 / ROT_GONE as f32).clamp(0.0, 1.0); // 0 fresh .. 1 rotten
@@ -434,42 +445,40 @@ fn color_carrion(mut mats: ResMut<Assets<StandardMaterial>>, q: Query<(&Rot, &Me
     }
 }
 
-// Scale plants by mass (growth visible) AND root them on the terrain. The height gene STRETCHES a
-// plant vertically (taller plant) rather than lifting it into the air -> tall plants read as tall but
-// their base stays on the ground (no floating). Trees render much bigger (tall trunk + canopy).
+// Scale plants by mass (growth visible) AND root on terrain. height gene STRETCHES plant vertically,
+// not lifts into air -> tall plants read tall but base stays grounded (no float). Trees render much
+// bigger (tall trunk + canopy).
 fn size_plants(mut q: Query<(&PlantState, &PlantGenome, &mut Transform, Option<&Tree>, Option<&Rot>), (With<Food>, Without<Grass>)>) {
     for (st, g, mut tf, tree, rot) in &mut q {
-        let up = tf.translation.normalize_or_zero(); // outward surface normal at this spot
-        let base = crate::sphere::surface_pos(up, 0.0); // foot on the terrain surface
-        let rot_q = Quat::from_rotation_arc(Vec3::Y, up); // grow outward from the planet, not world-up
-        // `life` is the overall size factor. LIVING plant/tree: grows with mass toward maturity, so a seedling
-        // is visibly small + a mature plant full -> render size tracks mass (no more huge-mass/tiny-plant
-        // mismatch). DEAD thing (carrion / fallen fruit / plant litter, has Rot): SHRINKS as it decomposes,
-        // so the corpse fades to nothing by ROT_GONE instead of sitting full-size, and despawns clean.
+        let up = tf.translation.normalize_or_zero(); // outward surface normal
+        let base = crate::sphere::surface_pos(up, 0.0); // foot on terrain surface
+        let rot_q = Quat::from_rotation_arc(Vec3::Y, up); // grow outward from planet, not world-up
+        // `life` = overall size factor. LIVING plant/tree: grows with mass toward maturity (seedling small,
+        // mature full) -> render size tracks mass. DEAD (carrion/fallen fruit/litter, has Rot): SHRINKS as
+        // it decomposes -> corpse fades to nothing by ROT_GONE, despawns clean.
         let life = match rot {
             Some(r) => (1.0 - r.age as f32 / ROT_GONE as f32).clamp(0.0, 1.0),
             None => 0.4 + 0.6 * (st.mass / g.maturity.max(0.1)).clamp(0.0, 1.0),
         };
         if tree.is_some() {
-            // trees stay small relative to the planet (was up to ~13 units, poking into the clouds). Scale
-            // tracks MASS so a tree on good soil (which grows to a bigger mass, see plant_step soil response)
-            // renders visibly larger than one on poor soil -- ~1.0 at maturity up to ~1.6 fully grown -- while
-            // the cap still keeps the tallest trees a few units, clear of the clouds.
-            let s = (0.5 + 0.04 * st.mass).clamp(0.5, 1.6) * life;
+            // tree size tracks MASS -> tree on good soil (bigger mass, see plant_step soil response) renders
+            // larger than poor-soil one. Mature tree reads as real TREE (~2.4 at maturity ~14, up to ~3.8
+            // full) not shrub; cap keeps tallest clear of clouds. height gene tweaks +/- for canopy variety.
+            let s = (0.6 + 0.13 * st.mass).clamp(0.6, 3.8) * life * (0.85 + 0.3 * g.height);
             tf.scale = Vec3::splat(s);
             tf.rotation = rot_q;
-            tf.translation = base + up * (0.7 * s); // trunk base rests on the surface (trunk half-height = 0.7)
+            tf.translation = base + up * (0.7 * s); // trunk base on surface (trunk half-height = 0.7)
             continue;
         }
-        // per-form scale (girth, height) + lift so each silhouette sits on the surface. girth grows with
-        // mass + bushiness; height comes from the height gene. Custom clump/disc meshes have base at y=0
-        // (lift=0); centered primitives lift by half their height. droop slightly squashes the height.
+        // per-form scale (girth, height) + lift so each silhouette sits on surface. girth grows with mass +
+        // bushiness; height from height gene. Custom clump/disc meshes base at y=0 (lift=0); centered
+        // primitives lift half their height. droop squashes height.
         let girth = (0.2 + 0.12 * st.mass).clamp(0.2, 1.1);
         let bushy = 0.7 + 0.6 * g.bushiness;
         let tall = (1.0 + 1.4 * g.height) * (1.0 - 0.3 * g.droop);
-        // (sx, sy, sz, lift_in_local_units) per form. lift = local distance from origin to the mesh base.
-        // most forms are now base-at-y=0 multi-blob/clump/cactus meshes (lift=0); only the two centered
-        // cylinder stems (flower stalk, mushroom) lift by half their height.
+        // (sx, sy, sz, lift_local) per form. lift = local distance origin -> mesh base. Most forms are
+        // base-at-y=0 multi-blob/clump/cactus meshes (lift=0); only centered cylinder stems (flower stalk,
+        // mushroom) lift half their height.
         let (sx, sy, sz, lift) = match g.form {
             form::SHRUB => (girth * bushy * 1.2, girth * bushy * 1.1, girth * bushy * 1.2, 0.0),
             form::GROUNDCOVER => (girth * bushy * 1.6, girth * 0.6, girth * bushy * 1.6, 0.0),
@@ -482,47 +491,51 @@ fn size_plants(mut q: Query<(&PlantState, &PlantGenome, &mut Transform, Option<&
             form::LILYPAD => (0.6 + 0.7 * girth, 1.0, 0.6 + 0.7 * girth, 0.0),
             form::KELP => (0.4 + 0.3 * bushy, 1.4 + 2.2 * g.height, 0.4 + 0.3 * bushy, 0.0),
             form::MUSHROOM => (0.5 + 0.4 * girth, 0.5 + 0.6 * g.height, 0.5 + 0.4 * girth, 0.25),
-            // HERB + fallback: small bushy clump, stretched by the height gene
+            // HERB + fallback: small bushy clump, stretched by height gene
             _ => (girth * bushy, girth * bushy * tall, girth * bushy, 0.0),
         };
         tf.scale = Vec3::new(sx, sy, sz) * life;
         tf.rotation = rot_q;
-        // a lily pad floats ON the water surface (~PLANET_R) rather than resting on the seabed below it.
+        // lily pad floats ON water surface (~PLANET_R), not on seabed below.
         if g.form == form::LILYPAD {
             tf.translation = up * (crate::sphere::PLANET_R + 0.08);
         } else {
-            tf.translation = base + up * (lift * sy * life); // mesh base rooted on the terrain (no float)
+            tf.translation = base + up * (lift * sy * life); // mesh base rooted on terrain (no float)
         }
     }
 }
 
 // Shared grass tuft mesh + material (inserted by spawn_world_render). One mesh + one material for ALL
-// tufts (cheap: grass is ubiquitous), unlike per-genome plant spheres.
+// tufts (cheap: grass ubiquitous), unlike per-genome plant spheres.
 #[derive(Resource)]
 pub struct GrassMesh(pub Handle<Mesh>);
 #[derive(Resource)]
 pub struct GrassMaterial(pub Handle<StandardMaterial>);
+// Shared kelp-frond mesh + brown-green material for ALL seaweed. add_seaweed_visuals scales each by mass/depth.
+#[derive(Resource)]
+pub struct SeaweedMesh(pub Handle<Mesh>);
+#[derive(Resource)]
+pub struct SeaweedMaterial(pub Handle<StandardMaterial>);
 
-// Build one grass tuft as a clump of BLADES: each blade is a tall, thin, pointed strip that tapers to a
-// tip and arcs over (curved, not a flat sliver), spread over a small footprint + fanned around the clump.
-// Unit height (1.0) so size_grass scales the real length per soil. Double-sided material renders both
-// faces. Reads as real blades of grass at the walk view.
+// Build one grass tuft as clump of BLADES: each blade tall thin pointed strip tapering to tip, arcing
+// over (curved, not flat sliver), spread over small footprint + fanned around clump. Unit height (1.0) so
+// caller scales real length per soil. Double-sided material renders both faces.
 pub fn grass_tuft_mesh() -> Mesh {
     const BLADES: usize = 11;
-    let w = 0.022; // blade half-width at the base (thin)
+    let w = 0.022; // blade half-width at base (thin)
     let mut positions: Vec<[f32; 3]> = Vec::new();
     let mut normals: Vec<[f32; 3]> = Vec::new();
     let mut uvs: Vec<[f32; 2]> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
     for k in 0..BLADES {
         let t = k as f32;
-        let a = t * 2.39996; // golden angle: spreads blade headings evenly around the clump
+        let a = t * 2.39996; // golden angle: even blade heading spread around clump
         let (sa, ca) = a.sin_cos();
         let r = 0.04 + 0.16 * ((t * 1.7).sin().abs()); // root offset from clump center (footprint)
         let (ox, oz) = (r * ca, r * sa);
         let h = 0.7 + 0.45 * ((t * 0.9).cos().abs()); // per-blade height variation
-        let curve = 0.18 * h; // tip arcs over in the blade's local +z -> a bent blade, not a flat spike
-        // blade profile in local (x across width, y up, z bend): base -> mid -> pointed tip
+        let curve = 0.18 * h; // tip arcs over in blade local +z -> bent blade, not flat spike
+        // blade profile local (x width, y up, z bend): base -> mid -> pointed tip
         let prof = [
             [-w, 0.0, 0.0],
             [w, 0.0, 0.0],
@@ -532,14 +545,14 @@ pub fn grass_tuft_mesh() -> Mesh {
         ];
         let base = positions.len() as u32;
         for (vi, p) in prof.iter().enumerate() {
-            // rotate the blade about Y by its heading `a`, then offset to its root in the clump
+            // rotate blade about Y by heading `a`, then offset to its clump root
             let x = p[0] * ca + p[2] * sa + ox;
             let z = -p[0] * sa + p[2] * ca + oz;
             positions.push([x, p[1], z]);
-            normals.push([0.0, 1.0, 0.0]); // up-facing -> blades catch the overhead sun (bright green)
+            normals.push([0.0, 1.0, 0.0]); // up-facing -> blades catch overhead sun (bright green)
             uvs.push([if vi % 2 == 0 { 0.0 } else { 1.0 }, p[1] / h.max(0.001)]);
         }
-        // two body quads + the pointed tip triangle
+        // two body quads + pointed tip triangle
         indices.extend_from_slice(&[
             base, base + 1, base + 3, base, base + 3, base + 2, // lower quad
             base + 2, base + 3, base + 4, // tip triangle
@@ -553,11 +566,11 @@ pub fn grass_tuft_mesh() -> Mesh {
     mesh
 }
 
-// A clump of BROAD blades/fronds rooted at y=0, arcing up to a pointed tip (~unit height). One generator,
-// reused for the fern / reed / kelp / rosette forms (size_plants stretches each differently). Up-facing
-// normals catch the overhead sun; the material is double-sided so both faces show. Params: blades=count,
-// hw=base half-width, foot=clump footprint radius, curve=tip arc-over, lean=outward lean (rosette spreads
-// flat near the ground, reed stands straight up).
+// Clump of BROAD blades/fronds rooted at y=0, arcing to pointed tip (~unit height). One generator reused
+// for fern/reed/kelp/rosette forms (size_plants stretches each differently). Up-facing normals catch
+// overhead sun; material double-sided so both faces show. Params: blades=count, hw=base half-width,
+// foot=clump footprint radius, curve=tip arc-over, lean=outward lean (rosette flat near ground, reed
+// straight up).
 pub fn frond_clump_mesh(blades: usize, hw: f32, foot: f32, curve: f32, lean: f32) -> Mesh {
     let mut positions: Vec<[f32; 3]> = Vec::new();
     let mut normals: Vec<[f32; 3]> = Vec::new();
@@ -565,12 +578,12 @@ pub fn frond_clump_mesh(blades: usize, hw: f32, foot: f32, curve: f32, lean: f32
     let mut indices: Vec<u32> = Vec::new();
     for k in 0..blades {
         let t = k as f32;
-        let a = t * 2.39996; // golden angle: even heading spread around the clump
+        let a = t * 2.39996; // golden angle: even heading spread around clump
         let (sa, ca) = a.sin_cos();
         let r = foot * (0.3 + 0.7 * ((t * 1.7).sin().abs())); // root offset from center (footprint)
         let (ox, oz) = (r * ca, r * sa);
         let h = 0.8 + 0.4 * ((t * 0.9).cos().abs()); // per-frond height variation
-        // profile: base -> mid -> pointed tip, leaning outward (lean) and arcing over (curve)
+        // profile: base -> mid -> tip, leaning outward (lean) + arcing over (curve)
         let prof = [
             [-hw, 0.0, 0.0],
             [hw, 0.0, 0.0],
@@ -596,16 +609,16 @@ pub fn frond_clump_mesh(blades: usize, hw: f32, foot: f32, curve: f32, lean: f32
     mesh
 }
 
-// One aurora curtain: a CROSSED PAIR of vertical sheets (an "X" in plan view: one in local XY facing +Z, one
-// in local ZY facing +X) so the curtain presents broad area from ANY horizontal angle and never looks thin.
-// Both sheets carry the AUTHENTIC Earth-aurora vertical color profile baked into vertex colors (additive, so
-// the falloff lives in RGB): a faint magenta lower fringe -> bright green body (557.7nm oxygen) -> fading
-// crimson/red top (630nm) -> transparent. Soft feathered edges (cosine) so overlapping curtains blend into a
-// continuous rippling sheet with ray structure. Brightness/on-off is multiplied per frame via base_color.
-// Local: X,Z = width (-0.5..0.5), Y = height (0..1, base at 0). The transform scales X,Z by width, Y by height.
+// One aurora curtain: CROSSED PAIR of vertical sheets (X in plan view: one in local XY facing +Z, one in
+// local ZY facing +X) -> broad area from ANY horizontal angle, never looks thin. Both sheets carry the
+// Earth-aurora vertical color profile baked into vertex colors (additive, falloff lives in RGB): faint
+// magenta lower fringe -> bright green body (557.7nm oxygen) -> fading crimson/red top (630nm) ->
+// transparent. Soft feathered edges (cosine) -> overlapping curtains blend into continuous rippling sheet
+// with ray structure. Brightness/on-off multiplied per frame via base_color. Local: X,Z = width
+// (-0.5..0.5), Y = height (0..1, base 0). Transform scales X,Z by width, Y by height.
 pub fn aurora_curtain_mesh() -> Mesh {
-    let cols = 6usize; // horizontal subdivisions (for the edge feather)
-    let rows = 14usize; // vertical subdivisions (for a smooth color gradient)
+    let cols = 6usize; // horizontal subdivisions (edge feather)
+    let rows = 14usize; // vertical subdivisions (smooth color gradient)
     let mut positions: Vec<[f32; 3]> = Vec::new();
     let mut normals: Vec<[f32; 3]> = Vec::new();
     let mut uvs: Vec<[f32; 2]> = Vec::new();
@@ -613,9 +626,9 @@ pub fn aurora_curtain_mesh() -> Mesh {
     let mut indices: Vec<u32> = Vec::new();
     // vertical color stops (fy 0=bottom .. 1=top)
     let stop = |fy: f32| -> [f32; 3] {
-        let pink = [1.1, 0.25, 0.85]; // lower nitrogen fringe (bright so the faint fringe reads)
+        let pink = [1.1, 0.25, 0.85]; // lower nitrogen fringe (bright so faint fringe reads)
         let green = [0.30, 1.0, 0.45]; // main oxygen band (557.7nm, slightly yellow-green)
-        let red = [1.7, 0.30, 0.40]; // high-altitude oxygen red (boosted so the top stays visible past the falloff)
+        let red = [1.7, 0.30, 0.40]; // high-altitude oxygen red (boosted so top stays visible past falloff)
         if fy < 0.12 {
             let t = fy / 0.12;
             [pink[0] + (green[0] - pink[0]) * t, pink[1] + (green[1] - pink[1]) * t, pink[2] + (green[2] - pink[2]) * t]
@@ -631,14 +644,14 @@ pub fn aurora_curtain_mesh() -> Mesh {
         let vbase = positions.len() as u32;
         for r in 0..=rows {
             let fy = r as f32 / rows as f32;
-            // vertical brightness falloff: solid-ish through the green body, fading to 0 at the top, soft bottom.
+            // vertical brightness falloff: solid through green body, fade to 0 at top, soft bottom.
             let va = (1.0 - fy).powf(1.15) * (fy / 0.04).clamp(0.0, 1.0);
             let c = stop(fy);
             for cc in 0..=cols {
                 let fx = cc as f32 / cols as f32 - 0.5; // -0.5..0.5
                 let hf = (fx * std::f32::consts::PI).cos().max(0.0); // 1 center -> 0 edges (soft sides)
                 let a = va * hf;
-                // plane 0: sheet in XY (width along X); plane 1: crossed sheet in ZY (width along Z)
+                // plane 0: sheet XY (width along X); plane 1: crossed sheet ZY (width along Z)
                 let pos = if plane == 0 { [fx, fy, 0.0] } else { [0.0, fy, fx] };
                 let nrm = if plane == 0 { [0.0, 0.0, 1.0] } else { [1.0, 0.0, 0.0] };
                 positions.push(pos);
@@ -663,14 +676,14 @@ pub fn aurora_curtain_mesh() -> Mesh {
     mesh
 }
 
-// A flat round pad of unit radius on the XZ plane (y=0), normals up. Lily pad / flat mat. A small missing
-// wedge (notch) gives the classic lily-pad silhouette.
+// Flat round pad, unit radius on XZ plane (y=0), normals up. Lily pad / flat mat. Missing wedge (notch)
+// gives lily-pad silhouette.
 pub fn disc_mesh(segs: usize) -> Mesh {
     let mut positions: Vec<[f32; 3]> = vec![[0.0, 0.0, 0.0]];
     let mut normals: Vec<[f32; 3]> = vec![[0.0, 1.0, 0.0]];
     let mut uvs: Vec<[f32; 2]> = vec![[0.5, 0.5]];
     let mut indices: Vec<u32> = Vec::new();
-    let notch = 0.5_f32; // radians of missing wedge (the lily-pad cleft)
+    let notch = 0.5_f32; // radians of missing wedge (lily-pad cleft)
     let span = std::f32::consts::TAU - notch;
     for i in 0..=segs {
         let a = notch * 0.5 + span * (i as f32 / segs as f32);
@@ -690,20 +703,20 @@ pub fn disc_mesh(segs: usize) -> Mesh {
     mesh
 }
 
-// --- richer "kid-friendly" plant geometry. All baked into the SHARED per-form meshes (zero per-plant
-// cost): fuller multi-blob bushes/canopies, petalled flowers, domed mushroom caps, an armed cactus, and
-// stacked-cone conifers. Each carries a per-vertex grayscale shade (ATTRIBUTE_COLOR) that StandardMaterial
-// multiplies into the genome color -> soft depth/AO (darker base, brighter crown) instead of flat blobs. ---
+// --- richer plant geometry. All baked into SHARED per-form meshes (zero per-plant cost): fuller
+// multi-blob bushes/canopies, petalled flowers, domed mushroom caps, armed cactus, stacked-cone conifers.
+// Each carries per-vertex grayscale shade (ATTRIBUTE_COLOR) that StandardMaterial multiplies into genome
+// color -> soft depth/AO (darker base, brighter crown) not flat blobs. ---
 
-// Buffers passed around by the geometry appenders below.
+// Buffers for geometry appenders below.
 struct MeshBuf {
     pos: Vec<[f32; 3]>,
     nor: Vec<[f32; 3]>,
-    col: Vec<[f32; 4]>, // grayscale shade (rgb=v), multiplied into the material color
+    col: Vec<[f32; 4]>, // grayscale shade (rgb=v), multiplied into material color
 }
-// Baked shade -> vertex color. Maps an input brightness 0..1 to a multiplier that only DARKENS (never
-// brightens past ~0.92), so the shading reads as soft depth/AO into the genome color instead of washing it
-// out toward white. Low end keeps crevices dark for volume.
+// Baked shade -> vertex color. Input brightness 0..1 -> multiplier that only DARKENS (never past ~0.92)
+// so shading reads as soft depth/AO into genome color, not washed toward white. Low end keeps crevices
+// dark for volume.
 fn shade_col(v: f32) -> [f32; 4] {
     let s = (0.45 + 0.45 * v).clamp(0.4, 0.92);
     [s, s, s, 1.0]
@@ -724,7 +737,7 @@ impl MeshBuf {
     }
 }
 
-// Append a low-poly UV sphere at `center` (radius r) with a flat shade `v` on every vertex.
+// Append low-poly UV sphere at `center` (radius r), flat shade `v` on every vertex.
 fn push_sphere(b: &mut MeshBuf, idx: &mut Vec<u32>, center: Vec3, r: f32, rings: usize, sectors: usize, v: f32) {
     let start = b.pos.len() as u32;
     for ri in 0..=rings {
@@ -752,9 +765,9 @@ fn push_sphere(b: &mut MeshBuf, idx: &mut Vec<u32>, center: Vec3, r: f32, rings:
     }
 }
 
-// Append a SMOOTH cone (base at `base`, pointing up `height`, base radius r). Ring vertices carry radial
-// slant normals (not flat per-face normals) so the surface shades with a smooth rounded gradient -> reads
-// as a 3D cone, not a flat cardboard triangle. shade fades base->apex (dark->light).
+// Append SMOOTH cone (base at `base`, up `height`, base radius r). Ring vertices carry radial slant
+// normals (not flat per-face) -> smooth rounded gradient, reads as 3D cone not cardboard triangle. Shade
+// fades base->apex (dark->light).
 fn push_cone(b: &mut MeshBuf, idx: &mut Vec<u32>, base: Vec3, r: f32, height: f32, seg: usize, v: f32) {
     let apex = base + Vec3::Y * height;
     // cone slant normal at angle th: outward (scaled by height) + up (scaled by r)
@@ -777,12 +790,15 @@ fn push_cone(b: &mut MeshBuf, idx: &mut Vec<u32>, base: Vec3, r: f32, height: f3
         b.col.push(shade_col(v * 1.05));
     }
     for si in 0..seg as u32 {
-        idx.extend_from_slice(&[ring0 + si, ring0 + si + 1, apex0 + si]);
+        // wind ring->ring->apex so OUTER cone surface is FRONT face. Was reversed: outer face came out
+        // back-facing -> double_sided canopy flipped normal (out+up -> in+down) -> cone lit from below
+        // (bright undersides, dark sunlit tops). Front-facing outward = lit from above.
+        idx.extend_from_slice(&[ring0 + si + 1, ring0 + si, apex0 + si]);
     }
 }
 
-// A bushy clump of overlapping blobs. Each blob = (center, radius, shade). Used for herbs, shrubs, ground
-// cover, moss bumps, and broadleaf tree canopies -> reads as full foliage, not one ball.
+// Bushy clump of overlapping blobs. Each blob = (center, radius, shade). Used for herbs, shrubs, ground
+// cover, moss bumps, broadleaf tree canopies -> full foliage, not one ball.
 pub fn blob_cluster_mesh(blobs: &[(Vec3, f32, f32)]) -> Mesh {
     let mut b = MeshBuf::new();
     let mut idx = Vec::new();
@@ -792,10 +808,10 @@ pub fn blob_cluster_mesh(blobs: &[(Vec3, f32, f32)]) -> Mesh {
     b.finish(idx)
 }
 
-// A petalled flower: a shallow CUP of petals around a raised center button. Petals tilt up-and-out (tips
-// raised) with real slanted normals so they catch light + read 3D, and each petal sits at a slightly
-// different height (staggered) so coplanar petals don't z-fight. Rendered double-sided (see add_plant_visuals)
-// so the undersides aren't black. Base at y=0.
+// Petalled flower: shallow CUP of petals around raised center button. Petals tilt up-and-out (tips raised)
+// with real slant normals -> catch light + read 3D; each petal slightly different height (staggered) so
+// coplanar petals don't z-fight. Rendered double-sided (see add_plant_visuals) so undersides not black.
+// Base at y=0.
 pub fn flower_mesh(petals: usize) -> Mesh {
     let mut b = MeshBuf::new();
     let mut idx = Vec::new();
@@ -805,11 +821,11 @@ pub fn flower_mesh(petals: usize) -> Mesh {
         let (s, c) = a.sin_cos();
         let dir = Vec3::new(c, 0.0, s);
         let side = Vec3::new(-s, 0.0, c) * 0.16;
-        let stagger = 0.012 * (k % 3) as f32; // tiny per-petal height offset -> no coplanar z-fight
+        let stagger = 0.012 * (k % 3) as f32; // per-petal height offset -> no coplanar z-fight
         let base_l = dir * 0.12 - side + Vec3::Y * (0.02 + stagger);
         let base_r = dir * 0.12 + side + Vec3::Y * (0.02 + stagger);
         let tip = dir * 0.5 + Vec3::Y * (0.2 + stagger); // tip raised -> cupped petal
-        let n = (tip - base_l).cross(base_r - base_l).normalize_or_zero(); // real slant normal
+        let n = (tip - base_l).cross(base_r - base_l).normalize_or_zero(); // slant normal
         let n = [n.x, n.y, n.z];
         let start = b.pos.len() as u32;
         for (p, v) in [(base_l, 0.9), (base_r, 0.9), (tip, 1.0)] {
@@ -822,7 +838,7 @@ pub fn flower_mesh(petals: usize) -> Mesh {
     b.finish(idx)
 }
 
-// A mushroom cap: a rounded dome (top half of a squashed sphere). Base at y=0.
+// Mushroom cap: rounded dome (top half of squashed sphere). Base at y=0.
 pub fn dome_mesh() -> Mesh {
     let mut b = MeshBuf::new();
     let mut idx = Vec::new();
@@ -835,7 +851,7 @@ pub fn dome_mesh() -> Mesh {
             let th = std::f32::consts::TAU * si as f32 / sectors as f32;
             let (st, ct) = th.sin_cos();
             let n = Vec3::new(sp * ct, cp, sp * st).normalize_or_zero();
-            let p = Vec3::new(sp * ct, cp * 0.7, sp * st); // squashed dome
+            let p = Vec3::new(sp * ct, cp * 0.7, sp * st); // 0.7 = squashed dome
             b.pos.push([p.x, p.y, p.z]);
             b.nor.push([n.x, n.y, n.z]);
             b.col.push(shade_col(0.75 + 0.25 * cp));
@@ -854,17 +870,17 @@ pub fn dome_mesh() -> Mesh {
     b.finish(idx)
 }
 
-// A cactus: a tall rounded column with a couple of stubby up-curved arms (saguaro silhouette). Base at y=0.
+// Cactus: tall rounded column + couple stubby up-curved arms (saguaro silhouette). Base at y=0.
 pub fn cactus_mesh() -> Mesh {
     let mut b = MeshBuf::new();
     let mut idx = Vec::new();
-    // main column: stacked blobs from base to a rounded top
+    // main column: stacked blobs base -> rounded top
     for k in 0..5 {
         let y = 0.12 + 0.2 * k as f32;
         let r = 0.2 - 0.015 * k as f32;
         push_sphere(&mut b, &mut idx, Vec3::new(0.0, y, 0.0), r, 5, 7, 0.7 + 0.05 * k as f32);
     }
-    // two arms: a horizontal stub that turns up
+    // two arms: horizontal stub turning up
     for &(sx, h) in &[(0.18f32, 0.55f32), (-0.16f32, 0.7f32)] {
         push_sphere(&mut b, &mut idx, Vec3::new(sx, h, 0.0), 0.1, 4, 6, 0.78);
         push_sphere(&mut b, &mut idx, Vec3::new(sx * 1.4, h + 0.12, 0.0), 0.09, 4, 6, 0.82);
@@ -873,27 +889,28 @@ pub fn cactus_mesh() -> Mesh {
     b.finish(idx)
 }
 
-// A conifer: stacked cones that OVERLAP heavily (each tier's base sits well inside the cone below) so the
-// tiers merge into ONE solid Christmas-tree silhouette instead of three separate floating cones. Base at
-// y=0; each cone's apex rises well past the next cone's base, closing the gaps.
+// Conifer: stacked cones OVERLAPPING heavily (each tier base well inside cone below) -> merge into ONE
+// solid Christmas-tree silhouette, not three floating cones. Base at y=0; each apex rises past next cone
+// base, closing gaps.
 pub fn conifer_mesh() -> Mesh {
     let mut b = MeshBuf::new();
     let mut idx = Vec::new();
-    // Crisp TIERED fir: smooth cones (no cardboard facets) as drooping branch skirts, stacked so each rim
-    // pokes out below the next. A narrow central SPINE cone fills the core, and the canopy material is drawn
-    // double-sided (see add_plant_visuals), so there is no hollow see-through and the trunk stays hidden.
-    push_cone(&mut b, &mut idx, Vec3::new(0.0, 0.0, 0.0), 0.35, 2.55, 12, 0.7); // central spine (core fill)
-    // (base_y, base_radius, height, shade) skirts: wide bottom -> narrow top, moderate overlap = visible tiers
-    let skirts = [(0.1_f32, 1.5_f32, 1.0_f32, 0.68_f32), (0.7, 1.2, 1.0, 0.8), (1.3, 0.9, 1.0, 0.9), (1.85, 0.55, 0.95, 1.0)];
+    // TIERED fir: smooth cones (no cardboard facets) as drooping branch skirts, stacked so each rim pokes
+    // out below the next. Narrow central SPINE cone fills core; canopy material double-sided (see
+    // add_plant_visuals) -> no hollow see-through, trunk stays hidden.
+    push_cone(&mut b, &mut idx, Vec3::new(0.0, 0.0, 0.0), 0.35, 2.55, 12, 0.85); // central spine (core fill)
+    // (base_y, base_radius, height, shade) skirts: wide bottom -> narrow top, moderate overlap = visible
+    // tiers. Shade floor raised (was 0.68) so lower tiers keep light, not near-black.
+    let skirts = [(0.1_f32, 1.5_f32, 1.0_f32, 0.82_f32), (0.7, 1.2, 1.0, 0.88), (1.3, 0.9, 1.0, 0.94), (1.85, 0.55, 0.95, 1.0)];
     for (y, r, h, shade) in skirts {
         push_cone(&mut b, &mut idx, Vec3::new(0.0, y, 0.0), r, h, 16, shade);
     }
     b.finish(idx)
 }
 
-// A climbing vine: a helix of small leaf-blobs spiraling up a trunk (local space matching the centered
-// trunk, y in ~[-0.95, 0.85], hugging radius `rad`). Shared mesh attached to vine-bearing trees -> the
-// vine only ever appears WITH a tree, and costs nothing per-tree (one shared mesh, one material).
+// Climbing vine: helix of small leaf-blobs spiraling up trunk (local space matching centered trunk, y in
+// ~[-0.95, 0.85], hugging radius `rad`). Shared mesh attached to vine-bearing trees -> vine appears only
+// WITH a tree, costs nothing per-tree (one shared mesh + material).
 pub fn vine_mesh(rad: f32) -> Mesh {
     let mut b = MeshBuf::new();
     let mut idx = Vec::new();
@@ -906,7 +923,7 @@ pub fn vine_mesh(rad: f32) -> Mesh {
         let c = Vec3::new(a.cos() * rad, y, a.sin() * rad);
         push_sphere(&mut b, &mut idx, c, 0.05, 3, 5, 0.8); // vine strand bead
         if i % 3 == 0 {
-            // a leaf blob poking outward every few beads
+            // leaf blob poking outward every few beads
             let out = Vec3::new(a.cos(), 0.0, a.sin()) * (rad + 0.07);
             push_sphere(&mut b, &mut idx, Vec3::new(out.x, y, out.z), 0.07, 3, 5, 1.0);
         }
@@ -914,10 +931,10 @@ pub fn vine_mesh(rad: f32) -> Mesh {
     b.finish(idx)
 }
 
-// Give any grass tuft lacking a mesh the shared tuft mesh + green material AND set its transform ONCE
-// (grass is static, so size it at attach -- not per-frame -- so 8000 tufts cost nothing each frame).
-// LENGTH + girth vary with SOIL (habitability + moisture): lush + tall on rich ground, short on marginal.
-// Rooted on the surface + stood on the sphere normal.
+// Give any grass tuft lacking a mesh the shared tuft mesh + green material, set transform ONCE (grass
+// static, so size at attach not per-frame -> 8000 tufts cost nothing per frame). LENGTH + girth vary with
+// SOIL (habitability + moisture): lush tall on rich ground, short on marginal. Rooted on surface, stood
+// on sphere normal.
 fn add_grass_visuals(
     mut commands: Commands,
     mesh: Option<Res<GrassMesh>>,
@@ -928,29 +945,54 @@ fn add_grass_visuals(
     for (e, st, mut tf) in &mut q {
         let up = tf.translation.normalize_or_zero();
         let base = crate::sphere::surface_pos(up, 0.0);
-        // WATER drives height + thickness: wet ground (coasts/edges, tropics) grows tall lush grass; dry
-        // interior stays short + thin. plant_habitability is a secondary viability factor (sparse on
-        // marginal land). moisture is high near the sea edge (coastal) -> tall thick grass by the water.
+        // WATER drives height + thickness: wet ground (coasts/edges, tropics) grows tall lush; dry interior
+        // short + thin. plant_habitability = secondary viability factor (sparse on marginal land). moisture
+        // high near sea edge (coastal) -> tall thick grass by water.
         let wet = crate::sphere::moisture(up).clamp(0.0, 1.0);
         let viable = crate::sphere::plant_habitability(up).clamp(0.0, 1.0);
         let mass_f = 0.7 + 0.3 * st.mass.min(1.0);
-        // grass between rocks is short + wispy: rockiness thins length + girth so rocky ground reads as a
-        // few sparse blades among the stones, not a lawn.
+        // rocky ground: rockiness thins length + girth -> few sparse blades among stones, not a lawn.
         let thin = 1.0 - 0.65 * crate::sphere::rockiness(up);
         let len = (0.35 + 2.2 * wet) * (0.55 + 0.45 * viable) * mass_f * thin; // water-dominated height
-        let girth = (0.9 + 1.9 * wet) * (0.6 + 0.4 * viable) * (0.45 + 0.55 * thin); // wetter = thicker, fuller clump
+        let girth = (0.9 + 1.9 * wet) * (0.6 + 0.4 * viable) * (0.45 + 0.55 * thin); // wetter = thicker clump
         tf.scale = Vec3::new(girth, len, girth);
         tf.rotation = Quat::from_rotation_arc(Vec3::Y, up);
-        tf.translation = base + up * 0.02; // roots on the surface
+        tf.translation = base + up * 0.02; // roots on surface
         commands
             .entity(e)
             .insert((Mesh3d(mesh.0.clone()), MeshMaterial3d(mat.0.clone())));
     }
 }
 
-// Orbit the sun + moon: the directional light comes FROM the sun's current direction (so the lit half of
-// the planet + the terminator sweep as it spins), and the moon sphere rides its orbit. The globe self-
-// shades via surface normals, so illuminance stays constant; ambient (set in setup) lifts the night side.
+// Seaweed = ocean grass: attach shared kelp-frond mesh, size each by mass + DEPTH. Deeper kelp grows
+// taller (long stipes reaching light) -> underwater forest; shallow fronds stubby.
+fn add_seaweed_visuals(
+    mut commands: Commands,
+    mesh: Option<Res<SeaweedMesh>>,
+    mat: Option<Res<SeaweedMaterial>>,
+    mut q: Query<(Entity, &PlantState, &mut Transform), (With<Seaweed>, Without<Mesh3d>)>,
+) {
+    let (Some(mesh), Some(mat)) = (mesh, mat) else { return };
+    for (e, st, mut tf) in &mut q {
+        let up = tf.translation.normalize_or_zero();
+        let base = crate::sphere::surface_pos(up, 0.0); // holdfast anchored on seabed
+        let e01 = crate::sphere::elevation01(up);
+        let depth = ((crate::sphere::SEA_LEVEL - e01) / crate::sphere::SEA_LEVEL).clamp(0.0, 1.0);
+        let mass_f = 0.6 + 0.4 * st.mass.min(1.2);
+        let len = (1.4 + 3.0 * depth) * mass_f; // tall stipes deep, stubby shallow
+        let girth = 0.6 + 0.5 * mass_f; // ribbon fronds, not bushes
+        tf.scale = Vec3::new(girth, len, girth);
+        tf.rotation = Quat::from_rotation_arc(Vec3::Y, up);
+        tf.translation = base + up * 0.02;
+        commands
+            .entity(e)
+            .insert((Mesh3d(mesh.0.clone()), MeshMaterial3d(mat.0.clone())));
+    }
+}
+
+// Orbit sun + moon: directional light comes FROM sun current direction (lit half + terminator sweep as it
+// spins); moon sphere rides its orbit. Globe self-shades via surface normals -> illuminance constant;
+// ambient (set in setup) lifts night side.
 fn day_night_lighting(
     gen: Res<GenState>,
     offset: Res<SunOffset>,
@@ -958,17 +1000,17 @@ fn day_night_lighting(
     mut moons: Query<&mut Transform, (With<Moon>, Without<SunLight>, Without<SunDisc>)>,
     mut discs: Query<&mut Transform, (With<SunDisc>, Without<SunLight>, Without<Moon>)>,
 ) {
-    // visual sky time = sim tick + offset (offset lets walk mode pick a sunny hour without moving the sim)
+    // visual sky time = sim tick + offset (offset lets walk pick sunny hour without moving sim)
     let vtick = (gen.tick as i64 + offset.0).rem_euclid(crate::sphere::DAY_TICKS as i64) as u32;
     let sd = crate::sphere::sun_dir(vtick);
     for mut tf in &mut suns {
-        // ROTATE the directional light in place (only direction matters). The light carries NoFrustumCulling
-        // so it stays ViewVisible -> Bevy keeps building its shadow cascades. (Teleporting it far / to the
-        // planet core got it frustum-culled to invisible, which silently disabled shadows.)
+        // ROTATE directional light in place (only direction matters). Light carries NoFrustumCulling -> stays
+        // ViewVisible -> Bevy keeps building shadow cascades. GOTCHA: teleporting it far / to planet core
+        // frustum-culled it to invisible, silently disabling shadows.
         *tf = Transform::IDENTITY.looking_to(-sd, Vec3::Y);
     }
     for mut tf in &mut discs {
-        tf.translation = sd * crate::sphere::SUN_DIST; // the visible sun rides the same direction, far out
+        tf.translation = sd * crate::sphere::SUN_DIST; // visible sun rides same direction, far out
     }
     let mtick = (gen.tick as i64 + offset.0).max(0) as u32;
     let mp = crate::sphere::moon_pos(mtick);
@@ -977,8 +1019,8 @@ fn day_night_lighting(
     }
 }
 
-// Scrub time-of-day in walk mode: [ winds the sun back, ] pushes it forward (golden-hour shadows), \
-// snaps to local noon overhead the walker. Adjusts the visual SunOffset only (sim time untouched).
+// Scrub time-of-day in walk mode: [ winds sun back, ] forward (golden-hour shadows), \ snaps to local
+// noon overhead walker. Adjusts visual SunOffset only (sim time untouched).
 fn time_of_day(
     keys: Res<ButtonInput<KeyCode>>,
     mode: Res<crate::camera::CameraMode>,
@@ -1003,10 +1045,10 @@ fn time_of_day(
     }
 }
 
-// In walk mode, make the camera's ambient fill track the local daylight so NIGHT GOES DARK (flat high
-// ambient made everything glow like light from the ground). Night keeps a low moonlit floor so silhouettes
-// read; noon gets a bright sky fill. Orbit ambient is left to update_shadow_mode (steady 220 for a crisp
-// terminator). Uses the same visual sky time (sim tick + SunOffset) as the sun.
+// Walk mode: camera ambient fill tracks local daylight so NIGHT GOES DARK (flat high ambient made
+// everything glow from the ground). Night keeps low moonlit floor so silhouettes read; noon bright sky
+// fill. Orbit ambient left to update_shadow_mode (steady 220 for crisp terminator). Uses same visual sky
+// time (sim tick + SunOffset) as sun.
 fn walk_ambient(
     mode: Res<crate::camera::CameraMode>,
     gen: Res<GenState>,
@@ -1020,55 +1062,54 @@ fn walk_ambient(
     let Ok(w) = walkers.single() else { return };
     let vtick = (gen.tick as i64 + offset.0).rem_euclid(crate::sphere::DAY_TICKS as i64) as u32;
     let day = crate::sphere::daylight_at(w.dir.normalize_or_zero(), vtick); // 0 night .. 1 noon overhead
-    // low-ish fill so the strong directional sun (100k lux) keeps shadows + 3D shading; day still reads
-    // bright because lit surfaces are sun-lit. High fill washed shadows flat.
-    let b = 45.0 + 230.0 * day; // moonlit ~45 at night, soft day fill ~275 (shadows survive)
+    // low fill so strong directional sun (100k lux) keeps shadows + 3D shading; lit surfaces stay bright.
+    // High fill washed shadows flat.
+    let b = 45.0 + 230.0 * day; // moonlit ~45 night, soft day fill ~275 (shadows survive)
     for mut a in &mut ambient {
         a.brightness = b;
     }
 }
 
-// Toggle real shadows (O), both walk + orbit. On by default; turn off for a flat always-sunlit look.
+// Toggle real shadows (O), both walk + orbit. On by default; off = flat always-sunlit look.
 fn toggle_shadows(keys: Res<ButtonInput<KeyCode>>, mut show: ResMut<ShowShadows>) {
     if keys.just_pressed(KeyCode::KeyO) {
-        show.0 = !show.0; // applies to both walk + orbit (camera::update_shadow_mode reads it)
+        show.0 = !show.0; // both walk + orbit (camera::update_shadow_mode reads it)
         info!("shadows: {}", if show.0 { "ON" } else { "OFF" });
     }
 }
 
-// Tick offset that puts the sun overhead surface dir `d` (local noon). Sun sweeps longitude: its ground
-// track angle = 2*PI*tick/DAY_TICKS in the x-z plane, so match d's longitude angle.
+// Tick offset putting sun overhead surface dir `d` (local noon). Sun sweeps longitude: ground track angle
+// = 2*PI*tick/DAY_TICKS in x-z plane, so match d longitude angle.
 pub fn noon_offset(d: Vec3, tick: u32) -> i64 {
     use std::f32::consts::TAU;
-    let target = d.z.atan2(d.x).rem_euclid(TAU); // longitude of the walk point
+    let target = d.z.atan2(d.x).rem_euclid(TAU); // longitude of walk point
     let want = (target / TAU * crate::sphere::DAY_TICKS as f32).round() as i64;
     let have = (tick as i64).rem_euclid(crate::sphere::DAY_TICKS as i64);
     (want - have).rem_euclid(crate::sphere::DAY_TICKS as i64)
 }
 
-// Precip streaks (immediate-mode gizmos, no entities). Wherever it is currently raining (cloud-driven,
-// sampled on a lat/lon grid), draw a scatter that visibly FALLS: height cycles down the tick clock + wraps,
-// so it animates instead of hanging static. WARM cells -> blue rain streaks (gradient line: faded motion-tail
-// up top, bright drop head at the bottom; heavier rain = more drops, longer, brighter). COLD cells (below the
-// snow line) -> white snow: slower fall, lazy horizontal sway, soft dots, no tail. Deterministic (tick
-// clock + hashed jitter, no per-frame RNG) -> reproducible.
+// Precip streaks (immediate-mode gizmos, no entities). Where raining (cloud-driven, sampled on lat/lon
+// grid), draw scatter that FALLS: height cycles down tick clock + wraps -> animates, not static. WARM
+// cells -> blue rain streaks (gradient: faded motion-tail top, bright drop head bottom; heavier = more,
+// longer, brighter). COLD cells (below snow line) -> white snow: slower fall, lazy sway, soft dots, no
+// tail. Deterministic (tick clock + hashed jitter, no per-frame RNG).
 fn rain_visuals(gen: Res<GenState>, mut gizmos: Gizmos) {
     use std::f32::consts::{FRAC_PI_2, PI, TAU};
     let (rows, cols) = (44, 88);
-    // Fall span + speed are CONSTANT (not derived from rain intensity). rain_at animates every tick (clouds
-    // drift), so an intensity-derived span made the modulus + jitter jump each tick -> drops bounced up/down
-    // back+forth instead of falling. FALL_SPEED*FALL_SPAN cycle = whole ticks, and the tick is wrapped to an
-    // exact multiple of that cycle -> seamless wrap + no f32 precision drift on long runs.
-    const FALL_SPAN: f32 = 9.0; // drop travel distance (surface .. top of streak)
+    // Fall span + speed CONSTANT (not from rain intensity). rain_at animates every tick (clouds drift), so
+    // intensity-derived span made modulus + jitter jump each tick -> drops bounced instead of falling.
+    // FALL_SPEED*FALL_SPAN cycle = whole ticks, tick wrapped to exact multiple of cycle -> seamless wrap,
+    // no f32 precision drift on long runs.
+    const FALL_SPAN: f32 = 9.0; // drop travel distance (surface .. top of streak), world units
     const FALL_SPEED: f32 = 0.25; // rain: units per tick
-    const SNOW_SPEED: f32 = 0.10; // snow drifts down ~2.5x slower than rain
-    // Snow line: falling precip renders as snow where GROUND temp < this. Set ABOVE the permanent ice-cap
-    // onset (temp<0.34) because the cloud/air aloft is much colder than the surface, so precip falls as snow
-    // well outside the year-round ice (snow line ~50deg lat). Tuned vs the rain field: at 0.34 it never snowed
-    // (rain never reaches that cold); 0.65 -> snow in ~60% of ticks (see sphere test snow_cells_exist).
+    const SNOW_SPEED: f32 = 0.10; // snow drifts ~2.5x slower than rain
+    // Snow line: precip renders as snow where GROUND temp < this. ABOVE permanent ice-cap onset (temp<0.34)
+    // because air aloft much colder than surface -> snow falls well outside year-round ice (snow line
+    // ~50deg lat). Tuned vs rain field: 0.34 never snowed (rain never that cold); 0.65 -> snow ~60% of ticks
+    // (see sphere test snow_cells_exist).
     const SNOW_TEMP: f32 = 0.65;
-    // 180000 = 5000*(FALL_SPAN/FALL_SPEED) = 2000*(FALL_SPAN/SNOW_SPEED): exact multiple of BOTH fall cycles,
-    // so rain AND snow phase identically across the wrap (seamless) with no f32 precision drift on long runs.
+    // 180000 = 5000*(FALL_SPAN/FALL_SPEED) = 2000*(FALL_SPAN/SNOW_SPEED): exact multiple of BOTH fall
+    // cycles -> rain AND snow phase identically across wrap (seamless), no f32 drift on long runs.
     let t = (gen.tick % 180_000) as f32;
     for j in 0..rows {
         for i in 0..cols {
@@ -1081,14 +1122,14 @@ fn rain_visuals(gen: Res<GenState>, mut gizmos: Gizmos) {
             }
             let (east, north) = crate::sphere::tangent_frame(d);
             let base = crate::sphere::surface_pos(d, 0.0);
-            // cold cells get snow: white drifting flakes (slow fall + side-sway, soft dots, no motion tail);
-            // warmer cells keep the bright blue rain streaks. Threshold tracks the visible ice cap.
+            // cold cells get snow: white drifting flakes (slow fall + side-sway, soft dots, no tail); warmer
+            // keep bright blue rain. Threshold tracks visible ice cap.
             if crate::sphere::base_temperature(d) < SNOW_TEMP {
                 let flakes = 2 + (r * 5.0) as usize; // heavier snow = denser scatter (2..7)
                 for k in 0..flakes {
                     let seed = ((j * cols + i) * 8 + k) as u32;
                     let ph = hash01(seed ^ 0xC3) * TAU; // per-flake sway phase
-                    // slow descent on the shared seamless clock, plus a lazy back-and-forth horizontal drift
+                    // slow descent on shared seamless clock + lazy horizontal drift
                     let fall =
                         FALL_SPAN - ((t * SNOW_SPEED + hash01(seed ^ 0xAA) * FALL_SPAN) % FALL_SPAN);
                     let sway = east * (t * 0.04 + ph).sin() * 1.2 + north * (t * 0.03 + ph).cos() * 0.8;
@@ -1098,47 +1139,47 @@ fn rain_visuals(gen: Res<GenState>, mut gizmos: Gizmos) {
                         + sway;
                     let p = foot + d * (fall + 0.5);
                     let flake = Color::srgba(0.93, 0.95, 1.0, (0.40 + 0.40 * r).min(0.85));
-                    // a tiny soft dot: short segment along up (no fading tail -> reads as a flake, not a streak)
+                    // tiny soft dot: short segment along up (no tail -> reads as flake, not streak)
                     gizmos.line(p, p + d * 0.25, flake);
                 }
                 continue;
             }
-            let drops = 1 + (r * 4.0) as usize; // heavier downpour scatters more drops (1..5)
+            let drops = 1 + (r * 4.0) as usize; // heavier downpour = more drops (1..5)
             for k in 0..drops {
                 let seed = ((j * cols + i) * 8 + k) as u32;
-                // spread the drop across the cell footprint in the tangent plane
+                // spread drop across cell footprint in tangent plane
                 let foot =
                     base + east * (hash01(seed) - 0.5) * 4.0 + north * (hash01(seed ^ 0x55) - 0.5) * 4.0;
-                // fall: bottom of the streak slides FALL_SPAN..0 over time then wraps back to the top
+                // fall: streak bottom slides FALL_SPAN..0 then wraps back to top
                 let fall =
                     FALL_SPAN - ((t * FALL_SPEED + hash01(seed ^ 0xAA) * FALL_SPAN) % FALL_SPAN);
                 let len = 1.2 + 1.5 * r; // heavier rain = longer streaks
                 let head = Color::srgba(0.70, 0.80, 1.0, (0.35 + 0.5 * r).min(0.85)); // bright drop head
-                let tail = Color::srgba(0.70, 0.80, 1.0, 0.0); // fades into a motion tail
+                let tail = Color::srgba(0.70, 0.80, 1.0, 0.0); // fades into motion tail
                 gizmos.line_gradient(foot + d * (fall + len + 0.5), foot + d * (fall + 0.5), tail, head);
             }
         }
     }
 }
 
-// Drifting clouds as solid translucent puffs (not wireframe). A fixed grid of flattened white spheres
-// rides a shell well above the tallest trees; each frame its opacity + size track the cloud field, which
-// scrolls with the wind -> clouds form, drift, and dissolve. CLOUD_ALT clears the terrain + trees.
+// Drifting clouds as solid translucent puffs (not wireframe). Fixed grid of flattened white spheres rides
+// shell well above tallest trees; each frame opacity + size track cloud field which scrolls with wind ->
+// clouds form, drift, dissolve. cloud_alt() clears terrain + trees.
 #[derive(Component)]
 struct CloudPuff {
-    anchor: Vec3,   // fixed field-space home; each frame it rides this latitude's wind to its drifted pos
-    moist: f32,     // ground moisture below the anchor; wetter ground feeds a bigger, taller cloud
-    grow: f32,      // 0..1 smoothed fullness; ramps toward target so clouds build + dissolve (no pop-in)
-    scale_var: f32, // per-puff size multiplier (~0.6..1.6) so a cloud reads as lumpy, not a grid of clones
+    anchor: Vec3,   // fixed field-space home; each frame rides this latitude wind to drifted pos
+    moist: f32,     // ground moisture below anchor; wetter -> bigger taller cloud
+    grow: f32,      // 0..1 smoothed fullness; ramps toward target -> build + dissolve (no pop-in)
+    scale_var: f32, // per-puff size mult (~0.6..1.6) -> cloud lumpy, not grid of clones
     flat: f32,      // per-puff vertical squash (thinner = wispier); flattens along local up
-    hbias: f32,     // small per-puff altitude offset so puffs layer instead of sitting on one shell
+    hbias: f32,     // per-puff altitude offset -> puffs layer instead of one shell
 }
 
 fn cloud_alt() -> f32 {
     crate::sphere::PLANET_R + crate::sphere::ELEV_MAX + 10.0
 }
 
-// Cheap deterministic 0..1 from an integer seed (jitter + per-puff variation; keeps spawn reproducible).
+// Cheap deterministic 0..1 from integer seed (jitter + per-puff variation; spawn reproducible).
 fn hash01(n: u32) -> f32 {
     let x = n.wrapping_mul(2654435761) ^ (n >> 15);
     (x.wrapping_mul(40503) & 0xffff) as f32 / 65535.0
@@ -1152,13 +1193,13 @@ fn spawn_clouds(
     use std::f32::consts::{FRAC_PI_2, PI, TAU};
     let mesh = meshes.add(Sphere::new(1.0).mesh().ico(2).unwrap());
     let alt = cloud_alt();
-    // Denser grid + per-puff jitter so cloudy regions read as clusters of varied fluffy puffs, not a lattice.
+    // Dense grid + per-puff jitter -> cloudy regions read as clusters of varied puffs, not a lattice.
     let (rows, cols) = (22, 44);
     let (dlat, dlon) = (PI * 0.92 / rows as f32, TAU / cols as f32);
     for j in 0..rows {
         for i in 0..cols {
             let seed = (j as u32) * cols + i as u32;
-            // jitter each puff off the exact grid (up to ~0.6 cell) so the pattern looks organic
+            // jitter each puff off exact grid (up to ~0.6 cell) -> organic pattern
             let lat = -FRAC_PI_2 * 0.92 + (PI * 0.92) * (j as f32 + 0.5) / rows as f32
                 + (hash01(seed) - 0.5) * dlat * 1.2;
             let lon = -PI + TAU * (i as f32 + 0.5) / cols as f32 + (hash01(seed ^ 0x9e37) - 0.5) * dlon * 1.2;
@@ -1173,10 +1214,10 @@ fn spawn_clouds(
                 MeshMaterial3d(mat),
                 Transform::from_translation(anchor * alt),
                 Visibility::Hidden,
-                // Clouds don't cast (for now): a translucent Blend mesh casts a FULL OPAQUE shadow in Bevy
-                // (alpha is ignored in the shadow pass), so casting big overlapping puffs = hard black blobs.
-                // A true ~50%-opacity soft cloud shadow needs alpha-HASHED (dithered) shadows = a small custom
-                // shadow shader; until that lands, clouds stay non-casting so they read soft + transparent.
+                // Clouds don't cast (for now): GOTCHA: translucent Blend mesh casts FULL OPAQUE shadow in
+                // Bevy (alpha ignored in shadow pass) -> big overlapping puffs = hard black blobs. True
+                // ~50% soft cloud shadow needs alpha-HASHED (dithered) shadows = small custom shadow shader;
+                // until then clouds stay non-casting so they read soft + transparent.
                 bevy::light::NotShadowCaster,
                 CloudPuff {
                     anchor,
@@ -1200,19 +1241,19 @@ fn update_clouds(
     let dt = time.delta_secs();
     let alt = cloud_alt();
     for (mut puff, mm, mut vis, mut tf) in &mut q {
-        // Glide: the cloud PATTERN drifts at -wind per tick (features move opposite the sample rotation), so
-        // riding the anchor by -a keeps each puff sitting on its own cloud as it sweeps across the sky.
+        // Glide: cloud PATTERN drifts at -wind per tick (features move opposite sample rotation), so riding
+        // anchor by -a keeps each puff on its own cloud as it sweeps across sky.
         let a = -(gen.tick as f32) * crate::sphere::zonal_wind(puff.anchor);
         let (s, c) = (a.sin(), a.cos());
         let an = puff.anchor;
         let dir = Vec3::new(c * an.x - s * an.z, an.y, s * an.x + c * an.z);
-        // Cover sampled at the drifted position -> rain (same field) falls under the visible cloud.
+        // Cover sampled at drifted pos -> rain (same field) falls under visible cloud.
         let cov = crate::sphere::cloud_cover(dir, gen.tick);
-        // Target fullness: weather (cloud cover) scaled by ground moisture below (wet ground feeds taller
-        // clouds). Below the cover threshold target is 0 -> the puff shrinks + fades back out, not vanishes.
+        // Target fullness: cloud cover x ground moisture below (wet -> taller). Below cover threshold 0.18
+        // target = 0 -> puff shrinks + fades, not vanishes.
         let target = if cov < 0.18 { 0.0 } else { cov * (0.55 + 0.45 * puff.moist) };
-        // Ramp grow toward target over seconds so clouds build up + dissolve smoothly (no pop-in at full
-        // size). Build slow, dissipate a touch faster, like real cumulus.
+        // Ramp grow toward target over seconds -> smooth build + dissolve (no pop-in). Build slow,
+        // dissipate faster, like real cumulus.
         let rate = if target > puff.grow { 0.6 } else { 1.1 };
         puff.grow += (target - puff.grow) * (dt * rate).min(1.0);
         if puff.grow < 0.02 {
@@ -1224,25 +1265,25 @@ fn update_clouds(
         if *vis != Visibility::Inherited {
             *vis = Visibility::Inherited;
         }
-        // Move + orient: sit at the drifted position, lie flat against the sky shell (squash along local up).
+        // Move + orient: sit at drifted pos, lie flat against sky shell (squash along local up).
         tf.translation = dir * (alt + puff.hbias);
         tf.rotation = Quat::from_rotation_arc(Vec3::Y, dir);
         if let Some(m) = mats.get_mut(&mm.0) {
-            // Opacity tracks grow so a forming cloud fades in from clear; wispy, thickest cap ~0.5.
-            // Thicker cover greys the puff (rain clouds are darker underneath); thin cover stays bright white.
+            // Opacity tracks grow -> forming cloud fades in from clear; thickest cap ~0.5. Thicker cover
+            // greys puff (rain clouds darker underneath); thin cover stays bright white.
             let shade = 1.0 - 0.28 * cov;
             m.base_color = Color::srgba(0.96 * shade, 0.97 * shade, 1.0 * shade, (0.45 * puff.grow).min(0.5));
         }
-        // Start as a small wisp, grow into a full puff; per-puff size + squash make clouds lumpy not uniform.
+        // Start small wisp, grow to full puff; per-puff size + squash -> clouds lumpy not uniform.
         let s = (2.0 + 16.0 * puff.grow) * puff.scale_var;
         tf.scale = Vec3::new(s, s * puff.flat, s); // squash along local up (set by tf.rotation) = flat cloud
     }
 }
 
-// Wildfire (immediate-mode gizmos). Each burning cell renders as a teardrop cluster of flickering flame
-// tongues (hot yellow-white base fading to dim red at the swaying tips) plus a few rising, cooling embers.
-// Tongue count, body radius + height scale with burn intensity. Tight to the land cell so coarse-grid
-// coastal cells don't spill flame onto the sea. Deterministic (tick clock + hashed jitter) -> reproducible.
+// Wildfire (immediate-mode gizmos). Each burning cell = teardrop cluster of flickering flame tongues (hot
+// yellow-white base -> dim red swaying tips) + a few rising cooling embers. Tongue count, body radius +
+// height scale with burn intensity. Tight to land cell so coarse-grid coastal cells don't spill onto sea.
+// Deterministic (tick clock + hashed jitter).
 fn fire_visuals(fire: Res<Fire>, gen: Res<GenState>, mut gizmos: Gizmos) {
     let t = gen.tick as f32;
     for c in 0..fire.cell.len() {
@@ -1252,35 +1293,35 @@ fn fire_visuals(fire: Res<Fire>, gen: Res<GenState>, mut gizmos: Gizmos) {
         }
         let surf = grid_cell_surface(c);
         let up = surf.normalize_or_zero();
-        // safety: never draw a flame over water (sim won't ignite ocean cells; this guards coarse-grid
-        // coastal cells whose center reads as sea -> no flame spilling onto the waves).
+        // safety: never draw flame over water (sim won't ignite ocean cells; guards coarse-grid coastal
+        // cells whose center reads as sea -> no flame on waves).
         if crate::sphere::is_ocean(up) {
             continue;
         }
         let (east, north) = crate::sphere::tangent_frame(up);
         use std::f32::consts::TAU;
-        // flame body: many short tongues packed in a small disk, fanning into a teardrop that converges to a
-        // point. Hot + bright at the base, cooling to dim red at the flickering tips (like real fire).
-        let tongues = 10 + (f * 16.0) as usize; // hotter fire = denser, fuller flame body (10..26)
+        // flame body: many short tongues packed in small disk, fanning into teardrop converging to point.
+        // Hot bright at base, cooling to dim red at flickering tips.
+        let tongues = 10 + (f * 16.0) as usize; // hotter = fuller flame body (10..26)
         for k in 0..tongues {
             let seed = (c * 32 + k) as u32;
-            // base point in a disk, denser toward the center (sqrt) so the flame has a solid core
+            // base point in disk, denser toward center (sqrt) -> solid core
             let ang = hash01(seed) * TAU;
             let rad = hash01(seed ^ 0x9e3);
             let rr = rad.sqrt() * (0.4 + 0.6 * f); // body radius grows with intensity (~ up to 1.0)
             let (bx, bz) = (ang.cos() * rr, ang.sin() * rr);
             let foot = surf + up * 0.05 + east * bx + north * bz;
-            // height: center-tall teardrop (edge tongues short), pulsing on the tick clock
+            // height: center-tall teardrop (edge tongues short), pulsing on tick clock
             let flick = 0.5 + 0.5 * (t * 0.30 + seed as f32 * 1.7).sin();
             let h = (0.6 + 1.8 * f) * (1.0 - 0.6 * rad) * (0.55 + 0.7 * flick); // ~ up to 2.4
             let sway = (t * 0.22 + seed as f32 * 2.3).sin() * 0.3 * f; // tips wander as it flickers
-            // tips pull back toward the center as they rise -> the flame comes to a point
+            // tips pull back toward center as they rise -> flame comes to a point
             let tip = surf + up * (0.05 + h) + east * (bx * 0.2 + sway) + north * (bz * 0.2 + sway * 0.5);
-            let hot = Color::srgb(1.0, 0.92, 0.55); // near yellow-white, hottest at the base
-            let cool = Color::srgba(0.85, 0.12, 0.02, 0.55); // dim red, fading at the cooling tip
+            let hot = Color::srgb(1.0, 0.92, 0.55); // near yellow-white, hottest at base
+            let cool = Color::srgba(0.85, 0.12, 0.02, 0.55); // dim red, fading at cooling tip
             gizmos.line_gradient(foot, tip, hot, cool);
         }
-        // embers: small bright motes that rise, drift wider, and fade as they cool
+        // embers: small bright motes rise, drift wider, fade as they cool
         let embers = (f * 4.0) as usize;
         for k in 0..embers {
             let seed = (c * 16 + 100 + k) as u32;
@@ -1291,7 +1332,7 @@ fn fire_visuals(fire: Res<Fire>, gen: Res<GenState>, mut gizmos: Gizmos) {
                 + up * (1.0 + rise)
                 + east * (hash01(seed ^ 0x3) - 0.5) * 2.0 * frac
                 + north * (hash01(seed ^ 0x7) - 0.5) * 2.0 * frac;
-            let lit = Color::srgba(1.0, 0.6, 0.2, (1.0 - frac) * 0.9); // bright, dims as it cools
+            let lit = Color::srgba(1.0, 0.6, 0.2, (1.0 - frac) * 0.9); // bright, dims as cools
             let gone = Color::srgba(1.0, 0.3, 0.05, 0.0);
             gizmos.line_gradient(p, p + up * 0.4, lit, gone);
         }
@@ -1306,13 +1347,13 @@ fn log_viz_help() {
 }
 
 
-// Recolor + rescale a creature when its genome changes (spawn + every generation boundary).
+// Recolor + rescale creature on genome change (spawn + every generation boundary).
 fn restyle_creatures(
     mut mats: ResMut<Assets<StandardMaterial>>,
     mut q: Query<(&Genome, &MeshMaterial3d<StandardMaterial>, &mut Transform), Changed<Genome>>,
 ) {
     for (g, mm, mut tf) in &mut q {
-        let (color, scale) = creature_look(g); // skin_hue/sat genes, venom warning, fur/armor, fish body plan
+        let (color, scale) = creature_look(g); // skin_hue/sat, venom warning, fur/armor, fish body plan
         if let Some(m) = mats.get_mut(&mm.0) {
             m.base_color = color;
         }
@@ -1326,10 +1367,9 @@ fn toggle_sensors(keys: Res<ButtonInput<KeyCode>>, mut show: ResMut<ShowSensors>
     }
 }
 
-// God-controls (M6): live disturbances to steer the ecosystem + watch it respond. L = lightning strike
-// (ignite a wildfire in the driest land cell -> it spreads/burns via fire_step). K = mass-mortality event
-// (kill ~a third of creatures -> watch the population recover). Pokes sim resources/state transiently;
-// no balance constants changed. Uses no sim RNG (stays deterministic-safe).
+// God-controls (M6): live disturbances to steer ecosystem + watch response. L = lightning (ignite
+// wildfire in driest land cell -> spreads via fire_step). K = mass-mortality (kill ~1/3 creatures).
+// Pokes sim resources/state transiently; no balance constants changed. Uses no sim RNG (deterministic-safe).
 fn god_disturbances(
     keys: Res<ButtonInput<KeyCode>>,
     gen: Res<GenState>,
@@ -1340,21 +1380,21 @@ fn god_disturbances(
     mut rng: ResMut<crate::rng::Rng>,
 ) {
     if keys.just_pressed(KeyCode::KeyB) {
-        // "make more life!" -> seed a burst of creatures cloned from the living pop (competent brains)
+        // seed burst of creatures cloned from living pop (competent brains)
         const BURST: usize = 200;
         let parents: Vec<Genome> = creatures.iter().filter(|(_, a)| a.0).map(|(g, _)| g.clone()).collect();
         crate::sim::seed_burst(&mut commands, &mut rng, &parents, BURST);
         info!("god: seeded {BURST} new creatures (clones of the living)");
     }
     if keys.just_pressed(KeyCode::KeyP) {
-        // populate the WHOLE planet: plants + trees + creatures, each in habitat it can survive (aquatic in
-        // sea, alpine in mountains, climate-matched). Fills every region instead of waiting for spread.
+        // populate WHOLE planet: plants + trees + creatures, each in survivable habitat (aquatic in sea,
+        // alpine in mountains, climate-matched). Fills every region instead of waiting for spread.
         let parents: Vec<Genome> = creatures.iter().filter(|(_, a)| a.0).map(|(g, _)| g.clone()).collect();
         crate::sim::seed_planet(&mut commands, &mut rng, &parents, gen.ntypes(), 300, 600, 120);
         info!("god: seeded the whole planet (300 creatures, 600 plants, 120 trees)");
     }
     if keys.just_pressed(KeyCode::KeyL) {
-        // ignite the driest non-ocean grid cell (most flammable fuel)
+        // ignite driest non-ocean grid cell (most flammable fuel)
         let mut best = 0usize;
         let mut driest = f32::INFINITY;
         for c in 0..fire.cell.len() {
@@ -1378,7 +1418,7 @@ fn god_disturbances(
             if alive.0 {
                 i += 1;
                 if i.is_multiple_of(3) {
-                    alive.0 = false; // sim turns it into carrion + despawns next step
+                    alive.0 = false; // sim turns into carrion + despawns next step
                     killed += 1;
                 }
             }
@@ -1387,16 +1427,16 @@ fn god_disturbances(
     }
 }
 
-// Start the visualizer at a calm, watchable pace so day/night + creature motion read clearly. The sim is
-// unchanged (same ticks); only how fast the virtual clock feeds FixedUpdate. Speed up with +/keys anytime.
+// Start visualizer at calm pace so day/night + creature motion read clearly. Sim unchanged (same ticks);
+// only how fast virtual clock feeds FixedUpdate. Speed up with +/- keys.
 const VIEW_SPEED_DEFAULT: f32 = 0.35;
 fn set_initial_speed(mut vtime: ResMut<Time<Virtual>>) {
     vtime.set_relative_speed(VIEW_SPEED_DEFAULT);
 }
 
-// Time god-controls: SPACE pause/resume, +/- halve/double, number keys 1-5 jump to a preset speed. Drives
-// Bevy's virtual clock that FixedUpdate advances from -> pausing/speeding it scales the whole sim, no sim
-// change. Range 0.1x (study a single creature) .. 16x (fast-forward evolution).
+// Time god-controls: SPACE pause/resume, +/- halve/double, 1-5 jump to preset speed. Drives Bevy virtual
+// clock FixedUpdate advances from -> pause/speed scales whole sim, no sim change. Range 0.1x (study one
+// creature) .. 16x (fast-forward evolution).
 fn time_controls(keys: Res<ButtonInput<KeyCode>>, mut vtime: ResMut<Time<Virtual>>) {
     if keys.just_pressed(KeyCode::Space) {
         if vtime.is_paused() {
@@ -1407,7 +1447,7 @@ fn time_controls(keys: Res<ButtonInput<KeyCode>>, mut vtime: ResMut<Time<Virtual
             info!("sim PAUSED");
         }
     }
-    // preset speeds on the number row (1=slowest .. 5=fast)
+    // preset speeds on number row (1=slowest .. 5=fast)
     let preset = if keys.just_pressed(KeyCode::Digit1) {
         Some(0.1)
     } else if keys.just_pressed(KeyCode::Digit2) {
@@ -1441,24 +1481,24 @@ fn time_controls(keys: Res<ButtonInput<KeyCode>>, mut vtime: ResMut<Time<Virtual
     }
 }
 
-// --- click-to-inspect (left-click selects a creature/plant; an on-screen panel shows its stats) ---
+// --- click-to-inspect (left-click selects creature/plant; on-screen panel shows stats) ---
 
 #[derive(Resource, Default)]
 pub struct Selected {
     pub entity: Option<Entity>,
-    pub follow: bool,        // camera tracks the selected entity (toggle with F)
-    pub follow_offset: Vec3, // camera offset from target captured when follow engaged
+    pub follow: bool,        // camera tracks selected entity (toggle F)
+    pub follow_offset: Vec3, // camera offset from target, captured when follow engaged
 }
 
 #[derive(Component)]
 struct StatsText;
 
-// Live world dashboard (bottom-left): population, day, average evolved genes + niche counts. Render-only.
+// Live world dashboard (bottom-left): population, day, avg evolved genes + niche counts. Render-only.
 #[derive(Component)]
 struct WorldStatsText;
 
-// Sky color tracks the sun in walk mode (black sky made midday look like night). Dark night -> warm
-// dawn/dusk -> blue midday, by local daylight at the walker. Orbit keeps near-black space (you're in space).
+// Sky color tracks sun in walk mode (black sky made midday look like night). Dark night -> warm
+// dawn/dusk -> blue midday, by local daylight at walker. Orbit keeps near-black space.
 fn update_sky(
     gen: Res<GenState>,
     offset: Res<SunOffset>,
@@ -1476,7 +1516,7 @@ fn update_sky(
         let vtick = (gen.tick as i64 + offset.0).rem_euclid(day) as u32;
         let d = crate::sphere::daylight_at(dir, vtick);
         if underwater.0 {
-            // submerged: a murky blue-green "horizon", darker than the open sky + dimming with daylight
+            // submerged: murky blue-green horizon, darker than open sky + dims with daylight
             Vec3::new(0.02, 0.12, 0.20) * (0.35 + 0.65 * d)
         } else {
             let night = Vec3::new(0.02, 0.03, 0.07);
@@ -1492,8 +1532,8 @@ fn update_sky(
     clear.0 = Color::srgb(c.x, c.y, c.z);
 }
 
-// Flag whether the walk eye is below the sea surface (only in walk mode + over ocean). Other systems read
-// Underwater to tint the frame blue + murk the sky. Cleared in orbit.
+// Flag whether walk eye below sea surface (walk mode + over ocean only). Others read Underwater to tint
+// frame blue + murk sky. Cleared in orbit.
 fn track_underwater(
     mode: Res<crate::camera::CameraMode>,
     walkers: Query<&crate::camera::WalkCam>,
@@ -1501,7 +1541,7 @@ fn track_underwater(
 ) {
     let sub = *mode == crate::camera::CameraMode::Walk
         && walkers.single().is_ok_and(|w| {
-            let depth = (-crate::sphere::elevation(w.dir)).max(0.0); // local water depth (sea surface above the seafloor)
+            let depth = (-crate::sphere::elevation(w.dir)).max(0.0); // local water depth (sea surface above seafloor)
             crate::sphere::is_ocean(w.dir) && w.eye_alt < depth
         });
     if underwater.0 != sub {
@@ -1509,8 +1549,8 @@ fn track_underwater(
     }
 }
 
-// Spawn the full-screen blue tint overlay (hidden until underwater). GlobalZIndex(-1) keeps it above the
-// 3D scene but below the HUD text -> the world tints blue while the dashboard stays readable.
+// Spawn full-screen blue tint overlay (hidden until underwater). GlobalZIndex(-1) keeps it above 3D scene
+// but below HUD text -> world tints blue, dashboard stays readable.
 fn spawn_underwater_tint(mut commands: Commands) {
     commands.spawn((
         Node {
@@ -1526,7 +1566,7 @@ fn spawn_underwater_tint(mut commands: Commands) {
     ));
 }
 
-// Show the blue overlay only while submerged.
+// Show blue overlay only while submerged.
 fn toggle_underwater_tint(
     underwater: Res<Underwater>,
     mut q: Query<&mut Visibility, With<UnderwaterTint>>,
@@ -1539,7 +1579,7 @@ fn toggle_underwater_tint(
     }
 }
 
-// Breathe a slow swell on the ocean shell (a subtle radial scale wobble = a living tide). Cosmetic.
+// Breathe slow swell on ocean shell (subtle radial scale wobble = living tide). Cosmetic.
 fn animate_ocean(gen: Res<GenState>, mut q: Query<&mut Transform, With<Ocean>>) {
     let s = 1.0 + 0.004 * (gen.tick as f32 * 0.03).sin();
     for mut tf in &mut q {
@@ -1547,9 +1587,9 @@ fn animate_ocean(gen: Res<GenState>, mut q: Query<&mut Transform, With<Ocean>>) 
     }
 }
 
-// Aurora curtains: each segment flickers organically (layered sines + a global substorm), glides sideways
-// around the oval, sways, and pulses height -> a restless, random, dancing band. Color is green with tips
-// surging toward magenta/violet during active bursts. Brighter on the night side (daylight washes it out).
+// Aurora curtains: each segment flickers organically (layered sines + global substorm), glides sideways
+// around oval, sways, pulses height -> restless dancing band. Color green, tips surge toward
+// magenta/violet during active bursts. Brighter on night side (daylight washes it out).
 fn update_aurora_curtains(
     gen: Res<GenState>,
     offset: Res<SunOffset>,
@@ -1560,18 +1600,18 @@ fn update_aurora_curtains(
     let t = gen.tick as f32;
     let base_r = crate::sphere::PLANET_R + AURORA_LIFT;
     let substorm = ((t * 0.0009).sin() * 0.5 + 0.5).powf(3.0); // shared planet-wide activity surge
-    const CURTAIN_H: f32 = 16.0; // curtain height (mesh is unit-tall; this scales it)
-    const FOLD_AMP: f32 = 0.10; // magnetic-latitude wave amplitude (radians) -> serpentine draperies
+    const CURTAIN_H: f32 = 16.0; // curtain height (mesh unit-tall; this scales it)
+    const FOLD_AMP: f32 = 0.10; // mag-latitude wave amplitude (radians) -> serpentine draperies
     for (c, mm, mut tf) in &mut q {
         let night = 1.0 - crate::sphere::daylight_at(c.pole, vtick);
         let f = c.freq;
-        // organic flicker: incommensurate sines + the substorm burst
+        // organic flicker: incommensurate sines + substorm burst
         let flick = (0.45
             + 0.30 * (t * f + c.phase).sin()
             + 0.15 * (t * f * 2.3 + c.phase * 1.7).sin()
             + 0.25 * substorm)
             .clamp(0.0, 1.5);
-        // drift around the oval + folded draperies: the band waves north/south (two frequencies) like real curtains
+        // drift around oval + folded draperies: band waves north/south (two frequencies) like real curtains
         let ang = c.ang + c.drift * t + 0.04 * (t * f * 0.7 + c.phase).sin();
         let lat = AURORA_LAT
             + FOLD_AMP * (ang * 5.0 + t * 0.004 + c.phase).sin()
@@ -1585,15 +1625,15 @@ fn update_aurora_curtains(
         let dirp = (pole * lat.sin() + circ * lat.cos()).normalize();
         let n = dirp; // radial up (curtain rises along this = local Y)
         let tang = pole.cross(dirp).normalize(); // around-oval tangent (curtain width = local X)
-        let bin = tang.cross(n); // local Z, RIGHT-HANDED (X x Y = Z) so the quaternion is a real rotation (not a mirror)
+        let bin = tang.cross(n); // local Z, RIGHT-HANDED (X x Y = Z) so quaternion is real rotation, not mirror
         let height = 0.55 + 0.9 * flick; // curtains grow tall when active
         let sway = Quat::from_axis_angle(tang, 0.10 * (t * f * 1.3 + c.phase).sin());
-        tf.translation = dirp * base_r; // base sits on the band; the mesh (local Y) rises outward
+        tf.translation = dirp * base_r; // base on band; mesh (local Y) rises outward
         tf.rotation = sway * Quat::from_mat3(&Mat3::from_cols(tang, n, bin));
         let w = c.width * (0.85 + 0.3 * flick);
-        tf.scale = Vec3::new(w, CURTAIN_H * height, w); // X and Z both = width so the crossed sheets match
-        // brightness + overall fade; the authentic green->red gradient lives in the mesh vertex colors.
-        // Kept soft (cores don't blow to white) for an ethereal look rather than laser beams.
+        tf.scale = Vec3::new(w, CURTAIN_H * height, w); // X and Z both = width so crossed sheets match
+        // brightness + overall fade; green->red gradient lives in mesh vertex colors. Kept soft (cores
+        // don't blow to white) for ethereal look, not laser beams.
         let i = (night * (0.30 + 0.7 * flick)).clamp(0.0, 1.25);
         let alpha = (night * (0.2 + 0.7 * flick)).clamp(0.0, 0.85);
         if let Some(mat) = mats.get_mut(&mm.0) {
@@ -1602,10 +1642,10 @@ fn update_aurora_curtains(
     }
 }
 
-// Globe climate recolor: as the slow Climate grid drifts, repaint the planet's LAND vertices (dry -> sand,
-// wet -> green) so deserts + rainforests visibly form/migrate over time. Throttled (climate is geological):
-// only repaints every GLOBE_RECOLOR_TICKS sim-ticks. Cheap: one pass rewriting ATTRIBUTE_COLOR from the
-// bilinear-sampled climate moisture (ocean depth + polar ice branches are moisture-independent -> stable).
+// Globe climate recolor: as slow Climate grid drifts, repaint planet LAND vertices (dry -> sand, wet ->
+// green) -> deserts + rainforests form/migrate over time. Throttled (climate geological): repaints every
+// GLOBE_RECOLOR_TICKS sim-ticks. Cheap: one pass rewriting ATTRIBUTE_COLOR from bilinear-sampled climate
+// moisture (ocean depth + polar ice branches moisture-independent -> stable).
 const GLOBE_RECOLOR_TICKS: u32 = 600; // ~10 sim-seconds between repaints (51k verts, negligible cost)
 fn update_globe_climate(
     gen: Res<GenState>,
@@ -1615,12 +1655,12 @@ fn update_globe_climate(
     mut next: Local<u32>,
 ) {
     if gen.tick < *next {
-        return; // not time yet (also paints once at startup, when tick 0 >= next 0)
+        return; // not time yet (also paints once at startup: tick 0 >= next 0)
     }
     *next = gen.tick + GLOBE_RECOLOR_TICKS;
     let Ok(h) = planet.single() else { return };
     let Some(mesh) = meshes.get_mut(&h.0) else { return };
-    // own the positions so the immutable borrow ends before we re-insert the color attribute
+    // clone positions so immutable borrow ends before re-inserting color attribute
     let positions: Vec<[f32; 3]> = match mesh.attribute(Mesh::ATTRIBUTE_POSITION) {
         Some(bevy::mesh::VertexAttributeValues::Float32x3(p)) => p.clone(),
         _ => return,
@@ -1628,7 +1668,7 @@ fn update_globe_climate(
     let colors: Vec<[f32; 4]> = positions
         .iter()
         .map(|p| {
-            // vertex pos = d * (R + elevation) -> normalize recovers the surface direction
+            // vertex pos = d * (R + elevation) -> normalize recovers surface direction
             let d = Vec3::new(p[0], p[1], p[2]).normalize_or_zero();
             let m = climate.sample(d);
             let c = crate::sphere::biome_color_with_moisture(d, m);
@@ -1638,12 +1678,12 @@ fn update_globe_climate(
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
 }
 
-// Top-center day/night phase readout (walk mode). Tells you where in the cycle you are at a glance.
+// Top-center day/night phase readout (walk mode). Shows where in cycle you are.
 #[derive(Component)]
 struct DayCycleText;
 
 fn spawn_daycycle_ui(mut commands: Commands) {
-    // full-width row, centered -> child text sits middle-top
+    // full-width centered row -> child text sits middle-top
     commands
         .spawn(Node {
             position_type: PositionType::Absolute,
@@ -1660,8 +1700,8 @@ fn spawn_daycycle_ui(mut commands: Commands) {
         ));
 }
 
-// Set the phase label + color from local daylight at the walker (visual sky time). Hidden in orbit (there
-// you see the whole terminator anyway). rising vs falling splits dawn/dusk + morning/afternoon.
+// Set phase label + color from local daylight at walker (visual sky time). Hidden in orbit (you see whole
+// terminator there). rising vs falling splits dawn/dusk + morning/afternoon.
 fn update_daycycle(
     gen: Res<GenState>,
     offset: Res<SunOffset>,
@@ -1710,7 +1750,7 @@ fn spawn_world_stats_ui(mut commands: Commands) {
     ));
 }
 
-// --- legend overlay (H toggles a full panel explaining every HUD field + control) ---
+// --- legend overlay (H toggles full panel explaining every HUD field + control) ---
 
 #[derive(Resource, Default)]
 struct ShowLegend(bool);
@@ -1783,7 +1823,7 @@ fn spawn_legend_ui(mut commands: Commands) {
     ));
 }
 
-// H toggles the legend panel. Starts hidden; the top-left hint tells the player it exists.
+// H toggles legend panel. Starts hidden; top-left hint tells player it exists.
 fn toggle_legend(
     keys: Res<ButtonInput<KeyCode>>,
     mut show: ResMut<ShowLegend>,
@@ -1797,7 +1837,7 @@ fn toggle_legend(
     }
 }
 
-// A unicode sparkline of a history series, scaled 0..max.
+// Unicode sparkline of history series, scaled 0..max.
 fn sparkline(hist: &[u16], max: f32) -> String {
     const B: [char; 8] = ['\u{2581}', '\u{2582}', '\u{2583}', '\u{2584}', '\u{2585}', '\u{2586}', '\u{2587}', '\u{2588}'];
     hist.iter()
@@ -1808,9 +1848,9 @@ fn sparkline(hist: &[u16], max: f32) -> String {
         .collect()
 }
 
-// Recompute the world dashboard each frame from the living population (cheap aggregate over creatures).
-// Keeps a rolling population history (sampled ~1x/sec) and renders it as a sparkline -> a lightweight
-// "population over time" chart (M7) right in the HUD.
+// Recompute world dashboard each frame from living population (cheap aggregate over creatures). Keeps
+// rolling population history (sampled ~1x/sec), renders as sparkline -> lightweight "population over
+// time" chart (M7) in HUD.
 fn update_world_stats(
     gen: Res<GenState>,
     vtime: Res<Time<Virtual>>,
@@ -1837,7 +1877,7 @@ fn update_world_stats(
     }
     let nf = n.max(1) as f32;
     let day = gen.tick / crate::sphere::DAY_TICKS;
-    // sample population ~once a second into a rolling history (~48 samples) for the trend sparkline
+    // sample population ~1x/sec into rolling history (~48 samples) for trend sparkline
     *frame += 1;
     if (*frame).is_multiple_of(60) {
         hist.push(n as u16);
@@ -1872,7 +1912,7 @@ fn spawn_stats_ui(mut commands: Commands) {
     ));
 }
 
-// Ray-sphere hit: nearest positive t along (origin + t*dir) intersecting the sphere, else None.
+// Ray-sphere hit: nearest positive t along (origin + t*dir) intersecting sphere, else None.
 fn ray_hit(origin: Vec3, dir: Vec3, center: Vec3, r: f32) -> Option<f32> {
     let oc = origin - center;
     let b = oc.dot(dir);
@@ -1890,7 +1930,7 @@ fn ray_hit(origin: Vec3, dir: Vec3, center: Vec3, r: f32) -> Option<f32> {
     }
 }
 
-// Left-click picks the nearest creature/plant under the cursor (only when not in look mode).
+// Left-click picks nearest creature/plant under cursor (only when not in look mode).
 fn pick_on_click(
     mouse: Res<ButtonInput<MouseButton>>,
     windows: Query<(&Window, &CursorOptions), With<PrimaryWindow>>,
@@ -1904,7 +1944,7 @@ fn pick_on_click(
     }
     let Ok((window, cursor_opts)) = windows.single() else { return };
     if cursor_opts.grab_mode != CursorGrabMode::None {
-        return; // in look mode (right-click captured): cursor not usable for picking
+        return; // look mode (right-click captured): cursor not usable for picking
     }
     let Some(cursor) = window.cursor_position() else { return };
     let Ok((camera, cam_tf)) = cam.single() else { return };
@@ -1922,28 +1962,28 @@ fn pick_on_click(
         consider(e, t.translation(), 1.0, &mut best);
     }
     for (e, t, tree) in &foods {
-        // trees are big -> use a generous pick radius scaled by their size; plants are small
+        // trees big -> generous pick radius scaled by size; plants small
         let r = if tree.is_some() { 2.0 * t.compute_transform().scale.max_element() } else { 0.8 };
         consider(e, t.translation(), r, &mut best);
     }
     if let Some((_, e)) = best {
         selected.entity = Some(e);
     }
-    // miss keeps the current selection (so follow isn't lost by a stray click)
+    // miss keeps current selection (so follow not lost by stray click)
 }
 
-// Draw a yellow ring around the selected entity each frame so you can see what's picked.
+// Draw yellow ring around selected entity each frame -> shows what's picked.
 fn draw_selection(selected: Res<Selected>, q: Query<&GlobalTransform>, mut gizmos: Gizmos) {
     if let Some(e) = selected.entity {
         if let Ok(tf) = q.get(e) {
-            // ring scales with the entity's size so it reads around big things (trees) too
+            // ring scales with entity size -> reads around big things (trees) too
             let r = 1.0 + 1.4 * tf.compute_transform().scale.max_element();
             gizmos.sphere(tf.translation(), r, Color::srgb(1.0, 1.0, 0.2));
         }
     }
 }
 
-// Update the on-screen panel with the selected entity's live stats (creature or plant/carrion).
+// Update on-screen panel with selected entity live stats (creature or plant/carrion).
 fn update_stats(
     selected: Res<Selected>,
     creatures: Query<(&Energy, &Fitness, &Genome, &DietState, &Alive)>,
@@ -1956,14 +1996,14 @@ fn update_stats(
         return;
     };
     if let Ok((energy, fit, g, diet, alive)) = creatures.get(e) {
-        // dominant nutrient the gut targets (highest uptake gene) + current master digestion expression
+        // dominant nutrient gut targets (highest uptake gene) + current master digestion expression
         let mut dom = 0;
         for t in 1..NUTRIENTS {
             if g.uptake[t] > g.uptake[dom] {
                 dom = t;
             }
         }
-        let breadth = g.uptake.iter().filter(|u| **u > 0.4).count(); // how many nutrients it actively absorbs
+        let breadth = g.uptake.iter().filter(|u| **u > 0.4).count(); // nutrients actively absorbed (uptake > 0.4)
         let master = master_expression(&g.uptake, &diet.reserves, crate::config::RESERVE_REQ, crate::config::MASTER_FLOOR);
         let mode = if g.light_pref > 0.6 { "diurnal" } else if g.light_pref < 0.4 { "nocturnal" } else { "cathemeral" };
         let habitat = if g.swim > 0.6 { "aquatic" } else if g.swim < 0.3 { "land" } else { "amphibious" };
@@ -2001,7 +2041,7 @@ fn update_stats(
         );
     } else if let Ok((pg, st, rot, tree)) = foods.get(e) {
         if let Some(tree) = tree {
-            // creature height needed to feed = tree height - base margin - branch reach (branches hang fruit low)
+            // creature height to feed = tree height - base margin - branch reach (branches hang fruit low)
             let reach = (pg.height - crate::sim::TREE_REACH_MARGIN - pg.branches * crate::sim::BRANCH_REACH).max(0.0);
             text.0 = format!(
                 "TREE  {}\nheight   {:.2}\nbranches {:.2}\nmass     {:.1}\nnutrient {:.2}\n{}",
@@ -2029,7 +2069,7 @@ fn update_stats(
     }
 }
 
-// Draw each sensor as a ray from the creature along its (heading + angle), length = range.
+// Draw each sensor as ray from creature along (heading + angle), length = range.
 fn draw_sensors(
     show: Res<ShowSensors>,
     mut gizmos: Gizmos,
@@ -2053,7 +2093,7 @@ mod tests {
     use super::noon_offset;
     use bevy::prelude::Vec3;
 
-    // noon_offset must put the sun (nearly) overhead the walk point -> daylight ~ |horizontal| of d.
+    // noon_offset must put sun ~overhead walk point -> daylight ~ |horizontal| of d.
     #[test]
     fn noon_offset_lights_the_walk_point() {
         for d in [
