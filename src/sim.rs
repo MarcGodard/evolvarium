@@ -550,7 +550,7 @@ fn diverse_creature(mut g: Genome, i: usize, rng: &mut Rng) -> (Genome, Vec3) {
 
 fn diet_state(_g: &Genome) -> DietState {
     // newborns start with reserves stocked to the satisfaction level, so they aren't instantly deficient
-    DietState { reserves: [RESERVE_REQ; NUTRIENTS], g: 0.0, age: 0, fatigue: 0.0, starve: 0 }
+    DietState { reserves: [RESERVE_REQ; NUTRIENTS], g: 0.0, age: 0, fatigue: 0.0, starve: 0, toxic_load: 0.0 }
 }
 
 // Eating plant matter: absorb each nutrient into reserves (delivered = plant baseline x soil fertility,
@@ -1666,11 +1666,15 @@ pub fn predation_step(
     mut soil: ResMut<Soil>,
     mut cq: Query<(Entity, &Transform, &mut Energy, &mut Fitness, &mut Alive, &Genome), With<Creature>>,
 ) {
-    // snapshot living creatures: (entity, pos, combat, energy, kin-signature). Combat = bite + size.
-    let snap: Vec<(Entity, Vec3, f32, f32, [f32; 10])> = cq
+    // snapshot living creatures: (entity, pos, ATTACK combat, energy, kin-sig, DEFENSE combat, venom, climb).
+    // attack = bite + size; defense = attack + armor (armor protects but doesn't help you hunt).
+    let snap: Vec<(Entity, Vec3, f32, f32, [f32; 10], f32, f32, f32)> = cq
         .iter()
         .filter(|(_, _, _, _, a, _)| a.0)
-        .map(|(e, t, en, _, _, g)| (e, t.translation, g.bite + SIZE_COMBAT * g.size, en.total(), signature(g)))
+        .map(|(e, t, en, _, _, g)| {
+            let attack = g.bite + SIZE_COMBAT * g.size;
+            (e, t.translation, attack, en.total(), signature(g), attack + ARMOR_DEF * g.armor, g.venom, g.climb)
+        })
         .collect();
     if snap.len() < 2 {
         return;
@@ -1679,7 +1683,7 @@ pub fn predation_step(
     let mut gains: HashMap<Entity, f32> = HashMap::new();
     let r2 = ATTACK_RADIUS * ATTACK_RADIUS;
     let rs2 = SOCIAL_RADIUS * SOCIAL_RADIUS;
-    for (ai, &(ae, apos, abite, aenergy, _asig)) in snap.iter().enumerate() {
+    for (ai, &(ae, apos, abite, aenergy, _asig, _, _, _)) in snap.iter().enumerate() {
         if killed.contains(&ae) {
             continue; // a creature killed this tick doesn't also attack
         }
@@ -1689,7 +1693,7 @@ pub fn predation_step(
             continue;
         }
         let mut best: Option<(f32, usize)> = None;
-        for (bi, &(be, bpos, _, _, _)) in snap.iter().enumerate() {
+        for (bi, &(be, bpos, _, _, _, _, _, _)) in snap.iter().enumerate() {
             if bi == ai || killed.contains(&be) {
                 continue;
             }
@@ -1699,20 +1703,25 @@ pub fn predation_step(
             }
         }
         if let Some((_, bi)) = best {
-            let (be, bpos, bbite, _, bsig) = snap[bi];
+            let (be, bpos, _battack, _, bsig, bdef, bven, bclimb) = snap[bi];
             // herd safety: prey surrounded by KIN is harder to pick off (vigilance) -> being social pays
             let mut kin = 0.0f32;
-            for (e2, p2, _, _, s2) in &snap {
+            for (e2, p2, _, _, s2, _, _, _) in &snap {
                 if *e2 != be && bpos.distance_squared(*p2) < rs2 && sig_dist(&bsig, s2) < SOCIAL_SIM {
                     kin += 1.0;
                 }
             }
             let prey_kin = (kin / SOCIAL_TARGET).min(1.0);
-            // success = attacker combat vs prey combat (bite doubles as defense), minus a required edge
+            // success = attacker combat vs prey DEFENSE (combat + armor), minus a required edge
             // (PREDATION_BIAS: equal-combat creatures barely prey on each other), reduced by herd safety
-            if rng.f32() < sigmoid(BITE_K * (abite - bbite) - PREDATION_BIAS) * (1.0 - SOCIAL_SAFETY * prey_kin) {
+            // AND the prey's climb agility (arboreal escape).
+            let success = sigmoid(BITE_K * (abite - bdef) - PREDATION_BIAS)
+                * (1.0 - SOCIAL_SAFETY * prey_kin)
+                * (1.0 - CLIMB_EVADE * bclimb);
+            if rng.f32() < success {
                 killed.insert(be);
-                *gains.entry(ae).or_insert(0.0) += PREDATION_GAIN;
+                // venomous prey is a sickening kill -> the predator gains far less (the venom deterrent)
+                *gains.entry(ae).or_insert(0.0) += PREDATION_GAIN * (1.0 - VENOM_DETER * bven);
             }
         }
     }
@@ -1823,7 +1832,9 @@ pub fn live_step(
         // sensor's nearest-food-in-cone together, atan2 once per in-range food. Not bit-identical (cell
         // iteration order differs), but far fewer foods touched -> big speedup at scale.
         let n_s = genome.sensors.len();
-        let max_range = genome.sensors.iter().map(|s| s.range).fold(0.0f32, f32::max);
+        // eyes gene: more eyes = a small effective-range boost (sharper sight) on every sensor.
+        let eye_mult = 1.0 + EYE_SENSE_BONUS * genome.eyes;
+        let max_range = genome.sensors.iter().map(|s| s.range).fold(0.0f32, f32::max) * eye_mult;
         let mut best: Option<(usize, f32)> = None;
         let mut sd = vec![f32::INFINITY; n_s]; // nearest dist per sensor
         let mut skind = vec![0u8; n_s]; // food kind that nearest sensor-food is
@@ -1857,7 +1868,7 @@ pub fn live_step(
                     // bearing in the local tangent frame: 0 = north (toward +Y pole), +pi/2 = east
                     let bearing = wrap_angle(to.dot(east).atan2(to.dot(north)) - head.0);
                     for (si, s) in genome.sensors.iter().enumerate() {
-                        if dist <= s.range && dist < sd[si] && wrap_angle(bearing - s.angle).abs() <= CONE_HALF {
+                        if dist <= s.range * eye_mult && dist < sd[si] && wrap_angle(bearing - s.angle).abs() <= CONE_HALF {
                             sd[si] = dist;
                             skind[si] = f.2.kind;
                         }
@@ -1907,7 +1918,10 @@ pub fn live_step(
         let wet_here = ((SWIM_WET_LEVEL - h0) / SWIM_WET_LEVEL).clamp(0.0, 1.0);
         // metabolic tempo: frugal (metab>0.5) trades top speed for cheaper basal; fast (metab<0.5) the reverse
         let metab_f = genome.metab - 0.5; // -0.5 fast .. +0.5 frugal
-        let speed = MOVE_SPEED * (1.0 + SWIM_SPEED * genome.swim * wet_here) * (1.0 - 0.5 * metab_f);
+        let speed = MOVE_SPEED
+            * (1.0 + SWIM_SPEED * genome.swim * wet_here) // swimmers fast in water
+            * (1.0 + LIMB_TRACTION * genome.limbs * (1.0 - wet_here)) // more legs = land traction (ground speed)
+            * (1.0 - 0.5 * metab_f);
 
         // act: turn, then take a great-circle step along the heading over the planet surface
         head.0 = wrap_angle(head.0 + turn * TURN_SPEED * dt);
@@ -1933,17 +1947,30 @@ pub fn live_step(
         let lifespan_mult = 0.4 + 1.2 * genome.longevity; // 0.5 -> 1.0 (baseline); used for upkeep + aging
         let sense_range: f32 = genome.sensors.iter().map(|s| s.range).sum();
         let fat_frac = energy.fat / fat_max.max(0.01); // 0..1 how full the fat store is (drives upkeep)
+        // thermal niche split into cold + warm sides so the pelt (fur) insulates the COLD side only.
+        let temp_here = crate::sphere::base_temperature(pdir);
+        let cold_miss = (genome.temp_pref - temp_here).max(0.0); // colder than preferred (pelt helps)
+        let warm_miss = (temp_here - genome.temp_pref).max(0.0); // warmer than preferred (pelt hurts)
         energy.burn((BASAL_COST * (1.0 - 0.6 * metab_f) // frugal metabolism lowers the cost of living
-            + SIZE_BASAL * genome.size // bigger body costs more just to maintain
-            + MOVE_COST * (1.0 + SIZE_MOVE * genome.size) * thrust * thrust // more mass to push
+            + SIZE_BASAL * genome.size.powf(SIZE_BASAL_EXP) // size = energy use: basal scales allometrically with mass
+            + MOVE_COST * (1.0 + SIZE_MOVE * genome.size + ARMOR_MOVE * genome.armor + LIMB_MOVE_COST * genome.limbs) * thrust * thrust // mass + plates + legs to push
             + BITE_COST * genome.bite
             + ROCK_MOVE_COST * rock * thrust.abs() * (1.0 - ALPINE_RELIEF * genome.alpine) // alpine climbers cross rock cheaply
             + ALPINE_FLAT_COST * genome.alpine * (1.0 - rock) // heavy mountain build wastes energy on flat ground
+            + CLIMB_FLAT_COST * genome.climb * (1.0 - rock) // arboreal build wastes energy on open flat ground
             + SENSE_COST * sense_range
-            + BRAIN_COST * genome.net.ih.len() as f32 // bigger brain = more upkeep
+            + BRAIN_COST * (1.0 - HEAD_BRAIN_RELIEF * genome.head) * genome.net.ih.len() as f32 // a roomy head houses the brain cheaper
             + HEIGHT_COST * genome.height
             + LIGHT_COST * (light - genome.light_pref).abs() // positional daylight at this creature's location
-            + TEMP_COST * (crate::sphere::base_temperature(pdir) - genome.temp_pref).abs() // thermal mismatch: poles vs equator niche
+            + TEMP_COST * (warm_miss + cold_miss * (1.0 - PELT_COLD_RELIEF * genome.pelt)) // fur insulates the cold side
+            + PELT_HEAT_COST * genome.pelt * temp_here // a coat overheats in hot places
+            + PELT_WATER_DRAG * genome.pelt * wet_here // a waterlogged coat drags in water
+            + PELT_UPKEEP * genome.pelt // growing + carrying a coat
+            + DETOX_COST * genome.detox // running a liver to clear toxins
+            + ARMOR_BASAL * genome.armor // armor plate upkeep
+            + VENOM_UPKEEP * genome.venom // making toxins costs
+            + EYE_COST * genome.eyes // eyes are metabolically pricey
+            + HEAD_BASAL * genome.head // carrying a big head
             + LONGEVITY_COST * (lifespan_mult - 1.0).max(0.0) // a long-lived body costs more to maintain
             + SWIM_LAND_COST * genome.swim * (1.0 - wet_here) // fins are a liability on dry land
             + WATER_PRESSURE_COST * (1.0 - genome.swim) * (-h1 / crate::sphere::SEA_FLOOR_MAX).clamp(0.0, 1.0) // non-swimmers struggle in deep water (depth pressure)
@@ -1984,7 +2011,7 @@ pub fn live_step(
                 // the tree's branches (BRANCH_REACH), >= the tree's height. So a tall bare tree feeds only
                 // tall creatures, but a branchy one hangs fruit low enough for short creatures too.
                 // Evergreens never eatable. Plants/carrion: bite vs defense as usual.
-                let tree_reach = genome.height + TREE_REACH_MARGIN + pg.branches * BRANCH_REACH;
+                let tree_reach = genome.height + TREE_REACH_MARGIN + pg.branches * BRANCH_REACH + CLIMB_REACH * genome.climb;
                 let success = match tree {
                     Some(edible) => edible && tree_reach >= pg.height,
                     // plant: creature must be tall enough to reach it (height defense) AND bite its defense
@@ -2013,8 +2040,7 @@ pub fn live_step(
                         fit.0 += base * eff;
                         if gen.diet {
                             let toxin = absorb_and_toxin(&mut diet.reserves, &genome.uptake, &pg, soil_f, base);
-                            energy.burn(toxin);
-                            diet.g += toxin * TOXIN_G;
+                            diet.toxic_load = (diet.toxic_load + toxin * TOX_LOAD_GAIN).min(TOX_LOAD_CAP); // toxin -> accumulating toxic load
                         }
                         let short = genome.height + TREE_REACH_MARGIN < pg.height; // only reached via branches
                         let damage = if short { 0.0 } else { bite_mass }; // branch-feeders don't harm the tree
@@ -2047,8 +2073,7 @@ pub fn live_step(
                                     let _ = absorb_and_toxin(&mut diet.reserves, &genome.uptake, &pg, soil_f, base * yield_mult);
                                 }
                                 let toxin = TOXIN_MAX * toxic * (1.0 - r); // full fruit_toxicity unripe -> ~0 when ripe
-                                energy.burn(toxin);
-                                diet.g += toxin * TOXIN_G;
+                                diet.toxic_load = (diet.toxic_load + toxin * TOX_LOAD_GAIN).min(TOX_LOAD_CAP); // toxin -> accumulating toxic load
                                 eat_reward = if r < 1.0 { -1.0 + r } else { R_EAT }; // unripe bad, ripe good
                             } else {
                             // fresh detritus/greens (no seed): a sugary plant (gated by eff + tops nutrient reserves)
@@ -2057,8 +2082,7 @@ pub fn live_step(
                             fit.0 += base * eff;
                             if gen.diet {
                                 let toxin = absorb_and_toxin(&mut diet.reserves, &genome.uptake, &pg, soil_f, base);
-                                energy.burn(toxin);
-                                diet.g += toxin * TOXIN_G;
+                                diet.toxic_load = (diet.toxic_load + toxin * TOX_LOAD_GAIN).min(TOX_LOAD_CAP); // toxin -> accumulating toxic load
                             }
                             eat_reward = R_EAT;
                             }
@@ -2073,8 +2097,7 @@ pub fn live_step(
                             fit.0 += base * yield_mult;
                             // toxicity: scales with how fermented/spoiled it is x this matter's toxic factor
                             let toxin = TOXIN_MAX * toxic * (0.3 * fermentness + spoiled);
-                            energy.burn(toxin);
-                            diet.g += toxin * TOXIN_G;
+                            diet.toxic_load = (diet.toxic_load + toxin * TOX_LOAD_GAIN).min(TOX_LOAD_CAP); // toxin -> accumulating toxic load
                             eat_reward = (yield_mult - spoiled) * 2.0 - 1.0; // ripe ferment good, spoiled bad
                         }
                     } else if let Some(age) = rot_age {
@@ -2085,20 +2108,29 @@ pub fn live_step(
                         let freshness = 1.0 - (f / 0.6).min(1.0); // stays ~1 for the first 60% of decomposition
                         let meat = mass * pg.nutrient * freshness;
                         let toxin = TOXIN_MAX * ((f - 0.6) / 0.4).max(0.0); // no toxin until 60% rotted
+                        // carnivory gut: a herbivore extracts little usable energy from meat; a carnivore
+                        // extracts most. RABBIT STARVATION: processing protein WITHOUT a carb/fat buffer
+                        // (empty sugar store) makes metabolic toxic load (ammonia) -> an all-meat creature
+                        // with no plant carbs slowly poisons + starves even while "full".
+                        let usable = (PROTEIN_FLOOR + PROTEIN_CARN * genome.carnivory).min(1.0);
+                        let carb_buffer = (energy.sugar / SUGAR_CAP).clamp(0.0, 1.0); // carbs on hand BEFORE this meal
                         // meat = animal tissue -> mostly fat, some sugar; fat overflow spills to sugar
-                        let gain = EAT_GAIN * MEAT_BONUS * meat;
+                        let gain = EAT_GAIN * MEAT_BONUS * meat * usable;
                         let overflow_fat = energy.add_fat(gain * 0.8, fat_max);
                         let wasted = energy.add_sugar(gain * 0.2 + overflow_fat, SUGAR_CAP, fat_max);
                         diet.g += wasted * OVEREAT_G;
-                        fit.0 += meat * MEAT_BONUS;
+                        fit.0 += meat * MEAT_BONUS * usable;
                         // balanced animal tissue: tops EVERY nutrient reserve (meat is nutritionally complete)
                         if gen.diet {
                             for r in diet.reserves.iter_mut() {
                                 *r = (*r + MEAT_RESERVE * freshness).min(RESERVE_CAP);
                             }
                         }
-                        energy.burn(toxin);
-                        diet.g += toxin * TOXIN_G;
+                        // rot toxin + protein-without-carbs ammonia -> accumulating toxic load
+                        diet.toxic_load = (diet.toxic_load
+                            + toxin * TOX_LOAD_GAIN
+                            + gain * PROTEIN_TOX * (1.0 - carb_buffer))
+                            .min(TOX_LOAD_CAP);
                         eat_reward = freshness * 2.0 - 1.0; // fresh -> +1 (good), rotten -> -1 (avoid)
                     } else {
                         // regular plant: strip a fraction set by `regrow` -- carrot (~whole) vs berry bush
@@ -2113,8 +2145,7 @@ pub fn live_step(
                         fit.0 += base * eff;
                         if gen.diet {
                             let toxin = absorb_and_toxin(&mut diet.reserves, &genome.uptake, &pg, soil_f, base);
-                            energy.burn(toxin);
-                            diet.g += toxin * TOXIN_G;
+                            diet.toxic_load = (diet.toxic_load + toxin * TOX_LOAD_GAIN).min(TOX_LOAD_CAP); // toxin -> accumulating toxic load
                             eat_reward = (eff - 0.5) * 4.0; // reward eating most when well-nourished (high master expr)
                         } else {
                             eat_reward = R_EAT;
@@ -2187,6 +2218,15 @@ pub fn live_step(
             }
             diet.g = (diet.g - G_DECAY).max(0.0);
         }
+        // toxic load: clear slowly each tick (faster with the detox gene). While loaded it drains energy +
+        // raises disease load; the acute death hazard is added in the mortality block. Runs in all modes so
+        // meat/ferment poisons bite even in legacy --no-diet runs.
+        if diet.toxic_load > 0.0 {
+            let clear = (TOX_CLEAR_BASE + TOX_CLEAR_DETOX * genome.detox) * dt;
+            diet.toxic_load = (diet.toxic_load - clear).max(0.0);
+            energy.burn(TOX_LOAD_DRAIN * diet.toxic_load * dt);
+            diet.g += TOX_LOAD_G * diet.toxic_load * dt;
+        }
         // mortality from the diet model (aging + disease). In continuous mode death is otherwise
         // starvation-driven (density-dependent), which regulates the population logistically.
         if gen.diet {
@@ -2196,9 +2236,9 @@ pub fn live_step(
             // flowing (old die, young replace) -> a true life cycle to watch.
             let age_frac = diet.age as f32 / (AGE_SCALE * lifespan_mult); // longevity gene stretches lifespan
             let aging = AGE_HAZARD * (age_frac / (age_frac + 1.0));
-            let p_death = (aging + DISEASE_K * diet.g) * dt;
+            let p_death = (aging + DISEASE_K * diet.g + TOX_LOAD_HAZARD * diet.toxic_load) * dt;
             if rng.f32() < p_death {
-                alive.0 = false; // old-age / disease death
+                alive.0 = false; // old-age / disease / poisoning death
             }
         }
 

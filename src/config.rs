@@ -221,8 +221,7 @@ pub const CARRION_KIND: u8 = 0; // meat = food type 0 (couples to diet expr only
 pub const CARRION_MASS: f32 = 3.0; // a meaty chunk: worth scavenging while fresh
 pub const CARRION_NUTRIENT: f32 = 0.9; // fresh meat is energy-dense
 pub const ROT_GONE: u32 = 900; // ticks from death to full decomposition (~15s sim); viz reads it for color
-pub const TOXIN_MAX: f32 = 9.0; // energy hit from eating fully-rotten carrion (poison)
-pub const TOXIN_G: f32 = 0.15; // growth-load per unit toxin ingested
+pub const TOXIN_MAX: f32 = 9.0; // toxin magnitude from eating fully-rotten carrion (now feeds toxic_load, see TOX_LOAD_*)
 
 // --- moisture pressure + rain cycle (P3) ---
 pub const DETRITUS_NUTRIENT: f32 = 0.3; // dead vegetation: poor food fresh, rots to poison
@@ -328,3 +327,55 @@ pub const MUT_STD: f32 = 0.3;
 pub const LEARN_RATE: f32 = 0.04;
 pub const R_APPROACH: f32 = 0.6; // reward per unit closer to nearest food this tick
 pub const R_EAT: f32 = 1.0; // bonus reward on the tick food is eaten
+
+// --- M4 creature expansion: physiology + morphology gene costs/effects (see plan + 02/03) ---
+// size = energy use: basal upkeep scales SUPER-LINEARLY with body size (allometry), so a big body is
+// markedly hungrier per its mass. size still buys storage/combat/reach (above) -> big = powerful but dear.
+pub const SIZE_BASAL_EXP: f32 = 1.5; // allometric exponent: size basal term = SIZE_BASAL * size^this
+// detox (liver): clears toxic_load; costs basal upkeep.
+pub const DETOX_COST: f32 = 0.5; // energy/sec basal at full detox (running a big liver costs)
+// toxic load: ingested toxins (plant tox, rotten meat, fermented spoilage, venomous prey, protein excess)
+// accumulate as a LOAD that drains energy + drives disease + a death hazard, cleared slowly (faster with
+// detox). Replaces the old instant-only toxin energy hit -> poisons build + linger like real toxic load.
+pub const TOX_LOAD_GAIN: f32 = 1.0;      // load gained per unit ingested toxin
+pub const TOX_LOAD_CAP: f32 = 12.0;      // max accumulated toxic load (a hard ceiling)
+pub const TOX_CLEAR_BASE: f32 = 0.15;    // load cleared/sec at zero detox (baseline metabolism)
+pub const TOX_CLEAR_DETOX: f32 = 0.6;    // extra load cleared/sec at full detox
+pub const TOX_LOAD_DRAIN: f32 = 0.25;    // energy/sec drained per unit toxic load (feeling sick)
+pub const TOX_LOAD_G: f32 = 0.02;        // growth-load (disease) accrued/sec per unit toxic load
+pub const TOX_LOAD_HAZARD: f32 = 0.0008; // death/sec per unit toxic load (acute poisoning)
+// rabbit starvation: meat is protein-rich. The gut extracts meat energy by carnivory (herbivores can't use
+// it); and processing protein WITHOUT a carb/fat buffer (empty sugar store) makes metabolic toxic load
+// (ammonia/urea) -> an all-meat creature with no plant carbs slowly poisons + starves, as in nature.
+pub const PROTEIN_FLOOR: f32 = 0.35; // meat-energy fraction a pure herbivore (carnivory 0) still gets
+pub const PROTEIN_CARN: f32 = 0.65;  // extra meat-energy fraction at full carnivory (-> full use at 1.0)
+pub const PROTEIN_TOX: f32 = 0.06;   // toxic load per unit meat energy processed with an EMPTY carb buffer
+// pelt (hair/fur): insulation. Cuts the COLD side of thermal mismatch; adds a HEAT-side cost in hot places,
+// drags in water, and costs a little basal upkeep.
+pub const PELT_COLD_RELIEF: f32 = 0.7; // fraction of cold-side temp cost removed at full pelt
+pub const PELT_HEAT_COST: f32 = 0.6;   // energy/sec extra at full pelt in the hottest places (overheating)
+pub const PELT_WATER_DRAG: f32 = 1.2;  // energy/sec extra at full pelt fully in water (waterlogged coat)
+pub const PELT_UPKEEP: f32 = 0.2;      // energy/sec basal at full pelt (growing + carrying a coat)
+// armor: lowers predation success against it (defense-only); costs move + basal upkeep.
+pub const ARMOR_DEF: f32 = 2.5;   // added to prey combat as DEFENSE-only at full armor (hard to kill)
+pub const ARMOR_MOVE: f32 = 0.8;  // move-cost multiplier add at full armor (heavy plates to push)
+pub const ARMOR_BASAL: f32 = 0.5; // energy/sec basal at full armor
+// venom: toxic flesh deters predators -> a predator eating venomous prey gains far less (a sickening kill).
+pub const VENOM_DETER: f32 = 0.9;   // fraction of predation gain removed at full prey venom
+pub const VENOM_UPKEEP: f32 = 0.3;  // energy/sec basal at full venom (making toxins costs)
+// limbs: more legs = land traction (a small ground-speed bonus) but more move cost per limb. The gene->leg
+// COUNT mapping (LIMB_MIN/LIMB_SPAN) is added with the visuals (Phase 4) that render the legs.
+pub const LIMB_TRACTION: f32 = 0.25; // max land-speed bonus fraction at full limbs
+pub const LIMB_MOVE_COST: f32 = 0.5; // move-cost multiplier add at full limbs (more legs to drive)
+// climb (arboreal): nimble -> evades predators; reaches fruit trees w/o a tall body; an arboreal build
+// wastes energy on open flat ground.
+pub const CLIMB_EVADE: f32 = 0.5;     // max predation-success reduction at full climb (agile escape)
+pub const CLIMB_REACH: f32 = 0.6;     // effective tree-reach height added at full climb (climbs to fruit)
+pub const CLIMB_FLAT_COST: f32 = 0.6; // energy/sec at full climb on flat non-rocky ground (arboreal misfit)
+// eyes: a small detection bonus (effective sensor range) for per-eye upkeep. The gene->eye COUNT mapping
+// (EYE_MIN/EYE_SPAN) is added with the visuals (Phase 4) that render the eyes.
+pub const EYE_SENSE_BONUS: f32 = 0.3; // effective sensor-range multiplier add at full eyes (+30%)
+pub const EYE_COST: f32 = 0.3;        // energy/sec basal at full eyes (eyes are metabolically pricey)
+// head: a bigger head houses the brain more efficiently (cuts per-neuron BRAIN_COST) but adds basal mass.
+pub const HEAD_BRAIN_RELIEF: f32 = 0.5; // fraction of BRAIN_COST removed at full head (roomy braincase)
+pub const HEAD_BASAL: f32 = 0.4;        // energy/sec basal at full head (carrying a big head)

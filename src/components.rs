@@ -174,6 +174,11 @@ pub struct DietState {
     // dodging the <=0 death check forever (a "grass zombie"). This counter kills a chronically near-empty
     // creature after a grace period, while a forager that briefly dips to 0 between meals recovers + resets.
     pub starve: u16,
+    // accumulated TOXIC LOAD (M4): ingested toxins (toxic plants, rotten meat, fermented spoilage, venomous
+    // prey) and metabolic ammonia from protein-without-carbs (rabbit starvation) build up here instead of an
+    // instant energy hit. Drains energy + drives disease + a death hazard while high; cleared slowly each
+    // tick (faster with the detox gene). Lets poisons accumulate + linger like real toxic load.
+    pub toxic_load: f32,
 }
 
 #[cfg(test)]
