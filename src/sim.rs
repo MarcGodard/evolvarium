@@ -969,7 +969,12 @@ pub fn spawn_world_headless(mut commands: Commands, mut rng: ResMut<Rng>, mut ge
     } else {
         // tuned plant seed-bank (tuning harness): when present, seed the planet biome-matched FROM it.
         let lib = gen.plant_lib.as_deref().and_then(crate::persist::load_plant_library);
-        let food_pos = |rng: &mut Rng| plant_spawn_pos(rng, !gen.diverse, FOOD_Y); // land + shallow water (aquatic flora)
+        // resuming a populated world (e.g. cargo run auto-loading the showcase seed) or --diverse seeds the
+        // WHOLE planet (plants in every biome). A fresh founding run (no saved plants) keeps the homeland start
+        // (life begins in one area + spreads). Trees already seed whole-planet (spawn_trees).
+        let resuming = snap.as_ref().is_some_and(|s| !s.plants.is_empty());
+        let whole_planet = gen.diverse || resuming;
+        let food_pos = |rng: &mut Rng| plant_spawn_pos(rng, !whole_planet, FOOD_Y); // land + shallow water (aquatic flora)
         match &snap {
             Some(s) if !s.plants.is_empty() => {
                 for sp in &s.plants {
@@ -1180,7 +1185,12 @@ pub fn spawn_world_render(
     } else {
         // tuned plant seed-bank (tuning harness): when present, seed the planet biome-matched FROM it.
         let lib = gen.plant_lib.as_deref().and_then(crate::persist::load_plant_library);
-        let food_pos = |rng: &mut Rng| plant_spawn_pos(rng, !gen.diverse, FOOD_Y); // land + shallow water (aquatic flora)
+        // resuming a populated world (e.g. cargo run auto-loading the showcase seed) or --diverse seeds the
+        // WHOLE planet (plants in every biome). A fresh founding run (no saved plants) keeps the homeland start
+        // (life begins in one area + spreads). Trees already seed whole-planet (spawn_trees).
+        let resuming = snap.as_ref().is_some_and(|s| !s.plants.is_empty());
+        let whole_planet = gen.diverse || resuming;
+        let food_pos = |rng: &mut Rng| plant_spawn_pos(rng, !whole_planet, FOOD_Y); // land + shallow water (aquatic flora)
         match &snap {
             Some(s) if !s.plants.is_empty() => {
                 for sp in &s.plants {
