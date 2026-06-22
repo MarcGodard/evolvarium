@@ -100,6 +100,14 @@ pub struct Genome {
     pub skin_sat: f32,       // 0..1 body saturation (render). Default 0.5.
     #[serde(default = "zero")]
     pub pattern: f32,        // 0..1 markings intensity: stripes/spots (render). Default 0.
+    // Body-plan render genes (cosmetic, NO sim/balance effect): drive silhouette variety so creatures read
+    // as fish/snake/octopus/cow/squirrel etc. Used only in viz::creature_look + add_creature_visuals.
+    #[serde(default = "zero")]
+    pub elongate: f32,       // 0..1 body length (Z stretch) + slimmer cross-section: low=blocky (cow), high=snake/eel/weasel. Cosmetic.
+    #[serde(default = "zero")]
+    pub tail: f32,           // 0..1 tail size: caudal fin if swimmer, bushy if furry land (squirrel), rod taper else. Cosmetic.
+    #[serde(default = "zero")]
+    pub fin: f32,            // 0..1 dorsal-fin prominence (ridge along spine). Cosmetic.
     #[serde(default = "zero")]
     pub magneto: f32,        // 0..1 magnetoreception switch: above soft knee, feeds 2 brain inputs (mag_lat
                              // "map" + compass heading) for nav; costs MAG_COST upkeep (magnetite organ +
@@ -267,6 +275,9 @@ impl Genome {
             skin_hue: rng.f32(),      // span color wheel
             skin_sat: rng.range(0.3, 0.9),
             pattern: rng.f32() * 0.6, // span plain..marked
+            elongate: rng.f32() * rng.f32(), // skew short; few very long (snake/eel)
+            tail: rng.f32(),          // span tailless..long-tailed
+            fin: rng.f32() * rng.f32(), // skew finless; few prominent dorsal fins
             magneto: rng.f32() * 0.3, // mostly sense-off, few magnetoreceptive -> selection can switch on
         }
     }
@@ -299,6 +310,34 @@ impl Genome {
         // so both layers must grow or it indexes plast.ho out of bounds.
         pad_net_ho(&mut self.net, OUTPUTS);
         pad_plast_ho(&mut self.plast, OUTPUTS);
+        self.ensure_cosmetic(); // backfill body-plan genes on saves predating them -> loaded pop looks varied at once
+    }
+
+    // Old saves lack body-plan render genes (elongate/tail/fin) -> all-zero loads as identical capsules, so a
+    // loaded showcase pop would look monochrome+uniform. Derive a DETERMINISTIC per-creature spread from a hash
+    // of stable genome floats (no rng needed inside load path) so the loaded world is visually varied at once.
+    // Heritable after: mutate() drifts these, random() seeds fresh founders. Only fires when ALL three still 0
+    // (unset) -> fresh/evolved genomes (which set nonzero) keep their values; reaching exactly 0 on all 3 is
+    // effectively impossible after random()+drift.
+    pub fn ensure_cosmetic(&mut self) {
+        if self.elongate != 0.0 || self.tail != 0.0 || self.fin != 0.0 {
+            return;
+        }
+        let mut h: u32 = 2166136261; // FNV-1a over stable genome floats
+        for v in [self.skin_hue, self.skin_sat, self.size, self.swim, self.head, self.bite, self.metab, self.carnivory] {
+            h ^= (v * 9973.0) as i32 as u32;
+            h = h.wrapping_mul(16777619);
+        }
+        for s in &self.sensors {
+            h ^= (s.angle * 1000.0) as i32 as u32;
+            h = h.wrapping_mul(16777619);
+        }
+        let u = |shift: u32| ((h >> shift) & 0xFF) as f32 / 255.0; // byte slice -> 0..1
+        let e = u(0);
+        self.elongate = e * e; // skew short, few long
+        self.tail = u(8);
+        let f = u(16);
+        self.fin = f * f; // skew finless, few prominent
     }
 
     // Two-parent recombination (--mating mode). Body STRUCTURE (sensors + brain net/plast) from parent `a`
@@ -333,6 +372,9 @@ impl Genome {
         c.skin_hue = pick(rng, a.skin_hue, b.skin_hue);
         c.skin_sat = pick(rng, a.skin_sat, b.skin_sat);
         c.pattern = pick(rng, a.pattern, b.pattern);
+        c.elongate = pick(rng, a.elongate, b.elongate);
+        c.tail = pick(rng, a.tail, b.tail);
+        c.fin = pick(rng, a.fin, b.fin);
         c.magneto = pick(rng, a.magneto, b.magneto);
         for i in 0..NUTRIENTS {
             c.uptake[i] = pick(rng, a.uptake[i], b.uptake[i]);
@@ -446,6 +488,15 @@ impl Genome {
         }
         if rng.f32() < rate {
             self.pattern = (self.pattern + rng.normal() * 0.12).clamp(0.0, 1.0);
+        }
+        if rng.f32() < rate {
+            self.elongate = (self.elongate + rng.normal() * 0.12).clamp(0.0, 1.0);
+        }
+        if rng.f32() < rate {
+            self.tail = (self.tail + rng.normal() * 0.12).clamp(0.0, 1.0);
+        }
+        if rng.f32() < rate {
+            self.fin = (self.fin + rng.normal() * 0.12).clamp(0.0, 1.0);
         }
         if rng.f32() < rate {
             self.magneto = (self.magneto + rng.normal() * 0.12).clamp(0.0, 1.0);
