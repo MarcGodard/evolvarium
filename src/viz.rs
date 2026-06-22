@@ -325,17 +325,25 @@ fn color_carrion(mut mats: ResMut<Assets<StandardMaterial>>, q: Query<(&Rot, &Me
 // Scale plants by mass (growth visible) AND root them on the terrain. The height gene STRETCHES a
 // plant vertically (taller plant) rather than lifting it into the air -> tall plants read as tall but
 // their base stays on the ground (no floating). Trees render much bigger (tall trunk + canopy).
-fn size_plants(mut q: Query<(&PlantState, &PlantGenome, &mut Transform, Option<&Tree>), (With<Food>, Without<Grass>)>) {
-    for (st, g, mut tf, tree) in &mut q {
+fn size_plants(mut q: Query<(&PlantState, &PlantGenome, &mut Transform, Option<&Tree>, Option<&Rot>), (With<Food>, Without<Grass>)>) {
+    for (st, g, mut tf, tree, rot) in &mut q {
         let up = tf.translation.normalize_or_zero(); // outward surface normal at this spot
         let base = crate::sphere::surface_pos(up, 0.0); // foot on the terrain surface
-        let rot = Quat::from_rotation_arc(Vec3::Y, up); // grow outward from the planet, not world-up
+        let rot_q = Quat::from_rotation_arc(Vec3::Y, up); // grow outward from the planet, not world-up
+        // `life` is the overall size factor. LIVING plant/tree: grows with mass toward maturity, so a seedling
+        // is visibly small + a mature plant full -> render size tracks mass (no more huge-mass/tiny-plant
+        // mismatch). DEAD thing (carrion / fallen fruit / plant litter, has Rot): SHRINKS as it decomposes,
+        // so the corpse fades to nothing by ROT_GONE instead of sitting full-size, and despawns clean.
+        let life = match rot {
+            Some(r) => (1.0 - r.age as f32 / ROT_GONE as f32).clamp(0.0, 1.0),
+            None => 0.4 + 0.6 * (st.mass / g.maturity.max(0.1)).clamp(0.0, 1.0),
+        };
         if tree.is_some() {
             // trees stay small relative to the planet (was up to ~13 units on an 80-radius world, which
             // poked into the clouds). Now a tree is ~2-4 units tall.
-            let s = (0.35 + 0.12 * st.mass).clamp(0.35, 1.1);
+            let s = (0.35 + 0.12 * st.mass).clamp(0.35, 1.1) * life;
             tf.scale = Vec3::splat(s);
-            tf.rotation = rot;
+            tf.rotation = rot_q;
             tf.translation = base + up * (0.7 * s); // trunk base rests on the surface (trunk half-height = 0.7)
             continue;
         }
@@ -363,13 +371,13 @@ fn size_plants(mut q: Query<(&PlantState, &PlantGenome, &mut Transform, Option<&
             // HERB + fallback: small bushy clump, stretched by the height gene
             _ => (girth * bushy, girth * bushy * tall, girth * bushy, 0.0),
         };
-        tf.scale = Vec3::new(sx, sy, sz);
-        tf.rotation = rot;
+        tf.scale = Vec3::new(sx, sy, sz) * life;
+        tf.rotation = rot_q;
         // a lily pad floats ON the water surface (~PLANET_R) rather than resting on the seabed below it.
         if g.form == form::LILYPAD {
             tf.translation = up * (crate::sphere::PLANET_R + 0.08);
         } else {
-            tf.translation = base + up * (lift * sy); // mesh base rooted on the terrain (no float)
+            tf.translation = base + up * (lift * sy * life); // mesh base rooted on the terrain (no float)
         }
     }
 }
