@@ -175,6 +175,14 @@ pub const GRAZE_FULL: f32 = 38.0;        // grazing tops energy to here (ABOVE R
 // --- rocky land: scattered boulders (render-only dressing). Spawned once on rocky highland so rocky
 // terrain reads as field of stone with grass between rocks. Static -> no per-frame cost. ---
 pub const ROCK_SCATTER: usize = 1200; // boulders scattered across rocky ground worldwide (denser the rockier)
+// Caves: a few shelters on rocky high ground. SHELTER (count as shade -> heat relief + the brain senses them
+// via shade01, so creatures learn to seek them) + DEFENSE (a passive predation-evasion zone, the place to hide).
+pub const CAVE_COUNT: usize = 3;       // a few caves, CLUSTERED in one rocky-highland region (a cave system)
+pub const CAVE_CLUSTER_CAP: f32 = 0.16; // ~9 deg: caves sit together in the same rocky area, not scattered worldwide
+pub const CAVE_ROCK_MIN: f32 = 0.30;   // min rockiness to host a cave (high rocky ground only)
+pub const CAVE_ELEV_MIN: f32 = 0.75;   // min normalized elevation for a cave (ridges + peaks, not lowland rock)
+pub const CAVE_RADIUS: f32 = 5.0;      // within this of a cave mouth counts as sheltered (like SHADE_RADIUS)
+pub const CAVE_SHELTER: f32 = 0.45;    // max predation-success reduction at a cave mouth (a real hide, below a full escape)
 pub const ROCK_GRASS_FRAC: f32 = 0.15; // chance rocky-ground sample still seeds thin grass tuft -> sparse grass between rocks, not bare stone
 pub const ROCK_GRASS_HAB: f32 = 0.28;  // survival-habitability floor for grass on rocky ground (keeps sparse rocky tufts alive, not churning)
 

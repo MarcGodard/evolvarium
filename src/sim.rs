@@ -706,7 +706,10 @@ pub fn seed_planet(commands: &mut Commands, rng: &mut Rng, parents: &[Genome], _
             d = whole(rng);
         }
         let pg = plant_for_site(rng, d); // species by biome (aquatic in water, land flora on land)
-        spawn_plant(commands, pg, rng.range(0.5, 1.3) * PLANT_START_MASS, crate::sphere::surface_pos(d, FOOD_Y));
+        // spawn near maturity (like trees spawn full-grown) so god-populate is VISIBLE at once, not tiny
+        // seedlings lost in the existing carpet. mass ~ this species' maturity -> full render size + can breed.
+        let mass = rng.range(0.8, 1.1) * pg.maturity;
+        spawn_plant(commands, pg, mass, crate::sphere::surface_pos(d, FOOD_Y));
     }
     // trees: land only + habitable ground
     for _ in 0..n_trees {
@@ -980,6 +983,69 @@ fn seaweed_pos(rng: &mut Rng) -> Vec3 {
     crate::sphere::surface_pos(d, FOOD_Y)
 }
 
+// --- caves: shelter + a place to hide ---
+
+// Cave mouths on the planet (positions only; the render dome is dressing). Held as a resource so both live_step
+// (shade/heat shelter) and predation_step (hide-from-predator defense) can read it. Populated identically in
+// the headless + render spawn paths so the mechanics are present in BOTH modes.
+#[derive(Resource, Default)]
+pub struct CavePositions {
+    pub positions: Vec<Vec3>,
+}
+
+// Place a small CLUSTER of caves in ONE rocky-highland region (a cave system in "the rocky area"), rather than
+// scattering them worldwide. Pick a rocky high-ground center, then drop CAVE_COUNT caves within a small cap of
+// it. Deterministic from rng. Returns empty if no rocky highland is found (a smooth/lowland planet just has none).
+fn place_caves(rng: &mut Rng) -> Vec<Vec3> {
+    let rocky_high = |d: Vec3| {
+        !crate::sphere::is_ocean(d) && crate::sphere::rockiness(d) > CAVE_ROCK_MIN && crate::sphere::elevation01(d) > CAVE_ELEV_MIN
+    };
+    // find a rocky-highland center for the cluster
+    let mut center = None;
+    for _ in 0..4000 {
+        let d = crate::sphere::random_dir_in_cap(rng, Vec3::Y, std::f32::consts::PI);
+        if rocky_high(d) {
+            center = Some(d);
+            break;
+        }
+    }
+    let Some(center) = center else { return Vec::new() };
+    // drop a few caves around that center, keeping each on rocky high ground (relaxed gate so the cluster fills)
+    let mut out = Vec::with_capacity(CAVE_COUNT);
+    let mut tries = 0usize;
+    while out.len() < CAVE_COUNT && tries < CAVE_COUNT * 200 {
+        tries += 1;
+        let d = crate::sphere::random_dir_in_cap(rng, center, CAVE_CLUSTER_CAP);
+        if !crate::sphere::is_ocean(d) && crate::sphere::rockiness(d) > CAVE_ROCK_MIN * 0.6 && crate::sphere::elevation01(d) > CAVE_ELEV_MIN * 0.9 {
+            out.push(crate::sphere::surface_pos(d, 0.0));
+        }
+    }
+    // fallback: if the cap was too tight to fill, at least put one at the center
+    if out.is_empty() {
+        out.push(crate::sphere::surface_pos(center, 0.0));
+    }
+    let (_lon, lat) = crate::sphere::dir_to_lonlat(center);
+    info!("caves: {} placed in a rocky highland cluster near lat {:.0} deg", out.len(), lat.to_degrees());
+    out
+}
+
+// How sheltered a position is by the nearest cave: 1 at the mouth, fading to 0 by CAVE_RADIUS. Shared by the
+// shade (heat) relief + the predation (hide) defense. O(caves) per call; caves are few (~50) so it's cheap.
+pub(crate) fn cave_shelter01(pos: Vec3, caves: &[Vec3]) -> f32 {
+    let mut best = f32::INFINITY;
+    for c in caves {
+        let d2 = pos.distance_squared(*c);
+        if d2 < best {
+            best = d2;
+        }
+    }
+    if best.is_finite() {
+        (1.0 - best.sqrt() / CAVE_RADIUS).clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
 // --- spawn ---
 
 // Headless: components only, no render assets (absent under MinimalPlugins).
@@ -1074,6 +1140,8 @@ pub fn spawn_world_headless(mut commands: Commands, mut rng: ResMut<Rng>, mut ge
             spawn_seaweed(&mut commands, PlantGenome::seaweed(&mut rng), SEAWEED_START_MASS, seaweed_pos(&mut rng));
         }
     }
+    // cave sites: positions only (no render assets headless), but the shelter + predation-defense mechanics read them.
+    commands.insert_resource(CavePositions { positions: place_caves(&mut rng) });
 }
 
 // Scatter initial trees (half fruit trees, half uneatable evergreens) on habitable land. Always WHOLE-PLANET:
@@ -1231,6 +1299,29 @@ pub fn spawn_world_render(
             placed += 1;
         }
     }
+
+    // caves: shelter + a place to hide. Render-only dark dome (a rock hood/cave mouth) at each cave site on the
+    // rocky highland, sunk into the slope; the same positions drive the shade-relief + predation-hide mechanics.
+    let caves = place_caves(&mut rng);
+    {
+        use std::f32::consts::PI;
+        let cave_mesh = meshes.add(crate::viz::dome_mesh());
+        let cave_mat = materials.add(StandardMaterial {
+            base_color: Color::srgb(0.16, 0.15, 0.15), // dark recessed basalt
+            perceptual_roughness: 1.0,
+            ..default()
+        });
+        for &c in &caves {
+            let up = c.normalize_or_zero();
+            let base = crate::sphere::surface_pos(up, 0.0);
+            let s = rng.range(3.0, 5.0); // a cave hood reads bigger than a boulder
+            let mut tf = Transform::from_translation(base - up * (s * 0.22)); // sink the hood into the slope
+            tf.rotation = Quat::from_rotation_arc(Vec3::Y, up) * Quat::from_rotation_y(rng.range(-PI, PI));
+            tf.scale = Vec3::new(s * rng.range(0.9, 1.3), s * rng.range(0.6, 0.9), s * rng.range(0.9, 1.3));
+            commands.spawn((Mesh3d(cave_mesh.clone()), MeshMaterial3d(cave_mat.clone()), tf, bevy::light::NotShadowCaster));
+        }
+    }
+    commands.insert_resource(CavePositions { positions: caves });
 
     // --load resumes a saved population; else random founding pop. Positions re-randomized.
     let snap = gen.load.as_deref().and_then(crate::persist::load_snapshot);
@@ -1821,6 +1912,7 @@ pub fn predation_step(
     mut commands: Commands,
     mut soil: ResMut<Soil>,
     mut cq: Query<(Entity, &Transform, &mut Energy, &mut Fitness, &mut Alive, &Genome, &mut Brain), With<Creature>>,
+    caves: Option<Res<CavePositions>>, // prey near a cave is harder to pick off (the "place to hide"); absent in scenario mode
 ) {
     // snapshot living creatures: (entity, pos, ATTACK combat, energy, kin-sig, DEFENSE combat, venom, climb,
     // attack-intent, defend-intent). attack = bite + size; defense = attack + armor (armor protects, doesn't help
@@ -1836,6 +1928,7 @@ pub fn predation_step(
     if snap.len() < 2 {
         return;
     }
+    let cave_pos: &[Vec3] = caves.as_ref().map(|c| c.positions.as_slice()).unwrap_or(&[]);
     let mut killed: HashSet<Entity> = HashSet::new();
     let mut gains: HashMap<Entity, f32> = HashMap::new();
     let mut committed: HashSet<Entity> = HashSet::new(); // attackers that chose to hunt this tick (intent > thresh)
@@ -1875,9 +1968,12 @@ pub fn predation_step(
             // success = attacker combat vs prey EFFECTIVE defense (combat + armor + active BRACE), minus required
             // edge PREDATION_BIAS, reduced by herd safety AND prey climb agility (arboreal escape).
             let eff_def = bdef + BRACE_DEF * b_def_intent;
+            // a prey caught next to a cave can duck into it: passive positional defense, like herd/climb evasion.
+            let cave_hide = cave_shelter01(bpos, cave_pos);
             let success = sigmoid(BITE_K * (abite - eff_def) - PREDATION_BIAS)
                 * (1.0 - SOCIAL_SAFETY * prey_kin)
-                * (1.0 - CLIMB_EVADE * bclimb);
+                * (1.0 - CLIMB_EVADE * bclimb)
+                * (1.0 - CAVE_SHELTER * cave_hide);
             if rng.f32() < success {
                 killed.insert(be);
                 // venomous prey is a sickening kill -> the predator gains far less (the venom deterrent)
@@ -1945,8 +2041,10 @@ pub fn live_step(
     fire: Res<Fire>,
     fq: Query<(Entity, &Transform, &PlantState, &PlantGenome, Option<&Rot>, Option<&Tree>, Option<&Ferment>, Option<&Seed>), (With<Food>, Without<Creature>)>,
     scen: Option<Res<crate::scenario::ScenarioStats>>, // present => scenario mode: disable global reseed floor
+    caves: Option<Res<CavePositions>>, // cave shelter (heat relief via shade); absent in scenario mode
 ) {
     let dt = DT;
+    let cave_pos: &[Vec3] = caves.as_ref().map(|c| c.positions.as_slice()).unwrap_or(&[]);
     let ntypes = gen.ntypes();
     let mut pop = cq.iter().count(); // live population (continuous-mode reproduction cap)
     // continuous birth/death active only AFTER generational warm-up (WARMUP_GENS)
@@ -2060,11 +2158,14 @@ pub fn live_step(
         let h0 = crate::sphere::elevation(pdir);
         let wet_here = ((SWIM_WET_LEVEL - h0) / SWIM_WET_LEVEL).clamp(0.0, 1.0);
         // shade: how shaded by overhead canopy (near a tree). Relieves open-sun heat + brain input to seek it.
-        let shade01 = if nearest_tree_d2.is_finite() {
+        let tree_shade = if nearest_tree_d2.is_finite() {
             (1.0 - nearest_tree_d2.sqrt() / SHADE_RADIUS).clamp(0.0, 1.0)
         } else {
             0.0
         };
+        // a cave counts as shade too: relieves open-sun heat AND, since shade01 is a brain input, lets creatures
+        // LEARN to seek caves in the heat (no new input). max() so the nearer of canopy/cave shelters you.
+        let shade01 = tree_shade.max(cave_shelter01(pos, cave_pos));
         // nearest THREAT: a bigger-combat creature nearby drives flee. O(n) over the snapshot.
         let my_combat = genome.bite + SIZE_COMBAT * genome.size;
         let mut threat_d2 = f32::INFINITY;
