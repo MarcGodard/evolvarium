@@ -363,8 +363,10 @@ pub const ARMOR_BASAL: f32 = 0.5; // energy/sec basal at full armor
 // venom: toxic flesh deters predators -> a predator eating venomous prey gains far less (a sickening kill).
 pub const VENOM_DETER: f32 = 0.9;   // fraction of predation gain removed at full prey venom
 pub const VENOM_UPKEEP: f32 = 0.3;  // energy/sec basal at full venom (making toxins costs)
-// limbs: more legs = land traction (a small ground-speed bonus) but more move cost per limb. The gene->leg
-// COUNT mapping (LIMB_MIN/LIMB_SPAN) is added with the visuals (Phase 4) that render the legs.
+// limbs: more legs = land traction (a small ground-speed bonus) but more move cost per limb. The gene maps
+// to a rendered leg COUNT of LIMB_MIN..LIMB_MIN+LIMB_SPAN (Phase 4 visuals).
+pub const LIMB_MIN: f32 = 2.0;       // legs at limbs gene 0
+pub const LIMB_SPAN: f32 = 6.0;      // legs added across the gene range (-> 8 legs at gene 1)
 pub const LIMB_TRACTION: f32 = 0.25; // max land-speed bonus fraction at full limbs
 pub const LIMB_MOVE_COST: f32 = 0.5; // move-cost multiplier add at full limbs (more legs to drive)
 // climb (arboreal): nimble -> evades predators; reaches fruit trees w/o a tall body; an arboreal build
@@ -372,8 +374,10 @@ pub const LIMB_MOVE_COST: f32 = 0.5; // move-cost multiplier add at full limbs (
 pub const CLIMB_EVADE: f32 = 0.5;     // max predation-success reduction at full climb (agile escape)
 pub const CLIMB_REACH: f32 = 0.6;     // effective tree-reach height added at full climb (climbs to fruit)
 pub const CLIMB_FLAT_COST: f32 = 0.6; // energy/sec at full climb on flat non-rocky ground (arboreal misfit)
-// eyes: a small detection bonus (effective sensor range) for per-eye upkeep. The gene->eye COUNT mapping
-// (EYE_MIN/EYE_SPAN) is added with the visuals (Phase 4) that render the eyes.
+// eyes: a small detection bonus (effective sensor range) for per-eye upkeep. The gene maps to a rendered
+// eye COUNT of EYE_MIN..EYE_MIN+EYE_SPAN (Phase 4 visuals).
+pub const EYE_MIN: f32 = 1.0;         // eyes at gene 0
+pub const EYE_SPAN: f32 = 5.0;        // eyes added across the gene range (-> 6 eyes at gene 1)
 pub const EYE_SENSE_BONUS: f32 = 0.3; // effective sensor-range multiplier add at full eyes (+30%)
 pub const EYE_COST: f32 = 0.3;        // energy/sec basal at full eyes (eyes are metabolically pricey)
 // head: a bigger head houses the brain more efficiently (cuts per-neuron BRAIN_COST) but adds basal mass.

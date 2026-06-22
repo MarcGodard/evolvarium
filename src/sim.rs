@@ -1044,6 +1044,13 @@ pub fn spawn_world_render(
     // shared creature mesh as a resource so viz::add_creature_visuals can dress creatures BORN mid-sim
     // (spawn_creature adds no mesh) -> newborns + B-button creatures become visible, not just the seed pop.
     commands.insert_resource(crate::viz::CreatureMesh(creature_mesh.clone()));
+    // creature body PARTS (M4 genetic visuals): head/eye/leg meshes, child entities of each creature so a
+    // genome's head size, eye count, and leg count are visible. Unit-ish base sizes; viz scales per genome.
+    commands.insert_resource(crate::viz::CreatureParts {
+        head: meshes.add(Sphere::new(0.5).mesh().ico(2).unwrap()), // diameter 1 at child scale 1
+        eye: meshes.add(Sphere::new(0.5).mesh().ico(1).unwrap()),
+        leg: meshes.add(Cylinder::new(0.5, 1.0)), // radius 0.5, height 1 -> thin legs after scaling
+    });
     // per-form plant mesh library: one silhouette per plant::form (viz::add_plant_visuals picks by genome).
     // Round forms = icospheres; tall/leafy forms = procedural frond clumps; lily pad = a flat disc.
     {
@@ -1173,8 +1180,8 @@ pub fn spawn_world_render(
             diet.age = (rng.f32() * 600.0) as u32;
         }
         let e = if skip_warmup { rng.range(0.7, 1.2) * START_ENERGY } else { START_ENERGY };
-        // own material per creature so viz can recolor it by evolved traits (see viz.rs)
-        let mat = materials.add(Color::srgb(0.9, 0.6, 0.3));
+        // no mesh here: viz::add_creature_visuals dresses EVERY creature (founders + mid-sim births) with the
+        // body + genetic head/eyes/legs, so there's one code path for the look (avoids plain-capsule founders).
         commands.spawn((
             Creature,
             g,
@@ -1185,8 +1192,6 @@ pub fn spawn_world_render(
             Heading(h),
             Alive(true),
             Locomotion { start: p, path: 0.0 },
-            Mesh3d(creature_mesh.clone()),
-            MeshMaterial3d(mat),
             Transform::from_translation(p),
         ));
     }

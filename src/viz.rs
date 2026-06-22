@@ -6,9 +6,9 @@
 use bevy::prelude::*;
 
 use crate::components::{Alive, Creature, DietState, Energy, Fitness, Food, Grass, Heading, Rot, Seed, Tree};
-use crate::genome::{master_expression, Genome, NFOOD, NUTRIENTS};
+use crate::genome::{master_expression, Genome, NUTRIENTS};
 use crate::plant::{flower_color, form, plant_color, PlantGenome, PlantState};
-use crate::sim::{grid_cell_surface, Fire, GenState, GroundWater, ROT_GONE};
+use crate::sim::{grid_cell_surface, Fire, GenState, GroundWater, EYE_MIN, EYE_SPAN, LIMB_MIN, LIMB_SPAN, ROT_GONE};
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
@@ -106,26 +106,30 @@ pub struct PlantForms {
 #[derive(Resource)]
 pub struct CreatureMesh(pub Handle<Mesh>);
 
+// Genetic body-part meshes (M4): each creature gets a head + eyes + legs as child entities so head size,
+// eye count, and leg count are visible. Base sizes are ~unit; add_creature_visuals scales per genome.
+#[derive(Resource)]
+pub struct CreatureParts {
+    pub head: Handle<Mesh>,
+    pub eye: Handle<Mesh>,
+    pub leg: Handle<Mesh>,
+}
 
-// Color + body-plan scale from a genome. Shared by add_creature_visuals (initial look) and
-// restyle_creatures (on genome change) so newborns look right immediately, not default-orange.
+// Skin color + body-plan scale from a genome (M4). Shared by add_creature_visuals + restyle_creatures so
+// newborns look right immediately. Skin color comes from the skin_hue/skin_sat genes; venom pushes toward an
+// aposematic orange-red warning + vivid saturation; a pelt (fur) mutes + lightens; armor darkens; swimmers
+// shift cyan + take a fish body plan. Body scale = size x height (+ armor bulk), narrower/longer for swimmers.
 fn creature_look(g: &Genome) -> (Color, Vec3) {
-    // hue from the creature's dominant nutrient-uptake gene (its dietary specialization)
-    let mut dom = 0;
-    let mut best = g.uptake[0];
-    for t in 1..NUTRIENTS {
-        if g.uptake[t] > best {
-            best = g.uptake[t];
-            dom = t;
-        }
-    }
-    let sat = 0.2 + 0.7 * g.rigidity; // pinned specialist = vivid, generalist = washed out
-    let hue = type_hue(dom % NFOOD) * (1.0 - g.swim) + 200.0 * g.swim; // swim shifts toward cyan
-    let girth = (0.7 + 0.06 * g.n_sensors() as f32) * (0.6 + 0.9 * g.size);
+    let warn = g.venom.clamp(0.0, 1.0);
+    let mut hue = g.skin_hue * 360.0 * (1.0 - warn) + 25.0 * warn; // venom -> warning orange/red (~25 deg)
+    hue = hue * (1.0 - g.swim) + 200.0 * g.swim; // swimmers shift toward cyan (aquatic look)
+    let sat = ((0.25 + 0.6 * g.skin_sat + 0.4 * warn) * (1.0 - 0.4 * g.pelt)).clamp(0.0, 1.0); // venom vivid, fur muted
+    let light = (0.5 + 0.15 * g.pelt - 0.12 * g.armor).clamp(0.2, 0.8); // furry lighter, armored darker
+    let girth = (0.7 + 0.06 * g.n_sensors() as f32) * (0.6 + 0.9 * g.size) * (1.0 + 0.2 * g.armor);
     let sx = girth * (1.0 - 0.25 * g.swim);
     let sy = girth * (0.7 + 1.6 * g.height) * (1.0 - 0.3 * g.swim);
     let sz = girth * (1.0 + 0.8 * g.swim); // swim = flatter + longer (fish shape)
-    (Color::hsl(hue, sat, 0.55), Vec3::new(sx, sy, sz))
+    (Color::hsl(hue.rem_euclid(360.0), sat, light), Vec3::new(sx, sy, sz))
 }
 
 // Give any creature lacking a mesh its visuals (shared capsule + own genome-colored material). Covers
@@ -134,16 +138,79 @@ fn creature_look(g: &Genome) -> (Color, Vec3) {
 fn add_creature_visuals(
     mut commands: Commands,
     mesh: Option<Res<CreatureMesh>>,
+    parts: Option<Res<CreatureParts>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut q: Query<(Entity, &Genome, &mut Transform), (With<Creature>, Without<Mesh3d>)>,
 ) {
-    let Some(mesh) = mesh else { return };
+    let (Some(mesh), Some(parts)) = (mesh, parts) else { return };
     for (e, g, mut tf) in &mut q {
         let (color, scale) = creature_look(g);
         tf.scale = scale;
-        commands
-            .entity(e)
-            .insert((Mesh3d(mesh.0.clone()), MeshMaterial3d(materials.add(color))));
+        // children inherit the parent's non-uniform body scale; cancel it per-part so head/eyes/legs aren't
+        // distorted. part_tf places a part at WORLD offset `wo` with WORLD dimensions `dim` (base meshes ~unit).
+        let inv = Vec3::new(1.0 / scale.x.max(0.01), 1.0 / scale.y.max(0.01), 1.0 / scale.z.max(0.01));
+        let part_tf = |wo: Vec3, dim: Vec3| Transform { translation: wo * inv, scale: dim * inv, ..default() };
+        let body = 0.6 + 0.9 * g.size; // overall build factor (parts scale with the creature)
+        let srgb = |c: Color, k: f32| {
+            let s = c.to_srgba();
+            Color::srgb(s.red * k, s.green * k, s.blue * k)
+        };
+
+        commands.entity(e).insert((Mesh3d(mesh.0.clone()), MeshMaterial3d(materials.add(color))));
+
+        // HEAD: a sphere up front + on top (local +Z, +Y), two-toned by the pattern gene (a marking).
+        let head_d = (0.45 + 0.55 * g.head) * body;
+        let head_y = 0.7 * scale.y;
+        let head_z = 0.35 * scale.z + 0.45 * head_d;
+        let head = commands
+            .spawn((
+                Mesh3d(parts.head.clone()),
+                MeshMaterial3d(materials.add(srgb(color, 1.0 - 0.45 * g.pattern))),
+                part_tf(Vec3::new(0.0, head_y, head_z), Vec3::splat(head_d)),
+            ))
+            .id();
+        commands.entity(e).add_child(head);
+
+        // EYES: 1..6 bright spheres proud of the head's front face (a second row above 3 eyes).
+        let n_eyes = (EYE_MIN + EYE_SPAN * g.eyes).round().clamp(1.0, 6.0) as usize;
+        let eye_mat = materials.add(StandardMaterial {
+            base_color: Color::srgb(0.97, 0.98, 1.0),
+            emissive: LinearRgba::rgb(0.5, 0.52, 0.6), // glow so eyes read at a distance
+            ..default()
+        });
+        let eye_d = 0.34 * head_d;
+        for k in 0..n_eyes {
+            let frac = if n_eyes <= 1 { 0.0 } else { (k as f32 / (n_eyes - 1) as f32) * 2.0 - 1.0 };
+            let row = if k >= 3 { 1.0 } else { 0.0 };
+            let ex = frac * 0.30 * head_d;
+            let ey = head_y + 0.10 * head_d + row * 0.26 * head_d;
+            let ez = head_z + 0.46 * head_d; // sit proud on the front of the head sphere
+            let eye = commands
+                .spawn((Mesh3d(parts.eye.clone()), MeshMaterial3d(eye_mat.clone()), part_tf(Vec3::new(ex, ey, ez), Vec3::splat(eye_d))))
+                .id();
+            commands.entity(e).add_child(eye);
+        }
+
+        // LEGS: 2..8 thin legs splayed in a ring around the LOWER body sides (just outside the body radius),
+        // poking down toward the ground so they read as limbs, not a buried fringe. Longer for climbers.
+        let n_legs = (LIMB_MIN + LIMB_SPAN * g.limbs).round().clamp(2.0, 8.0) as usize;
+        let leg_len = (0.45 + 0.45 * g.climb) * body;
+        let leg_r = 0.10 * body;
+        let leg_mat = materials.add(srgb(color, 0.55));
+        for k in 0..n_legs {
+            let a = (k as f32 / n_legs as f32) * std::f32::consts::TAU;
+            let lx = a.cos() * 0.52 * scale.x; // just outside the body silhouette
+            let lz = a.sin() * 0.52 * scale.z;
+            let cy = -0.35 * scale.y - 0.5 * leg_len; // hang from the lower body
+            let leg = commands
+                .spawn((
+                    Mesh3d(parts.leg.clone()),
+                    MeshMaterial3d(leg_mat.clone()),
+                    part_tf(Vec3::new(lx, cy, lz), Vec3::new(leg_r, leg_len, leg_r)),
+                ))
+                .id();
+            commands.entity(e).add_child(leg);
+        }
     }
 }
 
@@ -1152,18 +1219,9 @@ fn fire_visuals(fire: Res<Fire>, gen: Res<GenState>, mut gizmos: Gizmos) {
 pub struct ShowSensors(pub bool);
 
 fn log_viz_help() {
-    info!("viz: TAB=orbit/walk (keeps true sim time; [ ] scrub time, \\ noon; swim into the sea: look + W to dive) | hue=diet, vividness=rigidity, size=sensors | G=sensor rays | SPACE=pause | 1-5=speed +/-=fine | B=seed life P=populate planet L=lightning K=cull | H=legend");
+    info!("viz: TAB=orbit/walk (keeps true sim time; [ ] scrub time, \\ noon; swim into the sea: look + W to dive) | hue=diet, vividness=rigidity, size=sensors | color=skin genes (venom=warning tint), head/eyes/legs=genome, size=body | G=sensor rays | SPACE=pause | 1-5=speed +/-=fine | B=seed life P=populate planet L=lightning K=cull | H=legend");
 }
 
-// Hue per dominant food/diet type, matching the food palette (green/purple/gold/cyan).
-fn type_hue(t: usize) -> f32 {
-    match t {
-        0 => 130.0,
-        1 => 285.0,
-        2 => 45.0,
-        _ => 190.0,
-    }
-}
 
 // Recolor + rescale a creature when its genome changes (spawn + every generation boundary).
 fn restyle_creatures(
@@ -1171,7 +1229,7 @@ fn restyle_creatures(
     mut q: Query<(&Genome, &MeshMaterial3d<StandardMaterial>, &mut Transform), Changed<Genome>>,
 ) {
     for (g, mm, mut tf) in &mut q {
-        let (color, scale) = creature_look(g); // hue=diet, sat=rigidity, swim=cyan + fish body plan
+        let (color, scale) = creature_look(g); // skin_hue/sat genes, venom warning, fur/armor, fish body plan
         if let Some(m) = mats.get_mut(&mm.0) {
             m.base_color = color;
         }
