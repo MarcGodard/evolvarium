@@ -54,6 +54,19 @@ live in `config.rs`; the live conversion plan is `SPHERE-PLAN.md`.
       before; unit-tested. Verified: scenario w/ predator cohort is stable (no cannibalism crash) + carnivory
       drifts up (predation emerging). Retune via `tools/retune-combat.workflow.js` (predator pressure per niche).
 
+### Magnetic field + magnetoreception (2026-06-22)
+- [x] **Tilted geomagnetic dipole** (`sphere.rs`): `MAG_TILT` + `mag_pole_dir` (magnetic north ~11.5 deg off
+      the spin axis); `mag_field` / `mag_latitude` (inclination "map" cue) / `mag_north_bearing` (compass,
+      nonzero declination under the tilt) / `mag_intensity`. Pure + unit-tested.
+- [x] **`magneto` sense gene** (serde default 0 = off; old saves unchanged): a soft-knee switch
+      (`mag_expression`, smoothstep 0.2..0.6) gating 2 new brain inputs (magnetic latitude + compass heading)
+      for navigation/homing. `GLOBAL_INPUTS` 9 -> 11; old nets zero-padded on load (migration unit-tested,
+      seed still loads). No free lunch: `MAG_COST` basal upkeep scaled by expression -> sense kept only where
+      it pays off. Selection is emergent (a fresh harness seed could exploit it later).
+- [x] **Aurora** (`main.rs`/`viz.rs`): an emissive `Aurora` ring around each magnetic pole at ~66 deg magnetic
+      latitude, oriented to the tilted pole (sits OFF the geographic pole), shimmering green<->magenta +
+      brighter on the night side (`update_aurora`). Verified via `--capture` (oval offset from the geo pole).
+
 ### Creature overhaul M4 (2026-06-22)
 - [x] **12 new genes** (all serde-default, save-safe): detox, carnivory, pelt, armor, venom (physiology/
       defense); limbs, climb, eyes, head (morphology); skin_hue, skin_sat, pattern (appearance). Each has a

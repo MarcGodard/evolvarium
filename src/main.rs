@@ -392,4 +392,25 @@ fn setup_scene(
             bevy::light::NotShadowCaster, // background stars never cast
         ));
     }
+    // aurora: an emissive ring around each MAGNETIC pole at the auroral magnetic latitude (~66 deg). Oriented
+    // to sphere::mag_pole_dir() (tilted off the spin axis), so the ovals sit OFF the geographic poles. Shimmer
+    // + night-side brightness animated by viz::update_aurora. Charged particles guided by the field = aurora.
+    let lam = 1.15_f32; // auroral ring magnetic latitude (~66 deg)
+    let r = sphere::PLANET_R + 2.0; // just above the surface
+    for s in [1.0_f32, -1.0] {
+        let axis = sphere::mag_pole_dir() * s; // the magnetic pole this oval rings
+        commands.spawn((
+            Mesh3d(meshes.add(Torus { minor_radius: 1.3, major_radius: r * lam.cos() }.mesh().build())),
+            MeshMaterial3d(materials.add(StandardMaterial {
+                base_color: Color::srgba(0.2, 1.0, 0.6, 0.5),
+                emissive: LinearRgba::rgb(0.3, 2.2, 1.1),
+                alpha_mode: AlphaMode::Add,
+                unlit: true,
+                ..default()
+            })),
+            Transform::from_translation(axis * (r * lam.sin())).with_rotation(Quat::from_rotation_arc(Vec3::Y, axis)),
+            bevy::light::NotShadowCaster,
+            viz::Aurora { dir: axis },
+        ));
+    }
 }

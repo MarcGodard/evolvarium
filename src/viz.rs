@@ -50,6 +50,10 @@ pub struct SunLight;
 pub struct Moon;
 #[derive(Component)]
 pub struct SunDisc; // the visible glowing sun (follows the light direction)
+#[derive(Component)]
+pub struct Aurora {
+    pub dir: Vec3, // the magnetic pole this oval rings (used for night-side brightness)
+}
 
 pub struct VizPlugin;
 
@@ -72,7 +76,7 @@ impl Plugin for VizPlugin {
                     add_plant_visuals,
                     size_plants,
                     add_grass_visuals,
-                    (day_night_lighting, time_of_day, toggle_shadows, walk_ambient, update_daycycle, track_underwater, update_sky, toggle_underwater_tint, animate_ocean, update_globe_climate),
+                    (day_night_lighting, time_of_day, toggle_shadows, walk_ambient, update_daycycle, track_underwater, update_sky, toggle_underwater_tint, animate_ocean, update_globe_climate, update_aurora),
                     rain_visuals,
                     fire_visuals,
                     update_clouds,
@@ -1461,6 +1465,31 @@ fn animate_ocean(gen: Res<GenState>, mut q: Query<&mut Transform, With<Ocean>>) 
     let s = 1.0 + 0.004 * (gen.tick as f32 * 0.03).sin();
     for mut tf in &mut q {
         tf.scale = Vec3::splat(s);
+    }
+}
+
+// Aurora: shimmer the magnetic-pole rings. Emissive pulses green<->magenta + brightens on the NIGHT side
+// (the lit side washes the glow out), and the ring breathes slightly (curtains in motion). Cosmetic.
+fn update_aurora(
+    gen: Res<GenState>,
+    offset: Res<SunOffset>,
+    mut mats: ResMut<Assets<StandardMaterial>>,
+    mut q: Query<(&Aurora, &MeshMaterial3d<StandardMaterial>, &mut Transform)>,
+) {
+    let vtick = (gen.tick as i64 + offset.0).max(0) as u32;
+    let t = gen.tick as f32;
+    for (aur, mm, mut tf) in &mut q {
+        let night = 1.0 - crate::sphere::daylight_at(aur.dir, vtick); // 0 day .. 1 night at this pole
+        let shimmer = 0.5 + 0.5 * (t * 0.025).sin(); // 0..1 green<->magenta sweep
+        let bright = 0.25 + 1.3 * night; // faint by day, vivid at night
+        // green-dominant with a magenta (red+blue) tinge that swells as shimmer falls
+        let g = (1.6 + 1.1 * shimmer) * bright;
+        let rb = (0.3 + 0.9 * (1.0 - shimmer)) * bright;
+        if let Some(m) = mats.get_mut(&mm.0) {
+            m.emissive = LinearRgba::rgb(rb * 0.6, g, rb);
+        }
+        // breathe the ring radius a touch (curtains drifting in/out)
+        tf.scale = Vec3::splat(1.0 + 0.04 * (t * 0.018 + aur.dir.x).sin());
     }
 }
 
