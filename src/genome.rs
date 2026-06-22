@@ -69,6 +69,32 @@ pub struct Genome {
     pub alpine: f32,         // 0..1 mountain adaptation: high = cheap rock/highland crossing (climber) but a heavy-build penalty on flat ground; low = lowland-light. Mirror of swim for mountains. Default 0 = neutral (no relief, no penalty), so old saves are unchanged.
     #[serde(default = "half")]
     pub adiposity: f32,      // 0..1 fat-storage strategy: high = big fat reserve + easy storage (survives famine) but sluggish (fat mobilizes slow) + carrying-fat upkeep; low = lean/nimble + cheap but famine-fragile. Default 0.5 = baseline.
+
+    // --- M4 creature expansion (all #[serde(default)] -> neutral, so old saves load unchanged) ---
+    #[serde(default = "d30")]
+    pub detox: f32,          // 0..1 toxin-clearance: high = clears toxic_load fast + eats toxic plants/rotten meat safely (costs liver upkeep DETOX_COST); low = cheap but poisons easily. Default 0.3.
+    #[serde(default = "d30")]
+    pub carnivory: f32,      // 0..1 gut axis herbivore..carnivore: high = digests meat/protein well but poor at plant sugar; low = opposite. Central to rabbit starvation (lean-meat protein cap). Default 0.3.
+    #[serde(default = "d20")]
+    pub pelt: f32,           // 0..1 hair/fur cover: insulation cuts cold-side temp cost; costs heat-side cost + swim drag + basal upkeep. Default 0.2.
+    #[serde(default = "zero")]
+    pub armor: f32,          // 0..1 body armor: lowers predation success against it; costs move + basal upkeep. Default 0.
+    #[serde(default = "zero")]
+    pub venom: f32,          // 0..1 toxic flesh: a predator eating it takes a toxic_load hit (deterrent); costs basal upkeep + aposematic look. Default 0.
+    #[serde(default = "d40")]
+    pub limbs: f32,          // 0..1 -> 2..8 walking legs: more limbs = land traction (speed/stability on rough ground); costs more move energy per limb. Default 0.4 (~4 legs).
+    #[serde(default = "zero")]
+    pub climb: f32,          // 0..1 tree-climbing: reach fruit trees w/o tall height + tree-refuge predation safety; costs penalty on open flat ground (arboreal build). Default 0.
+    #[serde(default = "d40")]
+    pub eyes: f32,           // 0..1 -> 1..6 eyes: small detection bonus (slightly extends effective sense); per-eye upkeep. Default 0.4.
+    #[serde(default = "d40")]
+    pub head: f32,           // 0..1 head size: bigger head houses brain cheaper (cuts per-neuron BRAIN_COST); head mass adds basal. Default 0.4.
+    #[serde(default = "d40")]
+    pub skin_hue: f32,       // 0..1 base body hue (render). Default 0.4.
+    #[serde(default = "half")]
+    pub skin_sat: f32,       // 0..1 body saturation (render). Default 0.5.
+    #[serde(default = "zero")]
+    pub pattern: f32,        // 0..1 markings intensity: stripes/spots (render). Default 0.
 }
 
 // serde defaults for traits absent in old saves
@@ -80,6 +106,16 @@ fn third() -> f32 {
 }
 fn zero() -> f32 {
     0.0
+}
+// extra neutral defaults for the M4 creature-expansion genes (so old saves load unchanged)
+fn d20() -> f32 {
+    0.2
+}
+fn d30() -> f32 {
+    0.3
+}
+fn d40() -> f32 {
+    0.4
 }
 // serde default for uptake on saves predating the nutrient genome: a mid generalist (all nutrients
 // absorbed moderately) so old creatures load as functional omnivores.
@@ -152,6 +188,19 @@ impl Genome {
             parental: rng.f32(),
             alpine: rng.f32(), // founders span lowland..mountain builds -> a highland niche can emerge
             adiposity: rng.f32(), // founders span lean..fatty storage strategies
+            // M4 creature expansion: founders span the full range of each new axis so selection has variation
+            detox: rng.f32() * 0.5,   // mostly low-detox founders (cheap), a few tolerant
+            carnivory: rng.f32(),     // span herbivore..carnivore guts
+            pelt: rng.f32() * 0.5,    // mostly light coats to start
+            armor: rng.f32() * 0.3,   // mostly unarmored founders
+            venom: rng.f32() * 0.2,   // mostly non-toxic founders
+            limbs: rng.f32(),         // span few..many limbs
+            climb: rng.f32() * 0.4,   // mostly ground-dwellers, a few climbers
+            eyes: rng.f32(),          // span eye counts
+            head: rng.range(0.3, 0.7),// mid heads (brain housing)
+            skin_hue: rng.f32(),      // span the color wheel
+            skin_sat: rng.range(0.3, 0.9),
+            pattern: rng.f32() * 0.6, // span plain..marked
         }
     }
 
@@ -179,6 +228,18 @@ impl Genome {
         c.parental = pick(rng, a.parental, b.parental);
         c.alpine = pick(rng, a.alpine, b.alpine);
         c.adiposity = pick(rng, a.adiposity, b.adiposity);
+        c.detox = pick(rng, a.detox, b.detox);
+        c.carnivory = pick(rng, a.carnivory, b.carnivory);
+        c.pelt = pick(rng, a.pelt, b.pelt);
+        c.armor = pick(rng, a.armor, b.armor);
+        c.venom = pick(rng, a.venom, b.venom);
+        c.limbs = pick(rng, a.limbs, b.limbs);
+        c.climb = pick(rng, a.climb, b.climb);
+        c.eyes = pick(rng, a.eyes, b.eyes);
+        c.head = pick(rng, a.head, b.head);
+        c.skin_hue = pick(rng, a.skin_hue, b.skin_hue);
+        c.skin_sat = pick(rng, a.skin_sat, b.skin_sat);
+        c.pattern = pick(rng, a.pattern, b.pattern);
         for i in 0..NUTRIENTS {
             c.uptake[i] = pick(rng, a.uptake[i], b.uptake[i]);
         }
@@ -254,6 +315,43 @@ impl Genome {
         }
         if rng.f32() < rate {
             self.adiposity = (self.adiposity + rng.normal() * 0.12).clamp(0.0, 1.0);
+        }
+        // M4 creature-expansion genes drift like the rest
+        if rng.f32() < rate {
+            self.detox = (self.detox + rng.normal() * 0.12).clamp(0.0, 1.0);
+        }
+        if rng.f32() < rate {
+            self.carnivory = (self.carnivory + rng.normal() * 0.12).clamp(0.0, 1.0);
+        }
+        if rng.f32() < rate {
+            self.pelt = (self.pelt + rng.normal() * 0.12).clamp(0.0, 1.0);
+        }
+        if rng.f32() < rate {
+            self.armor = (self.armor + rng.normal() * 0.12).clamp(0.0, 1.0);
+        }
+        if rng.f32() < rate {
+            self.venom = (self.venom + rng.normal() * 0.12).clamp(0.0, 1.0);
+        }
+        if rng.f32() < rate {
+            self.limbs = (self.limbs + rng.normal() * 0.12).clamp(0.0, 1.0);
+        }
+        if rng.f32() < rate {
+            self.climb = (self.climb + rng.normal() * 0.12).clamp(0.0, 1.0);
+        }
+        if rng.f32() < rate {
+            self.eyes = (self.eyes + rng.normal() * 0.12).clamp(0.0, 1.0);
+        }
+        if rng.f32() < rate {
+            self.head = (self.head + rng.normal() * 0.12).clamp(0.0, 1.0);
+        }
+        if rng.f32() < rate {
+            self.skin_hue = (self.skin_hue + rng.normal() * 0.12).clamp(0.0, 1.0);
+        }
+        if rng.f32() < rate {
+            self.skin_sat = (self.skin_sat + rng.normal() * 0.12).clamp(0.0, 1.0);
+        }
+        if rng.f32() < rate {
+            self.pattern = (self.pattern + rng.normal() * 0.12).clamp(0.0, 1.0);
         }
         // structural: add / remove a sensor (and the matching input-weight columns)
         if rng.f32() < 0.06 && self.sensors.len() < MAX_SENSORS {

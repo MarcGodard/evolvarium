@@ -1667,7 +1667,7 @@ pub fn predation_step(
     mut cq: Query<(Entity, &Transform, &mut Energy, &mut Fitness, &mut Alive, &Genome), With<Creature>>,
 ) {
     // snapshot living creatures: (entity, pos, combat, energy, kin-signature). Combat = bite + size.
-    let snap: Vec<(Entity, Vec3, f32, f32, [f32; 8])> = cq
+    let snap: Vec<(Entity, Vec3, f32, f32, [f32; 10])> = cq
         .iter()
         .filter(|(_, _, _, _, a, _)| a.0)
         .map(|(e, t, en, _, _, g)| (e, t.translation, g.bite + SIZE_COMBAT * g.size, en.total(), signature(g)))
@@ -1785,14 +1785,14 @@ pub fn live_step(
     let mut eaten: HashSet<Entity> = HashSet::new();
     let mut sample_genome: Option<Genome> = None; // a living genome, for the near-extinction reseed floor
     // creature snapshot for the social/kin need: (entity, pos, phenotype signature)
-    let cre_snap: Vec<(Entity, Vec3, [f32; 8])> = cq
+    let cre_snap: Vec<(Entity, Vec3, [f32; 10])> = cq
         .iter()
         .filter(|(_, _, _, _, _, a, _, _, _, _)| a.0)
         .map(|(e, t, _, _, _, _, g, _, _, _)| (e, t.translation, signature(g)))
         .collect();
     // mating mode: a pool of (entity, pos, signature, genome) so a breeding creature can find a nearby
     // genetically-similar MATE to cross with. Built only when --mating (cloning genomes isn't free).
-    let mate_pool: Vec<(Entity, Vec3, [f32; 8], Genome)> = if gen.mating {
+    let mate_pool: Vec<(Entity, Vec3, [f32; 10], Genome)> = if gen.mating {
         cq.iter()
             .filter(|(_, _, _, _, _, a, _, _, _, _)| a.0)
             .map(|(e, t, _, _, _, _, g, _, _, _)| (e, t.translation, signature(g), g.clone()))
@@ -2313,16 +2313,19 @@ fn fat_cap(g: &Genome) -> f32 {
 
 // Compact phenotype signature for KIN similarity (diet + body traits). Two creatures are "kin" when
 // their signatures are within SOCIAL_SIM -> drives flocking-by-species + the social need.
-fn signature(g: &Genome) -> [f32; 8] {
-    [g.uptake[0], g.uptake[1], g.uptake[2], g.uptake[3], g.size, g.swim, g.light_pref, g.height]
+fn signature(g: &Genome) -> [f32; 10] {
+    // diet + body identity; carnivory + pelt added (M4) so gut-axis + coat divergence speciate too.
+    // Both default identical across an old seed (serde default), so they add 0 distance there -> no
+    // change to an existing population, only newly-evolved divergence.
+    [g.uptake[0], g.uptake[1], g.uptake[2], g.uptake[3], g.size, g.swim, g.light_pref, g.height, g.carnivory, g.pelt]
 }
-fn sig_dist(a: &[f32; 8], b: &[f32; 8]) -> f32 {
+fn sig_dist(a: &[f32; 10], b: &[f32; 10]) -> f32 {
     a.iter().zip(b).map(|(x, y)| (x - y).abs()).sum()
 }
 
 // Fraction of social satisfaction from nearby kin (0 isolated .. 1 fully in a herd), given a snapshot
 // of (entity, pos, signature). Excludes self by entity id.
-fn kin_fraction(me: Entity, pos: Vec3, sig: &[f32; 8], snap: &[(Entity, Vec3, [f32; 8])]) -> f32 {
+fn kin_fraction(me: Entity, pos: Vec3, sig: &[f32; 10], snap: &[(Entity, Vec3, [f32; 10])]) -> f32 {
     let r2 = SOCIAL_RADIUS * SOCIAL_RADIUS;
     let mut kin = 0.0f32;
     for (e, p, s) in snap {
