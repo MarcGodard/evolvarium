@@ -1000,6 +1000,63 @@ pub struct CavePositions {
     pub positions: Vec<Vec3>,
 }
 
+// Solid land-cliff footprint as an oriented box in the surface tangent plane -> walk-mode collision (can't walk
+// through the cliff). Render-only (walk happens only in the render app). `along` = cliff length axis, `into` =
+// uphill (toward the rock bulk); world extents in those axes block the walker. See CliffBlocks::resolve.
+#[derive(Clone)]
+pub struct CliffBlock {
+    pub center: Vec3, // unit dir of the cliff site
+    pub along: Vec3,  // unit world tangent, length axis
+    pub into: Vec3,   // unit world tangent, uphill (into the rock)
+    pub up: Vec3,     // unit radial at the site
+    pub r: f32,       // surface radius at the site (unit-offset -> world dist)
+    pub half_len: f32,
+    pub z_front: f32, // downhill solid edge (world, negative along `into`)
+    pub z_back: f32,  // uphill solid edge (world)
+}
+
+#[derive(Resource, Default)]
+pub struct CliffBlocks {
+    pub blocks: Vec<CliffBlock>,
+}
+
+impl CliffBlocks {
+    // Push a walker direction OUT of any cliff footprint (min-penetration exit through the nearest box face).
+    // dir = candidate unit surface dir; returns adjusted unit dir. margin keeps the eye off the rock face.
+    pub fn resolve(&self, dir: Vec3) -> Vec3 {
+        let mut p = dir.normalize_or_zero();
+        let margin = 1.4;
+        for b in &self.blocks {
+            let off = p - b.center;
+            let off_t = off - b.up * off.dot(b.up); // tangent offset
+            let a = off_t.dot(b.along) * b.r; // along-length world dist
+            let z = off_t.dot(b.into) * b.r; // into-hill world dist
+            let hl = b.half_len + margin;
+            let zf = b.z_front - margin;
+            let zb = b.z_back + margin;
+            if a > -hl && a < hl && z > zf && z < zb {
+                let pen_left = a + hl; // exit -along
+                let pen_right = hl - a; // exit +along
+                let pen_front = z - zf; // exit -into (downhill)
+                let pen_back = zb - z; // exit +into
+                let m = pen_left.min(pen_right).min(pen_front).min(pen_back);
+                let w = p * b.r;
+                let moved = if m == pen_front {
+                    w - b.into * pen_front
+                } else if m == pen_back {
+                    w + b.into * pen_back
+                } else if m == pen_left {
+                    w - b.along * pen_left
+                } else {
+                    w + b.along * pen_right
+                };
+                p = moved.normalize_or_zero();
+            }
+        }
+        p
+    }
+}
+
 // Place a small CLUSTER of caves in ONE rocky-highland region (a cave system in "the rocky area"), rather than
 // scattering them worldwide. Pick a rocky high-ground center, then drop CAVE_COUNT caves within a small cap of
 // it. Deterministic from rng. Returns empty if no rocky highland is found (a smooth/lowland planet just has none).
@@ -1362,6 +1419,7 @@ pub fn spawn_world_render(
             ..default()
         });
         // land cliffs: long + low escarpment, yawed so the steep face (local -Z) points DOWNHILL (descent dir).
+        let mut cliff_blocks: Vec<CliffBlock> = Vec::new();
         for &c in &land_caves {
             let up = c.normalize_or_zero();
             let base = crate::sphere::surface_pos(up, 0.0);
@@ -1392,8 +1450,21 @@ pub fn spawn_world_render(
             let mut tf = Transform::from_translation(base - up * (sy * 0.3)); // bury the skirt so the base never floats
             tf.rotation = Quat::from_axis_angle(up, yaw) * base_rot;
             tf.scale = Vec3::new(sx, sy, sz);
-            commands.spawn((Mesh3d(cliff_m.clone()), MeshMaterial3d(rock_mat.clone()), tf, bevy::light::NotShadowCaster));
+            // shadow caster ON now -> the overhang/inside self-shadows (no fake sunlit interior)
+            commands.spawn((Mesh3d(cliff_m.clone()), MeshMaterial3d(rock_mat.clone()), tf));
+            // walk-collision footprint: oriented box, length along local X, depth along local +Z (uphill)
+            cliff_blocks.push(CliffBlock {
+                center: up,
+                along: (tf.rotation * Vec3::X).normalize_or_zero(),
+                into: (tf.rotation * Vec3::Z).normalize_or_zero(),
+                up,
+                r: base.length(),
+                half_len: sx,
+                z_front: -0.15 * sz, // a touch downhill of the crest base
+                z_back: 0.85 * sz,   // back into the hill
+            });
         }
+        commands.insert_resource(CliffBlocks { blocks: cliff_blocks });
         // sea caves: keep the recessed-hole look (a hole in the seabed reads fine underwater)
         for &c in &sea_caves {
             let up = c.normalize_or_zero();

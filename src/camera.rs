@@ -198,7 +198,14 @@ fn apply_orbit(mode: Res<CameraMode>, selected: Res<Selected>, mut q: Query<(&mu
 // never up/down). Over OCEAN swim/fly: W/S follow look direction (pitch down + W dives, pitch up + W rises),
 // A/D strafe horizontally, eye_alt clamped between seafloor and just above sea surface. Arrows turn/look
 // both modes, Shift sprints.
-fn walk_move(mode: Res<CameraMode>, keys: Res<ButtonInput<KeyCode>>, time: Res<Time>, mut q: Query<&mut WalkCam>) {
+fn walk_move(
+    mode: Res<CameraMode>,
+    keys: Res<ButtonInput<KeyCode>>,
+    time: Res<Time>,
+    cliffs: Option<Res<crate::sim::CliffBlocks>>,
+    trees: Query<&GlobalTransform, With<crate::components::Tree>>,
+    mut q: Query<&mut WalkCam>,
+) {
     if *mode != CameraMode::Walk {
         return;
     }
@@ -227,6 +234,21 @@ fn walk_move(mode: Res<CameraMode>, keys: Res<ButtonInput<KeyCode>>, time: Res<T
         if keys.pressed(KeyCode::KeyS) { w.dir = crate::sphere::step(w.dir, w.yaw, -dist).0; }
         if keys.pressed(KeyCode::KeyA) { w.dir = crate::sphere::step(w.dir, w.yaw - FRAC_PI_2, dist).0; }
         if keys.pressed(KeyCode::KeyD) { w.dir = crate::sphere::step(w.dir, w.yaw + FRAC_PI_2, dist).0; }
+    }
+    // solid-world collision (land only): push out of cliffs, then tree trunks -> can't walk through them
+    if let Some(cliffs) = cliffs.as_ref() {
+        w.dir = cliffs.resolve(w.dir);
+    }
+    for gt in &trees {
+        let tpos = gt.translation();
+        let r = tpos.length();
+        let tdir = tpos / r.max(1e-4);
+        let off = w.dir - tdir;
+        let d = off.length() * r; // tangent dist from trunk, world units
+        let trunk_r = (0.5 + 0.22 * gt.scale().x).clamp(0.5, 1.6); // thicker block for bigger trees
+        if d > 1e-4 && d < trunk_r {
+            w.dir = (tdir + off / off.length() * (trunk_r / r)).normalize_or_zero(); // push to trunk edge
+        }
     }
 }
 
