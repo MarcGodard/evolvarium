@@ -126,6 +126,8 @@ pub struct CreatureParts {
     pub head: Handle<Mesh>,
     pub eye: Handle<Mesh>,
     pub leg: Handle<Mesh>,
+    pub fin: Handle<Mesh>, // Y-axis cone: caudal tail fan + dorsal ridge (scaled flat per use)
+    pub seg: Handle<Mesh>, // unit cuboid: rod/bushy tails + flat pectoral side-fins (axis-aligned, no rotation)
 }
 
 // Skin color + body-plan scale from genome (M4). Shared by add_creature_visuals + restyle_creatures ->
@@ -135,13 +137,14 @@ pub struct CreatureParts {
 fn creature_look(g: &Genome) -> (Color, Vec3) {
     let warn = g.venom.clamp(0.0, 1.0);
     let mut hue = g.skin_hue * 360.0 * (1.0 - warn) + 25.0 * warn; // venom -> warning orange/red (25 deg)
-    hue = hue * (1.0 - g.swim) + 200.0 * g.swim; // swimmers -> cyan (200 deg)
+    hue = hue * (1.0 - 0.45 * g.swim) + 200.0 * (0.45 * g.swim); // swimmers tinted toward cyan but KEEP hue variety (reef-bright fish)
     let sat = ((0.25 + 0.6 * g.skin_sat + 0.4 * warn) * (1.0 - 0.4 * g.pelt)).clamp(0.0, 1.0); // venom vivid, fur muted
     let light = (0.5 + 0.15 * g.pelt - 0.12 * g.armor).clamp(0.2, 0.8); // fur lighter, armor darker
     let girth = (0.7 + 0.06 * g.n_sensors() as f32) * (0.6 + 0.9 * g.size) * (1.0 + 0.2 * g.armor);
-    let sx = girth * (1.0 - 0.25 * g.swim);
-    let sy = girth * (0.7 + 1.6 * g.height) * (1.0 - 0.3 * g.swim);
-    let sz = girth * (1.0 + 0.8 * g.swim); // swim -> flatter + longer (fish shape)
+    let slim = 1.0 - 0.45 * g.elongate; // long bodies slim their cross-section (eel/snake noodle, not a giant log)
+    let sx = girth * (1.0 - 0.25 * g.swim) * slim;
+    let sy = girth * (0.7 + 1.6 * g.height) * (1.0 - 0.3 * g.swim) * slim;
+    let sz = girth * (1.0 + 0.8 * g.swim + 2.4 * g.elongate); // swim flatter+longer; elongate -> snake/eel length
     (Color::hsl(hue.rem_euclid(360.0), sat, light), Vec3::new(sx, sy, sz))
 }
 
@@ -218,25 +221,100 @@ fn add_creature_visuals(
             commands.entity(e).add_child(eye);
         }
 
-        // LEGS: 2..8 thin legs ringed around LOWER body sides (just outside body radius), poking down ->
-        // read as limbs, not buried fringe. Longer for climbers.
+        // LIMBS: body local axes -> +Y up, +Z forward (facing), creature stands vertical on surface. Limb FORM
+        // forks on body plan so aquatics stop looking like land animals:
+        //   land     -> 2..8 legs poking down (current).
+        //   swimmer + many limbs (>=6) -> octopus: long thin tentacles drooping from front-under the mantle.
+        //   swimmer + few limbs        -> fish: flat pectoral side-fins (tail fin does the propulsion read).
+        //   very elongate (snake/eel)  -> legless: body + tail carry it, no limbs at all.
         let n_legs = (LIMB_MIN + LIMB_SPAN * g.limbs).round().clamp(2.0, 8.0) as usize;
-        let leg_len = (0.45 + 0.45 * g.climb) * body;
-        let leg_r = 0.10 * body;
+        let swimmer = g.swim > 0.45;
+        let legless = g.elongate > 0.75; // serpent: limbs vanish
         let leg_mat = materials.add(srgb(color, 0.55));
-        for k in 0..n_legs {
-            let a = (k as f32 / n_legs as f32) * std::f32::consts::TAU;
-            let lx = a.cos() * 0.52 * scale.x; // just outside body silhouette
-            let lz = a.sin() * 0.52 * scale.z;
-            let cy = -0.35 * scale.y - 0.5 * leg_len; // hang from lower body
-            let leg = commands
-                .spawn((
-                    Mesh3d(parts.leg.clone()),
-                    MeshMaterial3d(leg_mat.clone()),
-                    part_tf(Vec3::new(lx, cy, lz), Vec3::new(leg_r, leg_len, leg_r)),
-                ))
+        let fin_mat = materials.add(srgb(color, 0.85));
+        if legless {
+            // no limbs
+        } else if swimmer && n_legs >= 6 {
+            // OCTOPUS: tentacles ring the front-lower body, hang down + slightly splayed, long + thin.
+            let t_len = 1.5 * body;
+            let t_r = 0.07 * body;
+            for k in 0..n_legs {
+                let a = (k as f32 / n_legs as f32) * std::f32::consts::TAU;
+                let tx = a.cos() * 0.42 * scale.x;
+                let tz = 0.2 * scale.z + a.sin() * 0.42 * scale.z; // biased forward (under the mantle)
+                let cy = -0.3 * scale.y - 0.5 * t_len;
+                let tent = commands
+                    .spawn((Mesh3d(parts.leg.clone()), MeshMaterial3d(leg_mat.clone()), part_tf(Vec3::new(tx, cy, tz), Vec3::new(t_r, t_len, t_r))))
+                    .id();
+                commands.entity(e).add_child(tent);
+            }
+        } else if swimmer {
+            // FISH: a pair (up to 4) of flat pectoral fins out the lower sides, swept slightly back.
+            let n_fins = n_legs.min(4);
+            let fw = 0.55 * body; // fin reach out from body
+            for k in 0..n_fins {
+                let side = if k % 2 == 0 { 1.0 } else { -1.0 };
+                let fx = side * (0.5 * scale.x + 0.5 * fw);
+                let fz = 0.05 * scale.z - (k / 2) as f32 * 0.25 * scale.z; // pairs march toward the tail
+                let fy = -0.15 * scale.y;
+                let fin = commands
+                    .spawn((Mesh3d(parts.seg.clone()), MeshMaterial3d(fin_mat.clone()), part_tf(Vec3::new(fx, fy, fz), Vec3::new(fw, 0.05 * body, 0.42 * body))))
+                    .id();
+                commands.entity(e).add_child(fin);
+            }
+        } else {
+            // LAND LEGS: 2..8 thin legs ringed around lower body sides, poking down. Longer for climbers.
+            let leg_len = (0.45 + 0.45 * g.climb) * body;
+            let leg_r = 0.10 * body;
+            for k in 0..n_legs {
+                let a = (k as f32 / n_legs as f32) * std::f32::consts::TAU;
+                let lx = a.cos() * 0.52 * scale.x; // just outside body silhouette
+                let lz = a.sin() * 0.52 * scale.z;
+                let cy = -0.35 * scale.y - 0.5 * leg_len; // hang from lower body
+                let leg = commands
+                    .spawn((Mesh3d(parts.leg.clone()), MeshMaterial3d(leg_mat.clone()), part_tf(Vec3::new(lx, cy, lz), Vec3::new(leg_r, leg_len, leg_r)))).id();
+                commands.entity(e).add_child(leg);
+            }
+        }
+
+        // TAIL: at rear (-Z), size from g.tail. Form by body plan: swimmer -> vertical caudal fan (cone);
+        // furry land -> bushy upswept tail (box, lighter); else -> thin rod tail (box). Lizard/rat/squirrel/fish.
+        if g.tail > 0.12 {
+            let tl = (0.3 + 0.9 * g.tail) * body; // tail length
+            if swimmer {
+                // caudal fin: vertical fan, thin in X, tall in Y, short Z, at the very back
+                let cf_y = 0.0;
+                let cf_z = -(0.45 * scale.z + 0.4 * tl);
+                let caudal = commands
+                    .spawn((Mesh3d(parts.fin.clone()), MeshMaterial3d(fin_mat.clone()), part_tf(Vec3::new(0.0, cf_y, cf_z), Vec3::new(0.08 * body, 1.3 * tl, 0.7 * tl))))
+                    .id();
+                commands.entity(e).add_child(caudal);
+            } else if g.pelt > 0.45 {
+                // bushy upswept tail (squirrel): fat soft ellipsoid box, raised, lighter (fur)
+                let bush_mat = materials.add(srgb(color, 1.15));
+                let bz = -(0.4 * scale.z + 0.4 * tl);
+                let by = 0.25 * scale.y + 0.3 * tl; // arcs up
+                let bush = commands
+                    .spawn((Mesh3d(parts.seg.clone()), MeshMaterial3d(bush_mat), part_tf(Vec3::new(0.0, by, bz), Vec3::new(0.5 * body, 0.9 * tl, 0.5 * body))))
+                    .id();
+                commands.entity(e).add_child(bush);
+            } else {
+                // rod tail (rat/lizard/snake tip): thin box pointing back
+                let rz = -(0.45 * scale.z + 0.5 * tl);
+                let rod = commands
+                    .spawn((Mesh3d(parts.seg.clone()), MeshMaterial3d(leg_mat.clone()), part_tf(Vec3::new(0.0, -0.1 * scale.y, rz), Vec3::new(0.12 * body, 0.12 * body, tl))))
+                    .id();
+                commands.entity(e).add_child(rod);
+            }
+        }
+
+        // DORSAL FIN: triangular ridge along the spine (top +Y, mid body), thin in X, swept in Z. Sailfin/shark.
+        if g.fin > 0.45 {
+            let df = (0.3 + 0.7 * g.fin) * body;
+            let dorsal = commands
+                .spawn((Mesh3d(parts.fin.clone()), MeshMaterial3d(fin_mat.clone()), part_tf(Vec3::new(0.0, 0.45 * scale.y + 0.4 * df, 0.0), Vec3::new(0.07 * body, df, 0.9 * df))))
                 .id();
-            commands.entity(e).add_child(leg);
+            commands.entity(e).add_child(dorsal);
         }
     }
 }
@@ -896,37 +974,46 @@ pub fn cave_mesh() -> Mesh {
 // cave a creature can walk INTO (not a hole in the ground). Front (the mouth) faces -Z; render gives random
 // yaw + scales it tall (~6-8 units) so creatures fit inside. Near-black interior blobs sit recessed behind the
 // mouth so the opening reads hollow. Gray rock vertex shades; the rock material tints it.
-pub fn cliff_cave_mesh() -> Mesh {
-    let mut blobs: Vec<(Vec3, f32, f32)> = Vec::new();
-    let rock = |k: usize| 0.42 + 0.22 * ((k * 7 % 5) as f32 / 5.0); // gray rock, varied per blob
-    // back wall: tall craggy rock behind the opening (z+), full width, rising highest in the middle
-    for k in 0..7 {
-        let x = -0.6 + 0.2 * k as f32;
-        let h = 0.7 + 0.6 * (1.0 - x.abs()); // taller toward center -> a peaked massif
-        blobs.push((Vec3::new(x, h, 0.62), 0.34 + 0.06 * (k % 3) as f32, rock(k)));
-        blobs.push((Vec3::new(x, h * 0.5, 0.58), 0.32, rock(k + 1)));
+// Cliff edge: low-poly rock ESCARPMENT. A jagged crest with a steep FRONT FACE (the cliff) dropping to the
+// foot, then a gentle top sloping back into the highland. Flat-shaded angular quads (per-quad normals, no
+// shared verts) match the world's low-poly look; per-segment hashed heights -> jagged non-repeating crest
+// (NOT piled spheres -> no rib pattern). Runs along local X, the face points -Z (downhill); base at y0.
+// Render scales it long+low and yaws it so the face looks downhill. Cave notch can be carved later.
+pub fn cliff_mesh() -> Mesh {
+    let mut b = MeshBuf::new();
+    let mut idx = Vec::new();
+    let n = 12usize;
+    let depth = 0.85f32; // how far the flat top reaches back into the highland
+    let hash = |i: i32| ((i as f32 * 12.9898).sin() * 43758.547).fract().abs(); // classic GLSL hash -> 0..1
+    let mut crest = Vec::with_capacity(n + 1);
+    let mut foot = Vec::with_capacity(n + 1);
+    let mut back = Vec::with_capacity(n + 1);
+    for i in 0..=n as i32 {
+        let x = -1.0 + 2.0 * i as f32 / n as f32;
+        let h = 0.8 + 0.55 * hash(i); // jagged crest height
+        let zc = -0.08 + 0.2 * hash(i + 71); // crest leans back a bit, varied -> uneven overhang
+        let zf = -0.2 - 0.14 * hash(i + 19); // foot juts forward, varied -> ragged base
+        crest.push(Vec3::new(x, h, zc));
+        foot.push(Vec3::new(x, 0.0, zf));
+        back.push(Vec3::new(x, 0.15 + 0.1 * hash(i + 33), depth));
     }
-    // side pillars framing the mouth (left x-, right x+), running front-to-back at ground level
-    for &sx in &[-0.62f32, 0.62] {
-        for j in 0..4 {
-            let z = -0.3 + 0.3 * j as f32;
-            let h = 0.35 + 0.2 * j as f32; // pillars rise toward the back
-            blobs.push((Vec3::new(sx, h, z), 0.33, rock(j + 2)));
-            blobs.push((Vec3::new(sx * 1.04, 0.18, z), 0.3, rock(j)));
+    let quad = |b: &mut MeshBuf, idx: &mut Vec<u32>, p0: Vec3, p1: Vec3, p2: Vec3, p3: Vec3, v: f32| {
+        let nrm = (p1 - p0).cross(p3 - p0).normalize_or_zero();
+        let start = b.pos.len() as u32;
+        for p in [p0, p1, p2, p3] {
+            b.pos.push([p.x, p.y, p.z]);
+            b.nor.push([nrm.x, nrm.y, nrm.z]);
+            b.col.push([v, v, v, 1.0]);
         }
+        idx.extend_from_slice(&[start, start + 1, start + 2, start, start + 2, start + 3]);
+    };
+    for i in 0..n {
+        let fv = 0.4 + 0.12 * hash(i as i32 + 5); // front face darker (steep, less sun)
+        let tv = 0.56 + 0.12 * hash(i as i32 + 91); // top lighter (catches sun)
+        quad(&mut b, &mut idx, foot[i], foot[i + 1], crest[i + 1], crest[i], fv); // cliff face: foot -> crest
+        quad(&mut b, &mut idx, crest[i], crest[i + 1], back[i + 1], back[i], tv); // top: crest -> back highland
     }
-    // top overhang / lintel arching OVER the opening (front, high) -> a roof you stand under
-    for k in 0..5 {
-        let x = -0.4 + 0.2 * k as f32;
-        blobs.push((Vec3::new(x, 1.15 + 0.08 * (1.0 - x.abs()), -0.08), 0.31, rock(k + 4)));
-    }
-    // dark recessed interior: near-black blobs behind the mouth -> the opening reads hollow/deep
-    for k in 0..4 {
-        let x = -0.25 + 0.17 * k as f32;
-        blobs.push((Vec3::new(x, 0.32, 0.32), 0.34, 0.05));
-    }
-    blobs.push((Vec3::new(0.0, 0.5, 0.45), 0.42, 0.04));
-    blob_cluster_mesh(&blobs)
+    b.finish(idx)
 }
 
 // Cactus: tall rounded column + couple stubby up-curved arms (saguaro silhouette). Base at y=0.

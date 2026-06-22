@@ -1229,6 +1229,8 @@ pub fn spawn_world_render(
         head: meshes.add(Sphere::new(0.5).mesh().ico(2).unwrap()), // diameter 1 at child scale 1
         eye: meshes.add(Sphere::new(0.5).mesh().ico(1).unwrap()),
         leg: meshes.add(Cylinder::new(0.5, 1.0)), // radius 0.5, height 1 -> thin legs after scaling
+        fin: meshes.add(Cone { radius: 0.5, height: 1.0 }), // apex +Y, base -Y; scaled flat -> fish fins
+        seg: meshes.add(Cuboid::new(1.0, 1.0, 1.0)), // unit box; scaled per tail/side-fin use
     });
     // per-form plant mesh library: one silhouette per plant::form (viz::add_plant_visuals picks by genome).
     // Round forms = icospheres; tall/leafy = procedural frond clumps; lily pad = flat disc.
@@ -1344,29 +1346,53 @@ pub fn spawn_world_render(
         }
     }
 
-    // caves: shelter + a place to hide. Render-only dark dome (a rock hood/cave mouth) at each cave site, sunk
-    // into the slope; the same positions drive the shade-relief + predation-hide mechanics. Land caves (rocky
-    // highland) + sea caves (submerged seabed ridge) share one list -> the dome loop dresses both.
+    // caves: shelter + a place to hide. Land sites get a rock CLIFF EDGE (escarpment, face downhill); sea sites
+    // keep a recessed seabed hole. Same positions drive the shade-relief + predation-hide mechanics.
     let land_caves = place_caves(&mut rng);
     let sea_caves = place_sea_caves(&mut rng);
     {
         use std::f32::consts::PI;
-        let cliff_m = meshes.add(crate::viz::cliff_cave_mesh()); // land: cliff massif w/ walk-in arch
+        let cliff_m = meshes.add(crate::viz::cliff_mesh()); // land: low-poly escarpment
         let hole_m = meshes.add(crate::viz::cave_mesh()); // sea: recessed hole in the seabed
-        let cave_mat = materials.add(StandardMaterial {
-            base_color: Color::srgb(0.50, 0.46, 0.42), // rock gray-brown; the mesh vertex shades give the dark mouth
+        let rock_mat = materials.add(StandardMaterial {
+            base_color: Color::srgb(0.46, 0.43, 0.4), // muted gray rock; vertex shades give face/top contrast
             perceptual_roughness: 1.0,
+            double_sided: true, // cliff is a one-sided shell -> show both faces so no holes from any angle
+            cull_mode: None,
             ..default()
         });
-        // land caves: tall cliff massif (not squashed) so the arched mouth is a real walk-in opening
+        // land cliffs: long + low escarpment, yawed so the steep face (local -Z) points DOWNHILL (descent dir).
         for &c in &land_caves {
             let up = c.normalize_or_zero();
             let base = crate::sphere::surface_pos(up, 0.0);
-            let s = rng.range(5.0, 7.0);
-            let mut tf = Transform::from_translation(base - up * (s * 0.12)); // sit the cliff base on the slope
-            tf.rotation = Quat::from_rotation_arc(Vec3::Y, up) * Quat::from_rotation_y(rng.range(-PI, PI));
-            tf.scale = Vec3::new(s * rng.range(1.0, 1.3), s * rng.range(1.0, 1.25), s * rng.range(1.0, 1.3));
-            commands.spawn((Mesh3d(cliff_m.clone()), MeshMaterial3d(cave_mat.clone()), tf, bevy::light::NotShadowCaster));
+            // tangent basis + numeric elevation gradient -> downhill tangent (face the cliff that way)
+            let mut e1 = up.cross(Vec3::X);
+            if e1.length_squared() < 1e-4 {
+                e1 = up.cross(Vec3::Z);
+            }
+            let e1 = e1.normalize_or_zero();
+            let e2 = up.cross(e1).normalize_or_zero();
+            let el = |d: Vec3| crate::sphere::elevation01(d.normalize_or_zero());
+            let eps = 0.02;
+            let ga = el(up + e1 * eps) - el(up - e1 * eps);
+            let gb = el(up + e2 * eps) - el(up - e2 * eps);
+            let downhill = -(e1 * ga + e2 * gb);
+            let downhill = (downhill - up * downhill.dot(up)).normalize_or_zero();
+            let base_rot = Quat::from_rotation_arc(Vec3::Y, up);
+            let face = (base_rot * Vec3::NEG_Z).normalize_or_zero(); // where -Z points after up-align
+            let yaw = if downhill.length_squared() < 1e-5 {
+                rng.range(-PI, PI) // ~flat: no clear downhill, pick any heading
+            } else {
+                let a = (face - up * face.dot(up)).normalize_or_zero();
+                a.cross(downhill).dot(up).atan2(a.dot(downhill).clamp(-1.0, 1.0))
+            };
+            let sx = rng.range(7.0, 10.0); // length (mesh spans x in [-1,1] -> world ~2*sx)
+            let sy = rng.range(5.0, 7.0); // height
+            let sz = rng.range(5.5, 8.0); // depth back into highland
+            let mut tf = Transform::from_translation(base - up * (sy * 0.12)); // foot sits in the slope
+            tf.rotation = Quat::from_axis_angle(up, yaw) * base_rot;
+            tf.scale = Vec3::new(sx, sy, sz);
+            commands.spawn((Mesh3d(cliff_m.clone()), MeshMaterial3d(rock_mat.clone()), tf, bevy::light::NotShadowCaster));
         }
         // sea caves: keep the recessed-hole look (a hole in the seabed reads fine underwater)
         for &c in &sea_caves {
@@ -1376,7 +1402,7 @@ pub fn spawn_world_render(
             let mut tf = Transform::from_translation(base - up * (s * 0.18)); // sink the crag base into the seabed
             tf.rotation = Quat::from_rotation_arc(Vec3::Y, up) * Quat::from_rotation_y(rng.range(-PI, PI));
             tf.scale = Vec3::new(s * rng.range(0.95, 1.25), s * rng.range(0.7, 0.95), s * rng.range(0.95, 1.25));
-            commands.spawn((Mesh3d(hole_m.clone()), MeshMaterial3d(cave_mat.clone()), tf, bevy::light::NotShadowCaster));
+            commands.spawn((Mesh3d(hole_m.clone()), MeshMaterial3d(rock_mat.clone()), tf, bevy::light::NotShadowCaster));
         }
     }
     let mut caves = land_caves; // land first, then sea (order matches the shelter/predation scan; mechanics unchanged)
