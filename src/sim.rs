@@ -564,7 +564,10 @@ fn absorb_and_toxin(reserves: &mut [f32; NUTRIENTS], uptake: &[f32; NUTRIENTS], 
 }
 
 // Spawn carrion (meat) at a spot: a Food entity with the Rot clock. Used by death + predation kills.
-fn spawn_carrion(commands: &mut Commands, pos: Vec3, mass: f32) {
+// `fat` 0..1 = how FATTY this carcass is (the prey's fat reserves at death). Carried on the carrion (in the
+// otherwise-unused `quality` field) so the eat branch can model rabbit starvation: lean meat (low fat) is
+// mostly protein and needs the eater's carbs to be usable; a fat carcass feeds directly.
+fn spawn_carrion(commands: &mut Commands, pos: Vec3, mass: f32, fat: f32) {
     let p = crate::sphere::surface_pos(pos, FOOD_Y); // carrion lies on the surface at the death spot
     commands.spawn((
         Food,
@@ -573,7 +576,7 @@ fn spawn_carrion(commands: &mut Commands, pos: Vec3, mass: f32) {
             kind: CARRION_KIND,
             nutrient: CARRION_NUTRIENT,
             defense: 0.0,    // meat has no bite-defense: easy to scavenge while fresh
-            quality: 0.0,    // unused for carrion (separate eat branch); never disperses
+            quality: fat.clamp(0.0, 1.0), // carrion FAT content (prey fatness at death) -> rabbit-starvation model
             wet: 0.5,        // unused for carrion (excluded from moisture mortality by Without<Rot>)
             height: 0.0,     // carrion lies on the ground
             light_pref: 0.5, // unused for carrion
@@ -1749,7 +1752,8 @@ pub fn predation_step(
         }
         if killed.contains(&e) {
             alive.0 = false;
-            spawn_carrion(&mut commands, t.translation, CARRION_MASS * 0.5); // predator already ate some
+            let fat = (energy.fat / fat_cap(gen_e).max(0.01)).clamp(0.0, 1.0); // how fatty the prey was
+            spawn_carrion(&mut commands, t.translation, CARRION_MASS * 0.5, fat); // predator already ate some
             soil.add(t.translation, DEATH_FERT); // death enriches the ground here
             if continuous_live {
                 commands.entity(e).despawn();
@@ -1809,10 +1813,10 @@ pub fn live_step(
     let mut sample_genome: Option<Genome> = None; // a living genome, for the near-extinction reseed floor
     // creature snapshot for the social/kin need + threat sense: (entity, pos, signature, combat). Combat =
     // bite + size, so a creature can sense a bigger-combat neighbor as a predator (flee).
-    let cre_snap: Vec<(Entity, Vec3, [f32; 10], f32)> = cq
+    let cre_snap: Vec<(Entity, Vec3, [f32; 10], f32, f32)> = cq
         .iter()
         .filter(|(_, _, _, _, _, a, _, _, _, _)| a.0)
-        .map(|(e, t, _, _, _, _, g, _, _, _)| (e, t.translation, signature(g), g.bite + SIZE_COMBAT * g.size))
+        .map(|(e, t, _, _, _, _, g, _, _, _)| (e, t.translation, signature(g), g.bite + SIZE_COMBAT * g.size, body_radius(g)))
         .collect();
     // mating mode: a pool of (entity, pos, signature, genome) so a breeding creature can find a nearby
     // genetically-similar MATE to cross with. Built only when --mating (cloning genomes isn't free).
@@ -1913,7 +1917,7 @@ pub fn live_step(
         let my_combat = genome.bite + SIZE_COMBAT * genome.size;
         let mut threat_d2 = f32::INFINITY;
         let mut threat_pos = Vec3::ZERO;
-        for (e2, p2, _, c2) in &cre_snap {
+        for (e2, p2, _, c2, _) in &cre_snap {
             if *e2 == entity || *c2 <= my_combat + THREAT_MARGIN {
                 continue;
             }
@@ -1996,6 +2000,37 @@ pub fn live_step(
         let fwd = crate::sphere::heading_tangent(nd, nh); // unit tangent along the heading
         let right = up.cross(fwd).normalize_or_zero();
         ct.rotation = Quat::from_mat3(&Mat3::from_cols(right, up, fwd));
+
+        // body collision: creatures are solid. Sum overlap against every neighbor whose collision radius
+        // intersects ours (snapshot positions), shove out along the surface tangent so bodies don't stack,
+        // and pay a jostle energy cost for the crowding. SOCIAL creatures are crowd-tolerant -> cost x(1-social).
+        let my_r = body_radius(genome);
+        let mut push = Vec3::ZERO;
+        let mut overlap_sum = 0.0f32;
+        for (e2, p2, _, _, r2) in &cre_snap {
+            if *e2 == entity {
+                continue;
+            }
+            let to = np - *p2;
+            let d2 = to.length_squared();
+            let rr = my_r + *r2;
+            if d2 < rr * rr && d2 > 1e-6 {
+                let d = d2.sqrt();
+                let depth = rr - d;
+                overlap_sum += depth;
+                push += (to / d) * depth; // away from the neighbor, weighted by penetration depth
+            }
+        }
+        if overlap_sum > 0.0 {
+            // shove only along the surface tangent (drop the radial part) so the creature stays on the shell
+            let tangential = push - up * push.dot(up);
+            if tangential.length_squared() > 1e-9 {
+                let shoved = (np + tangential * SEPARATION_STRENGTH).normalize_or_zero();
+                ct.translation = crate::sphere::surface_pos(shoved, CREATURE_Y);
+            }
+            // the jostle hurts: a crowd-tolerant (social) herder barely feels it, a loner gets drained
+            energy.burn(COLLIDE_COST * overlap_sum * (1.0 - genome.social) * dt);
+        }
 
         // metabolism: basal + movement (convex in speed) + bite upkeep + rocky crossing + vision upkeep.
         // Longer/more sensors see farther but cost energy (SENSE_COST x total range) -> range is a trade-off.
@@ -2165,29 +2200,34 @@ pub fn live_step(
                         let freshness = 1.0 - (f / 0.6).min(1.0); // stays ~1 for the first 60% of decomposition
                         let meat = mass * pg.nutrient * freshness;
                         let toxin = TOXIN_MAX * ((f - 0.6) / 0.4).max(0.0); // no toxin until 60% rotted
-                        // carnivory gut: a herbivore extracts little usable energy from meat; a carnivore
-                        // extracts most. RABBIT STARVATION: processing protein WITHOUT a carb/fat buffer
-                        // (empty sugar store) makes metabolic toxic load (ammonia) -> an all-meat creature
-                        // with no plant carbs slowly poisons + starves even while "full".
-                        let usable = (PROTEIN_FLOOR + PROTEIN_CARN * genome.carnivory).min(1.0);
-                        let carb_buffer = (energy.sugar / SUGAR_CAP).clamp(0.0, 1.0); // carbs on hand BEFORE this meal
-                        // meat = animal tissue -> mostly fat, some sugar; fat overflow spills to sugar
-                        let gain = EAT_GAIN * MEAT_BONUS * meat * usable;
+                        // RABBIT STARVATION (real mechanic): a carcass's usable ENERGY is its FAT. Lean meat
+                        // (low fat) is mostly PROTEIN, and turning protein into usable energy/fat needs CARBS
+                        // (the eater's sugar store). So eating lean prey with no carbs on hand yields little
+                        // energy AND dumps the unconvertible protein as metabolic toxic load (ammonia) -> an
+                        // obligate carnivore on lean kills starves + poisons itself. Fatty prey (or carbs from
+                        // plants) avoids it. `gut` (carnivory) scales overall meat extraction.
+                        let fat_content = pg.quality.clamp(0.0, 1.0); // prey fatness carried on the carrion
+                        let gut = (PROTEIN_FLOOR + PROTEIN_CARN * genome.carnivory).min(1.0);
+                        let carb_buffer = (energy.sugar / SUGAR_CAP).clamp(0.0, 1.0); // carbs to build fat from protein
+                        let meat_e = EAT_GAIN * MEAT_BONUS * meat * gut; // total extractable IF fully usable
+                        let fat_part = meat_e * fat_content; // fat = direct energy, no carbs needed
+                        let protein_part = meat_e * (1.0 - fat_content); // lean protein: only usable WITH carbs
+                        let protein_usable = protein_part * carb_buffer;
+                        let protein_wasted = protein_part * (1.0 - carb_buffer); // rabbit starvation: ammonia
+                        let gain = fat_part + protein_usable;
+                        // meat -> mostly fat store, a little sugar; fat overflow spills to sugar
                         let overflow_fat = energy.add_fat(gain * 0.8, fat_max);
                         let wasted = energy.add_sugar(gain * 0.2 + overflow_fat, SUGAR_CAP, fat_max);
                         diet.g += wasted * OVEREAT_G;
-                        fit.0 += meat * MEAT_BONUS * usable;
+                        fit.0 += (fat_part + protein_usable) / (EAT_GAIN * MEAT_BONUS).max(1.0); // fitness ~ usable energy
                         // balanced animal tissue: tops EVERY nutrient reserve (meat is nutritionally complete)
                         if gen.diet {
                             for r in diet.reserves.iter_mut() {
                                 *r = (*r + MEAT_RESERVE * freshness).min(RESERVE_CAP);
                             }
                         }
-                        // rot toxin + protein-without-carbs ammonia -> accumulating toxic load
-                        diet.toxic_load = (diet.toxic_load
-                            + toxin * TOX_LOAD_GAIN
-                            + gain * PROTEIN_TOX * (1.0 - carb_buffer))
-                            .min(TOX_LOAD_CAP);
+                        // rot toxin + unconvertible-protein ammonia -> accumulating toxic load
+                        diet.toxic_load = (diet.toxic_load + toxin * TOX_LOAD_GAIN + protein_wasted * PROTEIN_TOX).min(TOX_LOAD_CAP);
                         eat_reward = freshness * 2.0 - 1.0; // fresh -> +1 (good), rotten -> -1 (avoid)
                     } else {
                         // regular plant: strip a fraction set by `regrow` -- carrot (~whole) vs berry bush
@@ -2371,7 +2411,8 @@ pub fn live_step(
         // died this tick (loop skips already-dead creatures at the top) -> drop carrion here, which
         // rots into poison (rot_step). Closes part of the nutrient loop: death feeds the food web (P3).
         if !alive.0 {
-            spawn_carrion(&mut commands, ct.translation, CARRION_MASS);
+            let fat = (energy.fat / fat_max.max(0.01)).clamp(0.0, 1.0); // how fatty this creature was at death
+            spawn_carrion(&mut commands, ct.translation, CARRION_MASS, fat);
             soil.add(ct.translation, DEATH_FERT); // death enriches the ground here
             // continuous (post-warmup): the corpse entity is gone (became carrion). Generational mode
             // and the warm-up keep it (Alive=false) to be recycled into the next generation.
@@ -2410,6 +2451,12 @@ fn fat_cap(g: &Genome) -> f32 {
     FAT_CAP * (0.4 + ADIPOSITY_CAP * g.adiposity) * (1.0 + SIZE_ENERGY * g.size)
 }
 
+// Collision body radius (~visual body half-width): build factor (sensor count + size) x COLLIDE_R. Matches
+// the rendered girth so bodies stop just shy of visibly overlapping. Shared by the snapshot + the move loop.
+fn body_radius(g: &Genome) -> f32 {
+    (0.7 + 0.06 * g.n_sensors() as f32) * (0.6 + 0.9 * g.size) * crate::config::COLLIDE_R
+}
+
 // Compact phenotype signature for KIN similarity (diet + body traits). Two creatures are "kin" when
 // their signatures are within SOCIAL_SIM -> drives flocking-by-species + the social need.
 fn signature(g: &Genome) -> [f32; 10] {
@@ -2424,10 +2471,10 @@ fn sig_dist(a: &[f32; 10], b: &[f32; 10]) -> f32 {
 
 // Fraction of social satisfaction from nearby kin (0 isolated .. 1 fully in a herd), given a snapshot
 // of (entity, pos, signature). Excludes self by entity id.
-fn kin_fraction(me: Entity, pos: Vec3, sig: &[f32; 10], snap: &[(Entity, Vec3, [f32; 10], f32)]) -> f32 {
+fn kin_fraction(me: Entity, pos: Vec3, sig: &[f32; 10], snap: &[(Entity, Vec3, [f32; 10], f32, f32)]) -> f32 {
     let r2 = SOCIAL_RADIUS * SOCIAL_RADIUS;
     let mut kin = 0.0f32;
-    for (e, p, s, _) in snap {
+    for (e, p, s, _, _) in snap {
         if *e == me {
             continue;
         }

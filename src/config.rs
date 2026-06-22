@@ -119,6 +119,14 @@ pub const SOCIAL_SIM: f32 = 0.7; // max signature distance to count as KIN (smal
 pub const SOCIAL_TARGET: f32 = 2.0; // just 2 kin nearby satisfies (avoids an Allee death-spiral at low density)
 pub const SOCIAL_COST: f32 = 0.6; // energy/sec loneliness drain at full social gene + full isolation (MILD: a flavor pressure + herd benefit, NOT a population killer -- a strong drain spirals a spread-out population to extinction)
 pub const SOCIAL_SAFETY: f32 = 0.7; // max predation-success reduction for prey surrounded by kin (herd safety)
+// Body collision (M4): creatures are solid + don't pass through each other. Two bodies whose collision
+// radii overlap get a soft tangential SHOVE apart (no hard stacking) + pay a jostle energy cost scaled by
+// penetration depth. SOCIAL creatures are crowd-tolerant (herd animals pack tight) so the cost is x(1-social):
+// a high-social herder huddles ~free, a low-social loner gets drained when bumped -> personal-space pressure
+// that complements the kin-herd benefit (herders cluster, loners spread).
+pub const COLLIDE_R: f32 = 0.9; // collision radius multiplier on the visual body half-width (just inside the silhouette)
+pub const COLLIDE_COST: f32 = 0.5; // energy/sec jostle drain per unit overlap at full isolation (MILD, like loneliness)
+pub const SEPARATION_STRENGTH: f32 = 0.5; // fraction of penetration shoved out per tick (soft, settles over a few ticks)
 pub const SEED_VIA_GUT: f32 = 0.5; // max chance (x quality) an eaten plant disperses an offspring (13)
 pub const PLANT_START_MASS: f32 = 0.6;
 pub const PLANT_MIN_MASS: f32 = 0.15; // below this a grazed plant is fully consumed (carrot eaten whole)
@@ -344,12 +352,14 @@ pub const TOX_CLEAR_DETOX: f32 = 0.6;    // extra load cleared/sec at full detox
 pub const TOX_LOAD_DRAIN: f32 = 0.25;    // energy/sec drained per unit toxic load (feeling sick)
 pub const TOX_LOAD_G: f32 = 0.02;        // growth-load (disease) accrued/sec per unit toxic load
 pub const TOX_LOAD_HAZARD: f32 = 0.0008; // death/sec per unit toxic load (acute poisoning)
-// rabbit starvation: meat is protein-rich. The gut extracts meat energy by carnivory (herbivores can't use
-// it); and processing protein WITHOUT a carb/fat buffer (empty sugar store) makes metabolic toxic load
-// (ammonia/urea) -> an all-meat creature with no plant carbs slowly poisons + starves, as in nature.
-pub const PROTEIN_FLOOR: f32 = 0.35; // meat-energy fraction a pure herbivore (carnivory 0) still gets
-pub const PROTEIN_CARN: f32 = 0.65;  // extra meat-energy fraction at full carnivory (-> full use at 1.0)
-pub const PROTEIN_TOX: f32 = 0.06;   // toxic load per unit meat energy processed with an EMPTY carb buffer
+// rabbit starvation: a carcass's usable ENERGY is its FAT (carried per-carcass = prey fatness at death).
+// LEAN meat is mostly PROTEIN, and converting protein to usable energy/fat needs CARBS (the eater's sugar).
+// So eating lean prey with no carbs yields little energy AND dumps unconvertible protein as toxic load
+// (ammonia) -> an obligate carnivore on lean kills starves + poisons itself; fatty prey or plant carbs avoid
+// it. `gut` = carnivory scales overall meat extraction (a herbivore gut handles meat poorly).
+pub const PROTEIN_FLOOR: f32 = 0.35; // meat-extraction fraction a pure herbivore (carnivory 0) still manages
+pub const PROTEIN_CARN: f32 = 0.65;  // extra meat-extraction fraction at full carnivory (-> full at 1.0)
+pub const PROTEIN_TOX: f32 = 0.06;   // toxic load per unit of UNCONVERTIBLE protein (lean meat eaten without carbs)
 // pelt (hair/fur): insulation. Cuts the COLD side of thermal mismatch; adds a HEAT-side cost in hot places,
 // drags in water, and costs a little basal upkeep.
 pub const PELT_COLD_RELIEF: f32 = 0.7; // fraction of cold-side temp cost removed at full pelt
