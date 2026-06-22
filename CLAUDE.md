@@ -72,12 +72,53 @@ cargo run -- --capture=PREFIX               # walk view at the homeland (morning
 **NEVER auto-start the long-running visualizer** (`cargo run` with a window) to "watch" it — use `--capture`
 or `--headless` so it exits on its own.
 
+## Plant/tree tuning harness (BUILT — use it to evolve flora + seed the planet)
+
+A search loop that evolves plant/tree genetics per environment, banks the winners, and seeds the whole
+planet from that bank. Code: `src/scenario.rs` (+ hooks in `sim.rs`/`persist.rs`/`main.rs`). Full design:
+`~/Documents/Github/clients/evolvarium/14-tuning-harness.md`.
+
+**Layer 1 — engine CLI (deterministic, headless, exits on its own):**
+
+```bash
+# run ONE isolated cohort (5-30 plants/trees) in a controlled environment band, write a metrics+genomes JSON
+cargo run -- --scenario=cohort.json --out=result.json [--seed=K]
+# fold a result's best survivors into the seed-bank library under a niche (accumulates across runs)
+cargo run -- --merge=result.json --niche=NAME [--plant-lib=plant-library.json] [--lib-cap=8]
+# harvest a whole-planet co-evolution run's survivors (a --headless --save snapshot) into the library, biome-labeled
+cargo run -- --merge-snapshot=run.json [--niche-suffix=-coevo] [--plant-lib=plant-library.json]
+```
+
+Scenario JSON: `{ seed, ticks, target_count, world:{ lat_band:[lo,hi] (|lat| radians), wetness (= effective
+moisture), aquatic, rocky, fire, grazers, second_band }, plant_cohort:[{ count, archetype, tree, genome:{
+<any gene>:<value> } }] }`. The `genome` override object is **free-form** — any `PlantGenome` field, including
+genes added later. Result JSON: survival/peak/target, mean mass/age, births/deaths/R, `deaths_by_cause`,
+`trait_drift` (per gene), `health_score` (0..1), `best_genomes`.
+
+**GENE-AGNOSTIC**: overrides + drift + dedup go through serde generically, so adding a `PlantGenome` gene
+needs ZERO harness edits (just the usual `#[serde(default)]` + a `mutate()` drift line).
+
+**Seed bank → planet:** `plant-library.json` (in the repo) is the tuned bank. A normal `cargo run` /
+`--headless` seeds every biome from it (biome-matched draws; archetype fallback where unmatched;
+`--no-plant-lib` to disable). Genes added AFTER the library was written are **randomized per-plant on seed**
+(variety), so don't rebuild the library just because you added a gene.
+
+**Layer 2 — Workflows (opt-in, spawn agents; run via the Workflow tool):**
+- `tools/tune-plants.workflow.js` — one tuner agent per niche (core land, aquatic, trees, mixed pairs),
+  synthesize merges winners into the library.
+- `tools/coevolve-niche.workflow.js` — within-niche competition (contrasting cohorts + grazers per biome).
+- Whole-planet co-evolution: just run `--headless --gens=N --load=evolved-continuous.json --save=run.json`
+  (the living sim IS co-evolution), then `--merge-snapshot=run.json`.
+
+Balance frictions the harness surfaces go to `~/Documents/Github/clients/evolvarium/tuning-frictions.md`.
+
 ## Module map (`src/`)
 
 - `main.rs` — app wiring, scene setup (globe, ocean shell, sun light + cascade, moon, sun disc, stars), CLI.
 - `sphere.rs` — the spherical world: terrain/ocean/temperature/moisture noise fields, sun/moon, clouds,
   cloud-driven rain. Pure functions shared by sim + render + snapshot.
 - `sim.rs` — the simulation: weather, fire, life/predation/plant/rot steps, generation step.
+- `scenario.rs` — tuning harness: `--scenario` cohort runner, result schema, `--merge`/`--merge-snapshot` library builders.
 - `camera.rs` — orbit + walk cameras; per-mode shadow config (cascade, filtering, planet caster), swim.
 - `viz.rs` — render-only visuals: creature/plant/tree meshes, clouds, rain streaks, day/night lighting,
   underwater tint, HUD, legend, god-controls.
@@ -94,12 +135,11 @@ design work:
 - `00-concept.md` … `13-living-food-and-distribution.md` — numbered design specs (concept, architecture,
   genome encoding, brain/NN, metabolism + nutrients, environment fields, god controls, roadmap, open
   questions, environment trade-offs, crate stack, diet/growth/disease, living food).
-- `14-tuning-harness.md` — **complete build blueprint for the agent tuning harness** (a `--scenario` JSON
-  runner + a Workflow agent fan-out that tunes cohorts to survival). Planned, NOT built; intended to be
-  built by a separate agent. Full schemas, CLI contract, reflex presets, and the list of private symbols
-  to expose are in there.
-- `tuning-frictions.md` — running log of balance frictions for the harness to dial in (F1 = nutrient
-  master-expression gradient too soft; F2 = bite pegs ~1.0). The harness's first job is F1.
+- `14-tuning-harness.md` — design blueprint for the tuning harness. The PLANT/TREE arm is BUILT (see the
+  "Plant/tree tuning harness" section above for the CLI + workflows); the CREATURE arm is still spec-only.
+  Full schemas, CLI contract, and the creature-side reflex presets are in there.
+- `tuning-frictions.md` — running log of balance frictions the harness surfaces (F1 = nutrient
+  master-expression gradient too soft; F2 = bite pegs ~1.0; F3-F42 = plant tuning findings).
 - `PITCH.md`, `SESSION-STATUS.md` — friend-facing pitch + a resume/handoff note.
 
 `BACKLOG.md` (in this repo) is the source of truth for what's done vs open; the spec folder is the "why/how".
