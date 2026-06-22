@@ -368,9 +368,11 @@ fn size_plants(mut q: Query<(&PlantState, &PlantGenome, &mut Transform, Option<&
             None => 0.4 + 0.6 * (st.mass / g.maturity.max(0.1)).clamp(0.0, 1.0),
         };
         if tree.is_some() {
-            // trees stay small relative to the planet (was up to ~13 units on an 80-radius world, which
-            // poked into the clouds). Now a tree is ~2-4 units tall.
-            let s = (0.35 + 0.12 * st.mass).clamp(0.35, 1.1) * life;
+            // trees stay small relative to the planet (was up to ~13 units, poking into the clouds). Scale
+            // tracks MASS so a tree on good soil (which grows to a bigger mass, see plant_step soil response)
+            // renders visibly larger than one on poor soil -- ~1.0 at maturity up to ~1.6 fully grown -- while
+            // the cap still keeps the tallest trees a few units, clear of the clouds.
+            let s = (0.5 + 0.04 * st.mass).clamp(0.5, 1.6) * life;
             tf.scale = Vec3::splat(s);
             tf.rotation = rot_q;
             tf.translation = base + up * (0.7 * s); // trunk base rests on the surface (trunk half-height = 0.7)

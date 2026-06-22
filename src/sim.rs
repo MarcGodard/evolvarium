@@ -550,7 +550,7 @@ fn diverse_creature(mut g: Genome, i: usize, rng: &mut Rng) -> (Genome, Vec3) {
 
 fn diet_state(_g: &Genome) -> DietState {
     // newborns start with reserves stocked to the satisfaction level, so they aren't instantly deficient
-    DietState { reserves: [RESERVE_REQ; NUTRIENTS], g: 0.0, age: 0, fatigue: 0.0 }
+    DietState { reserves: [RESERVE_REQ; NUTRIENTS], g: 0.0, age: 0, fatigue: 0.0, starve: 0 }
 }
 
 // Eating plant matter: absorb each nutrient into reserves (delivered = plant baseline x soil fertility,
@@ -709,13 +709,16 @@ pub fn seed_planet(commands: &mut Commands, rng: &mut Rng, parents: &[Genome], _
     }
 }
 
-// A fresh (founding) tree genome: rich, tall, slow, with some branches. defense ~1 is irrelevant to
-// trees (reach gates them, not bite); kind 0. From here trees evolve via PlantGenome::mutate_tree.
+// A fresh (founding) tree genome: rich, tall, slow, with some branches. kind 0. From here trees evolve via
+// PlantGenome::mutate_tree. Defense is kept LOW: trees are gated by REACH (height/branches vs creature
+// height), not by bite-vs-defense (live_step), so a tree's defense protects nothing -- but growth_rate()
+// taxes defense QUADRATICALLY (0.85*def^2), so a high defense just starves the tree below TREE_MATURITY ->
+// a sterile, never-reproducing, never-dying "zombie tree". Low defense lets it grow + fruit + reproduce.
 pub(crate) fn tree_genome(rng: &mut Rng) -> PlantGenome {
     PlantGenome {
         kind: 0,
         nutrient: rng.range(0.6, 1.0),
-        defense: 0.99,
+        defense: rng.f32() * 0.1,
         quality: rng.range(0.1, 0.4),
         wet: 0.5,
         height: rng.range(TREE_HEIGHT_MIN, 1.0), // wide initial height (never taller than 1.0)
@@ -1392,15 +1395,25 @@ pub fn plant_step(
             }
             // off-niche grows slower too (shared floor: never zero, just sluggish) -> trees fastest in their band.
             let temp_grow = TEMP_FLOOR + (1.0 - TEMP_FLOOR) * (1.0 - tmiss);
-            // trees: moisture-immune (long-lived), grow slowly + large. Two reproduction paths:
-            //  - ambient: fertility-weighted, density-limited wind-fall near the parent;
-            //  - dispersal-on-eat: a fruit tree that was grazed this tick may fling a seed FAR (animal-
-            //    carried). Being reachable+eaten thus pays in reproduction -> bounds how tall trees evolve.
-            st.mass += g.growth_rate() * boost * lf * temp_grow * TREE_GROWTH_SCALE * DT; // trees grow slowly (long-lived)
+            // SOIL response (survival stays moisture-immune; this only shapes growth speed + final SIZE): a
+            // tree grows faster AND to a BIGGER size on good ground -- nutritious (fertile) soil AND a moisture
+            // SWEET SPOT (wet enough, not waterlogged). Bone-dry, swampy, or poor soil -> slower + smaller.
+            let clim = crate::sphere::moisture(pdir) * (1.0 - CLIMATE_VEG) + climate.get(ppos) * CLIMATE_VEG;
+            let m = (clim + 0.2 * season + WET_GAIN * water).clamp(0.0, 1.0); // effective local moisture
+            let moist_q = (1.0 - (m - TREE_WET_OPT).abs() / TREE_WET_TOL).clamp(0.0, 1.0); // hump: 1 at the sweet spot
+            let fert_q = (fert / FERT_CAP).min(1.0);
+            let soil_q = moist_q * (0.4 + 0.6 * fert_q); // 0 (bad ground) .. 1 (rich + ideally moist)
+            let grow_mult = (1.0 + FERT_GROWTH * fert_q) * (TREE_WET_FLOOR + (1.0 - TREE_WET_FLOOR) * moist_q);
+            // good soil lets a tree grow to a BIGGER final size (cap), but it still MATURES (fruits +
+            // reproduces) at g.maturity so the food supply + tree spread are unchanged -- it just keeps
+            // growing past maturity toward full_size (fruit drop is mass-free; only seeding buds cost mass),
+            // so a tree on rich, ideally-moist ground ends up visibly larger.
+            let full_size = g.maturity * (1.0 + TREE_SOIL_SIZE * soil_q);
+            st.mass = (st.mass + g.growth_rate() * grow_mult * lf * temp_grow * TREE_GROWTH_SCALE * DT).min(full_size);
             st.age += 1;
             let r2 = TREE_DENSITY_R * TREE_DENSITY_R;
             let local = tree_positions.iter().filter(|p| p.distance_squared(tf.translation) < r2).count();
-            let fert_boost = 0.4 + 1.6 * (fert / FERT_CAP).min(1.0); // richer ground -> more new trees
+            let fert_boost = 0.4 + 1.6 * fert_q; // richer ground -> more new trees
             let mature = st.mass >= g.maturity;
             // mature fruit trees drop fruit nearby (the forageable fast-energy source). Drop rate scales
             // with the tree's nutrient richness -> a richer tree fruits more (its growth already paid for it).
@@ -2202,8 +2215,18 @@ pub fn live_step(
         }
         brain.prev_dist = cur_dist;
 
+        // starvation death. Outright empty -> dead. Otherwise, a creature pinned BELOW the starvation floor
+        // (clinging at near-zero, e.g. a grass-trickle zombie whose real upkeep it can't pay) dies after a
+        // grace period; a forager that briefly dips low between meals climbs back above the floor and resets.
         if energy.total() <= 0.0 {
             alive.0 = false;
+        } else if energy.total() < STARVE_FLOOR {
+            diet.starve = diet.starve.saturating_add(1);
+            if diet.starve >= STARVE_TICKS {
+                alive.0 = false;
+            }
+        } else {
+            diet.starve = 0;
         }
 
         // continuous reproduction: a well-fed creature spends energy to bud a mutated child nearby.

@@ -169,6 +169,11 @@ pub struct DietState {
     pub g: f32,
     pub age: u32,
     pub fatigue: f32,
+    // consecutive ticks pinned below the starvation floor. A creature that can't pay its metabolism clamps
+    // its stores to 0 (burn shortfall discarded) and a grass trickle can lift it a hair above 0 each tick,
+    // dodging the <=0 death check forever (a "grass zombie"). This counter kills a chronically near-empty
+    // creature after a grace period, while a forager that briefly dips to 0 between meals recovers + resets.
+    pub starve: u16,
 }
 
 #[cfg(test)]

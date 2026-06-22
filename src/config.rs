@@ -60,6 +60,8 @@ pub const ADIPOSITY_CAP: f32 = 1.2; // fat_cap multiplier span: cap = FAT_CAP*(0
 // --- creature metabolism + movement ---
 pub const START_ENERGY: f32 = 30.0;
 pub const BASAL_COST: f32 = 0.5; // energy/sec just to live (low so a fed creature can coast/rest and a competent forager is net-positive -> continuous persistence; bad foragers still starve = selection)
+pub const STARVE_FLOOR: f32 = 1.0; // energy below which a creature is STARVING (~3% of START_ENERGY). Pinned below this for STARVE_TICKS in a row = death (kills grass-trickle zombies clinging at ~0 energy).
+pub const STARVE_TICKS: u16 = 240; // consecutive starving ticks before death (~4s at 60/s): grace for a forager bridging between meals, lethal for a creature that never recovers.
 pub const MOVE_COST: f32 = 6.0; // movement cost scales with thrust^2 (sprinting dear, gentle motion cheap)
 pub const MOVE_SPEED: f32 = 9.0; // units/sec at full thrust
 pub const TURN_SPEED: f32 = 3.0; // rad/sec at full turn
@@ -144,6 +146,13 @@ pub const TREE_MAX_LOCAL: usize = 4; // max trees within TREE_DENSITY_R before a
 pub const TREE_BITE_MASS: f32 = 2.5; // mass a creature strips per feeding (tree survives + regrows)
 pub const TREE_MIN_MASS: f32 = 1.0; // below this a fruit tree is over-eaten and dies
 pub const TREE_GROWTH_SCALE: f32 = 0.4; // trees grow slowly: scales their growth rate down (long-lived, gradual)
+// Tree SOIL response: a tree grows faster + to a BIGGER final size on good ground -- nutritious (fertile)
+// AND a moisture SWEET SPOT (wet enough but not waterlogged). Survival stays moisture-immune; this only
+// shapes growth speed + max size, so good soil makes visibly larger trees.
+pub const TREE_WET_OPT: f32 = 0.5;     // ideal effective moisture for a tree (wet enough, not too wet)
+pub const TREE_WET_TOL: f32 = 0.5;     // moisture distance from the optimum at which the growth bonus -> floor
+pub const TREE_WET_FLOOR: f32 = 0.35;  // min growth multiplier off the sweet spot (a dry/swampy tree still grows, slowly)
+pub const TREE_SOIL_SIZE: f32 = 1.2;   // max final-size bonus on ideal soil (up to (1+this)x maturity = 2.2x bigger)
 // Fruit-tree life-history (evolvable height + the trade-offs that bound it). Tree height is a gene that
 // drifts over generations within [TREE_HEIGHT_MIN, 1.0] (wide range, never taller than today's max).
 // Three pressures shape it: (1) reach -- a creature reaches a fruit tree only if its height +
