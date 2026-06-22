@@ -891,6 +891,44 @@ pub fn cave_mesh() -> Mesh {
     blob_cluster_mesh(&blobs)
 }
 
+// Land cave: a craggy CLIFF rock massif with a dark walk-in arched mouth on its front face. Side pillars + a
+// tall back wall + a top overhang frame a recessed dark opening that reaches the ground -> reads as a cliff
+// cave a creature can walk INTO (not a hole in the ground). Front (the mouth) faces -Z; render gives random
+// yaw + scales it tall (~6-8 units) so creatures fit inside. Near-black interior blobs sit recessed behind the
+// mouth so the opening reads hollow. Gray rock vertex shades; the rock material tints it.
+pub fn cliff_cave_mesh() -> Mesh {
+    let mut blobs: Vec<(Vec3, f32, f32)> = Vec::new();
+    let rock = |k: usize| 0.42 + 0.22 * ((k * 7 % 5) as f32 / 5.0); // gray rock, varied per blob
+    // back wall: tall craggy rock behind the opening (z+), full width, rising highest in the middle
+    for k in 0..7 {
+        let x = -0.6 + 0.2 * k as f32;
+        let h = 0.7 + 0.6 * (1.0 - x.abs()); // taller toward center -> a peaked massif
+        blobs.push((Vec3::new(x, h, 0.62), 0.34 + 0.06 * (k % 3) as f32, rock(k)));
+        blobs.push((Vec3::new(x, h * 0.5, 0.58), 0.32, rock(k + 1)));
+    }
+    // side pillars framing the mouth (left x-, right x+), running front-to-back at ground level
+    for &sx in &[-0.62f32, 0.62] {
+        for j in 0..4 {
+            let z = -0.3 + 0.3 * j as f32;
+            let h = 0.35 + 0.2 * j as f32; // pillars rise toward the back
+            blobs.push((Vec3::new(sx, h, z), 0.33, rock(j + 2)));
+            blobs.push((Vec3::new(sx * 1.04, 0.18, z), 0.3, rock(j)));
+        }
+    }
+    // top overhang / lintel arching OVER the opening (front, high) -> a roof you stand under
+    for k in 0..5 {
+        let x = -0.4 + 0.2 * k as f32;
+        blobs.push((Vec3::new(x, 1.15 + 0.08 * (1.0 - x.abs()), -0.08), 0.31, rock(k + 4)));
+    }
+    // dark recessed interior: near-black blobs behind the mouth -> the opening reads hollow/deep
+    for k in 0..4 {
+        let x = -0.25 + 0.17 * k as f32;
+        blobs.push((Vec3::new(x, 0.32, 0.32), 0.34, 0.05));
+    }
+    blobs.push((Vec3::new(0.0, 0.5, 0.45), 0.42, 0.04));
+    blob_cluster_mesh(&blobs)
+}
+
 // Cactus: tall rounded column + couple stubby up-curved arms (saguaro silhouette). Base at y=0.
 pub fn cactus_mesh() -> Mesh {
     let mut b = MeshBuf::new();

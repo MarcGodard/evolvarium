@@ -1347,26 +1347,40 @@ pub fn spawn_world_render(
     // caves: shelter + a place to hide. Render-only dark dome (a rock hood/cave mouth) at each cave site, sunk
     // into the slope; the same positions drive the shade-relief + predation-hide mechanics. Land caves (rocky
     // highland) + sea caves (submerged seabed ridge) share one list -> the dome loop dresses both.
-    let mut caves = place_caves(&mut rng);
-    caves.extend(place_sea_caves(&mut rng));
+    let land_caves = place_caves(&mut rng);
+    let sea_caves = place_sea_caves(&mut rng);
     {
         use std::f32::consts::PI;
-        let cave_m = meshes.add(crate::viz::cave_mesh());
+        let cliff_m = meshes.add(crate::viz::cliff_cave_mesh()); // land: cliff massif w/ walk-in arch
+        let hole_m = meshes.add(crate::viz::cave_mesh()); // sea: recessed hole in the seabed
         let cave_mat = materials.add(StandardMaterial {
             base_color: Color::srgb(0.50, 0.46, 0.42), // rock gray-brown; the mesh vertex shades give the dark mouth
             perceptual_roughness: 1.0,
             ..default()
         });
-        for &c in &caves {
+        // land caves: tall cliff massif (not squashed) so the arched mouth is a real walk-in opening
+        for &c in &land_caves {
             let up = c.normalize_or_zero();
             let base = crate::sphere::surface_pos(up, 0.0);
-            let s = rng.range(4.0, 6.0); // a cave outcrop reads bigger than a boulder
-            let mut tf = Transform::from_translation(base - up * (s * 0.18)); // sink the crag base into the slope
+            let s = rng.range(5.0, 7.0);
+            let mut tf = Transform::from_translation(base - up * (s * 0.12)); // sit the cliff base on the slope
+            tf.rotation = Quat::from_rotation_arc(Vec3::Y, up) * Quat::from_rotation_y(rng.range(-PI, PI));
+            tf.scale = Vec3::new(s * rng.range(1.0, 1.3), s * rng.range(1.0, 1.25), s * rng.range(1.0, 1.3));
+            commands.spawn((Mesh3d(cliff_m.clone()), MeshMaterial3d(cave_mat.clone()), tf, bevy::light::NotShadowCaster));
+        }
+        // sea caves: keep the recessed-hole look (a hole in the seabed reads fine underwater)
+        for &c in &sea_caves {
+            let up = c.normalize_or_zero();
+            let base = crate::sphere::surface_pos(up, 0.0);
+            let s = rng.range(4.0, 6.0);
+            let mut tf = Transform::from_translation(base - up * (s * 0.18)); // sink the crag base into the seabed
             tf.rotation = Quat::from_rotation_arc(Vec3::Y, up) * Quat::from_rotation_y(rng.range(-PI, PI));
             tf.scale = Vec3::new(s * rng.range(0.95, 1.25), s * rng.range(0.7, 0.95), s * rng.range(0.95, 1.25));
-            commands.spawn((Mesh3d(cave_m.clone()), MeshMaterial3d(cave_mat.clone()), tf, bevy::light::NotShadowCaster));
+            commands.spawn((Mesh3d(hole_m.clone()), MeshMaterial3d(cave_mat.clone()), tf, bevy::light::NotShadowCaster));
         }
     }
+    let mut caves = land_caves; // land first, then sea (order matches the shelter/predation scan; mechanics unchanged)
+    caves.extend(sea_caves);
     commands.insert_resource(CavePositions { positions: caves });
 
     // --load resumes a saved population; else random founding pop. Positions re-randomized.
