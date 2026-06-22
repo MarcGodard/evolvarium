@@ -1,12 +1,11 @@
-// Agent tuning harness — Layer 1 engine (see clients/evolvarium/14-tuning-harness.md).
-// Runs ONE isolated headless mini-world: a small cohort of similar plants/trees in a controlled
-// environment band, for `ticks`, then writes a metrics+genomes result JSON and exits. A sub-agent pokes
-// it: write a scenario.json, run the binary, read result.json, adjust genes/env, re-run -> evolve the
-// cohort toward survival + growth in that niche. Same process = full ECS isolation, so many run in parallel.
+// Agent tuning harness, Layer 1 engine. Spec: clients/evolvarium/14-tuning-harness.md.
+// Runs ONE isolated headless mini-world: small cohort of plants/trees in controlled env band, for `ticks`,
+// then writes metrics+genomes result JSON, exits. Agent loop: write scenario.json, run binary, read
+// result.json, adjust genes/env, re-run -> evolve cohort toward survival+growth in niche. Own process =
+// full ECS isolation, so many run parallel.
 //
-// UNIFIED cohort runner: a `plant_cohort` arm now, a `creature_cohort` arm parsed-but-inert (wired later
-// when creatures are tackled). GENE-AGNOSTIC: genome overrides + trait-drift go through serde generically,
-// so a gene added to PlantGenome next week is tunable here with ZERO edits to this file.
+// UNIFIED cohort runner: `plant_cohort` arm + `creature_cohort` arm (M4). GENE-AGNOSTIC: genome overrides +
+// trait-drift go through serde generically, so new PlantGenome gene tunable here with ZERO edits to this file.
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -24,9 +23,9 @@ pub struct Scenario {
     #[serde(default = "default_seed")]
     pub seed: u64,
     #[serde(default = "default_ticks")]
-    pub ticks: u32, // run length; cohort lifetime budget (~6 sim-days at 30000)
+    pub ticks: u32, // run length / cohort lifetime budget. ~6 sim-days at 30000.
     #[serde(default = "default_target")]
-    pub target_count: usize, // growth goal the agent tunes the cohort toward
+    pub target_count: usize, // growth goal agent tunes cohort toward
     #[serde(default)]
     pub world: WorldCfg,
     #[serde(default)]
@@ -39,27 +38,27 @@ pub struct Scenario {
 pub struct CreatureSpec {
     pub count: usize,
     #[serde(default)]
-    pub genome: Map<String, Value>, // free-form Genome overrides merged onto a random base (ANY gene)
+    pub genome: Map<String, Value>, // free-form Genome overrides merged onto random base (ANY gene)
     #[serde(default)]
-    pub reflex: Option<String>, // optional named brain prior: approach-food | flee-predator | rest-at-night | wander
+    pub reflex: Option<String>, // named brain prior: approach-food | flee-predator | rest-at-night | wander
 }
 
 #[derive(Deserialize)]
 pub struct WorldCfg {
     #[serde(default = "default_band")]
-    pub lat_band: [f32; 2], // place cohort + sample climate in this |latitude| range (radians, 0=equator..1.57=pole)
+    pub lat_band: [f32; 2], // place cohort + sample climate in |latitude| range. radians, 0=equator..1.57=pole.
     #[serde(default = "half")]
-    pub wetness: f32, // 0 dry .. 1 wet: pins local ground water + climate moisture for the band
+    pub wetness: f32, // 0 dry..1 wet: pins effective moisture (climate grid) for band
     #[serde(default)]
-    pub aquatic: bool, // shallow-water niche (place in the sea, not on land)
+    pub aquatic: bool, // shallow-water niche: place in sea
     #[serde(default)]
-    pub rocky: bool, // highland niche (place on high ground)
+    pub rocky: bool, // highland niche: place on high ground
     #[serde(default)]
-    pub fire: f32, // 0..1 ambient fire pressure pinned into the band (>0.4 kills)
+    pub fire: f32, // 0..1 ambient fire pressure pinned into band. >0.4 kills.
     #[serde(default)]
-    pub grazers: usize, // optional creatures seeded to apply grazing pressure
+    pub grazers: usize, // creatures seeded for grazing pressure
     #[serde(default)]
-    pub second_band: Option<[f32; 2]>, // optional: MIXED cohort straddles a second band too
+    pub second_band: Option<[f32; 2]>, // MIXED cohort straddles second band too
 }
 
 impl Default for WorldCfg {
@@ -74,9 +73,9 @@ pub struct PlantSpec {
     #[serde(default)]
     pub archetype: Option<String>, // named base (plant::Archetype); else random / tree base
     #[serde(default)]
-    pub tree: bool, // seed with a Tree marker (tall/slow) instead of a ground plant
+    pub tree: bool, // seed Tree marker (tall/slow) instead of ground plant
     #[serde(default)]
-    pub genome: Map<String, Value>, // free-form overrides merged onto the base (ANY gene, incl. new ones)
+    pub genome: Map<String, Value>, // free-form overrides merged onto base (ANY gene, incl. new ones)
 }
 
 fn default_seed() -> u64 {
@@ -97,15 +96,14 @@ fn half() -> f32 {
 
 // --- resources ---
 
-// Parsed scenario + where to write the result.
 #[derive(Resource)]
 pub struct ScenarioCfg {
     pub scenario: Scenario,
     pub out: String,
 }
 
-// Running tallies. Presence of THIS resource is what tells plant_step it's in scenario mode (so the
-// PLANT_MIN reseed floor is disabled + death causes are counted); absent => normal runs pay nothing.
+// Running tallies. Presence of THIS resource = scenario-mode flag for plant_step (sim.rs): disables
+// PLANT_MIN reseed floor + counts death causes. Absent on normal runs (zero cost).
 #[derive(Resource, Default)]
 pub struct ScenarioStats {
     pub started: usize,
@@ -113,22 +111,22 @@ pub struct ScenarioStats {
     pub deaths: u32,
     pub deaths_by_cause: HashMap<String, u32>,
     pub peak_count: usize,
-    pub cap: usize, // cohort-scale population cap (= ~2x target_count) so a viable cohort grows toward the
-    // target + shows vigor WITHOUT booming to the global PLANT_CAP (which saturated every metric).
-    pub seeded: Vec<PlantGenome>, // the applied cohort genomes (for trait-drift baseline)
+    pub cap: usize, // cohort pop cap (~2x target_count): cohort grows toward target + shows vigor WITHOUT
+    // booming to global PLANT_CAP (which saturated every metric).
+    pub seeded: Vec<PlantGenome>, // applied cohort genomes (trait-drift baseline)
     pub cstarted: usize,          // creatures seeded
     pub cseeded: Vec<Genome>,     // applied creature genomes (creature trait-drift baseline)
 }
 
 impl ScenarioStats {
-    // Record a plant death by cause (gene-agnostic string key; new causes need no schema change).
+    // Record plant death by cause. Gene-agnostic string key: new cause needs no schema change.
     pub fn death(&mut self, cause: &str) {
         self.deaths += 1;
         *self.deaths_by_cause.entry(cause.to_string()).or_insert(0) += 1;
     }
 }
 
-// --- generic serde merge: apply free-form overrides onto a base genome (NO per-gene code) ---
+// Generic serde merge: free-form overrides onto base genome. NO per-gene code (gene-agnostic).
 fn apply_overrides(base: PlantGenome, ov: &Map<String, Value>) -> PlantGenome {
     if ov.is_empty() {
         return base;
@@ -139,7 +137,7 @@ fn apply_overrides(base: PlantGenome, ov: &Map<String, Value>) -> PlantGenome {
     };
     if let Value::Object(map) = &mut v {
         for (k, val) in ov {
-            // only overwrite real genome fields; ignore unknown/typo keys (incl. forward-compat slack)
+            // overwrite real genome fields only; ignore unknown/typo keys (forward-compat slack)
             if map.contains_key(k) {
                 map.insert(k.clone(), val.clone());
             } else {
@@ -172,8 +170,8 @@ fn archetype_by_name(name: &str) -> Option<Archetype> {
     })
 }
 
-// generic serde merge of free-form overrides onto a base Genome (mirror of apply_overrides for plants).
-// Scalar genes, uptake[], even `sensors` can be overridden; the caller rebuilds the net when sensors change.
+// Generic serde merge onto base Genome (mirror of apply_overrides for plants).
+// Scalar genes, uptake[], even `sensors` overridable. Caller rebuilds net when sensors change.
 fn apply_overrides_genome(base: Genome, ov: &Map<String, Value>) -> Genome {
     if ov.is_empty() {
         return base;
@@ -194,38 +192,38 @@ fn apply_overrides_genome(base: Genome, ov: &Map<String, Value>) -> Genome {
     serde_json::from_value(v).unwrap_or(base)
 }
 
-// Reflex brain priors (hand-wired starting weights; lifetime learning refines them in the run). Input layout
-// (genome.rs): per sensor i -> [inv_dist @ 2i, type @ 2i+1]; then globals at base = n_sensors*2:
+// Reflex brain priors: hand-wired starting weights; lifetime learning refines them in run. Input layout
+// (genome.rs): per sensor i -> [inv_dist @ 2i, type @ 2i+1]; globals at base = n_sensors*2:
 // [energy, daylight, fatigue, bias, toxic_load, shade, threat_dist, threat_bear, wet]. Outputs
-// [thrust, turn, attack, defend, eat, sprint]; reflex priors only wire thrust/turn (rows 0/1), the combat
-// rows 2..6 stay zero and are learned. Returns None for an unknown name (caller keeps the random net).
+// [thrust, turn, attack, defend, eat, sprint]. Priors wire only thrust/turn (rows 0/1); combat rows 2..6
+// stay zero and are learned. None for unknown name (caller keeps random net).
 fn reflex_brain(name: &str, sensors: &[Sensor]) -> Option<Net> {
     let n_s = sensors.len();
     let base = n_s * crate::genome::SIG_PER_SENSOR;
     let n_in = n_inputs(n_s);
     let n_hidden = 3usize;
-    // zeroed net of the right shape (ih: n_hidden rows of n_in+1; ho: OUTPUTS rows of n_hidden+1)
+    // zeroed net of right shape: ih = n_hidden rows of n_in+1; ho = OUTPUTS rows of n_hidden+1
     let mut ih: Vec<Vec<f32>> = (0..n_hidden).map(|_| vec![0.0; n_in + 1]).collect();
     let mut ho: Vec<Vec<f32>> = (0..crate::genome::OUTPUTS).map(|_| vec![0.0; n_hidden + 1]).collect();
     let (i_daylight, i_threat_d, i_threat_b) = (base + 1, base + 6, base + 7);
     match name {
         "approach-food" => {
-            // h0 = food proximity (sum of sensor inv-distances); h1 = steering (food on the left vs right)
+            // h0 = food proximity (sum sensor inv-dist); h1 = steering (food left vs right)
             for (i, s) in sensors.iter().enumerate() {
                 ih[0][2 * i] = 1.0;
                 ih[1][2 * i] = if s.angle < 0.0 { -1.0 } else { 1.0 };
             }
             ih[0][n_in] = -0.2; // bias: ~0 when no food in view
             ho[0][0] = 3.0; // thrust rises with food proximity
-            ho[0][n_hidden] = -0.3; // idle-ish when nothing near
-            ho[1][1] = 2.0; // turn toward the side with food
+            ho[0][n_hidden] = -0.3; // idle when nothing near
+            ho[1][1] = 2.0; // turn toward food side
         }
         "flee-predator" => {
             ih[0][i_threat_d] = 2.0; // h0 = predator proximity
             ih[1][i_threat_b] = 1.0; // h1 = predator bearing
-            ho[0][0] = 3.0; // sprint when a predator is near
+            ho[0][0] = 3.0; // sprint when predator near
             ho[0][n_hidden] = -0.4;
-            ho[1][1] = -2.5; // steer AWAY from the predator's bearing
+            ho[1][1] = -2.5; // steer AWAY from predator bearing
         }
         "rest-at-night" => {
             ih[0][i_daylight] = 1.0; // h0 = daylight
@@ -240,7 +238,7 @@ fn reflex_brain(name: &str, sensors: &[Sensor]) -> Option<Net> {
     Some(Net { ih, ho })
 }
 
-// --- startup: pin the environment band, seed ONLY the cohort ---
+// Startup: pin env band, seed ONLY the cohort.
 pub fn spawn_scenario_world(
     mut commands: Commands,
     mut rng: ResMut<crate::rng::Rng>,
@@ -251,13 +249,12 @@ pub fn spawn_scenario_world(
     mut fire: ResMut<crate::sim::Fire>,
 ) {
     let w = &cfg.scenario.world;
-    // pin the controlled environment ONCE (no weather_step runs in scenario mode, so these stay fixed ->
-    // a reproducible niche). `wetness` IS the effective local moisture: pin the slow CLIMATE grid to it
-    // (CLIMATE_VEG=1 -> plants read climate as their moisture). Ground water is left at ~0: on the real
-    // planet gw is transient rain that averages ~0.01, and adding it here would DOUBLE-COUNT wetness
-    // (m = climate + WET_GAIN*gw) so `wetness=0.6` would feel like ~0.87 and a plant tuned to wet=0.6 would
-    // be wet-stressed. With gw~0, effective moisture = wetness (+ a small seasonal wobble) -> intuitive to
-    // tune against AND faithful to real-planet biome moisture (so tuned genomes transfer to planet seeding).
+    // Pin controlled env ONCE: no weather_step in scenario mode, so these stay fixed -> reproducible niche.
+    // `wetness` IS effective local moisture: pin slow CLIMATE grid to it (CLIMATE_VEG=1 -> plants read
+    // climate as moisture). Ground water left ~0: on real planet gw is transient rain averaging ~0.01;
+    // adding here DOUBLE-COUNTS wetness (m = climate + WET_GAIN*gw) so wetness=0.6 would feel ~0.87 and a
+    // plant tuned to wet=0.6 wet-stresses. With gw~0, effective moisture = wetness (+ seasonal wobble):
+    // intuitive to tune AND faithful to real-planet biome moisture, so tuned genomes transfer to planet.
     for c in gw.cell.iter_mut() {
         *c = 0.0;
     }
@@ -268,14 +265,14 @@ pub fn spawn_scenario_world(
         *c = w.fire;
     }
 
-    // place a cohort member: pick a |latitude| in the band (or the second band for MIXED cohorts), then a
-    // matching surface position (aquatic = shallow sea, rocky = high ground, else low land).
-    // creatures can only forage if they + their food share a LOCAL patch (a full latitude ring spreads them
-    // around the whole planet -> they never meet food). So when a creature cohort is present, co-locate the
-    // whole cohort (plants too) in one compact patch around a single center; plant-only scenarios keep the
-    // wide latitude-ring placement (climate is what's tuned there, position doesn't matter).
+    // Place cohort member: pick |latitude| in band (or second band for MIXED), then matching surface pos
+    // (aquatic = shallow sea, rocky = high ground, else low land).
+    // GOTCHA: creatures forage only if they + food share a LOCAL patch; full latitude ring spreads them
+    // planet-wide -> never meet food. So with a creature cohort present, co-locate whole cohort (plants too)
+    // in one compact patch round a center. Plant-only scenarios keep wide latitude-ring (climate is tuned
+    // there, position moot).
     let patch = !cfg.scenario.creature_cohort.is_empty();
-    const PATCH_CAP: f32 = 0.13; // ~7.5 deg cap: a local foraging region
+    const PATCH_CAP: f32 = 0.13; // ~7.5 deg cap: local foraging region
     let mid_lat = (w.lat_band[0] + w.lat_band[1]) * 0.5;
     let patch_center = if w.aquatic {
         crate::sim::niche_water_pos(&mut rng, mid_lat, 0.0).normalize_or_zero()
@@ -284,7 +281,7 @@ pub fn spawn_scenario_world(
     };
     let place = |rng: &mut crate::rng::Rng, y: f32| -> Vec3 {
         if patch {
-            // scatter within the patch; keep land/water matching the niche (retry a few times like homeland_pos)
+            // scatter in patch; keep land/water matching niche (retry like homeland_pos)
             let mut d = crate::sphere::random_dir_in_cap(rng, patch_center, PATCH_CAP);
             for _ in 0..8 {
                 if crate::sphere::is_ocean(d) == w.aquatic {
@@ -307,7 +304,7 @@ pub fn spawn_scenario_world(
     };
 
     for spec in &cfg.scenario.plant_cohort {
-        // base genome: a named archetype, else a tree base for trees, else random
+        // base genome: named archetype, else tree base for trees, else random
         for _ in 0..spec.count {
             let base = match spec.archetype.as_deref().and_then(archetype_by_name) {
                 Some(a) => PlantGenome::archetype(&mut rng, a),
@@ -316,11 +313,11 @@ pub fn spawn_scenario_world(
             };
             let mut g = apply_overrides(base, &spec.genome);
             let pos = place(&mut rng, crate::sim::FOOD_Y);
-            // F45: in a CREATURE scenario the plant_cohort is just FOOD, not the tuning subject. Untuned
-            // archetype climate defaults collapse in a hostile band (Cactus/Reed died) and the creatures then
-            // starve. Pin the food's climate genes to THIS spot's band (unless the spec overrode them) so the
-            // food survives. Gated on a creature cohort being present, so the PLANT tuner (no creature_cohort,
-            // which relies on temp_pref drift as a signal) is unaffected.
+            // F45: in CREATURE scenario plant_cohort is just FOOD, not the tuning subject. Untuned archetype
+            // climate defaults collapse in hostile band (Cactus/Reed died) -> creatures starve. Pin food
+            // climate genes to THIS spot's band (unless spec overrode them) so food survives. Gated on
+            // creature cohort present, so PLANT tuner (no creature_cohort, relies on temp_pref drift signal)
+            // unaffected.
             if !cfg.scenario.creature_cohort.is_empty() {
                 if !spec.genome.contains_key("temp_pref") {
                     g.temp_pref = crate::sphere::base_temperature(pos.normalize_or_zero());
@@ -338,11 +335,11 @@ pub fn spawn_scenario_world(
         }
     }
     stats.started = stats.seeded.len();
-    // cap the cohort near the target so it grows toward the goal + shows vigor, not boom to PLANT_CAP.
+    // cap cohort near target: grows toward goal + shows vigor, no boom to PLANT_CAP.
     stats.cap = (cfg.scenario.target_count * 2).max(20);
 
-    // creature cohort (M4 creature arm): apply free-form overrides onto a random base, rebuild the net if
-    // sensors were overridden (shape must match), apply an optional reflex prior, then spawn into the band.
+    // Creature cohort (M4): free-form overrides onto random base, rebuild net if sensors overridden (shape
+    // must match), apply optional reflex prior, spawn into band.
     for spec in &cfg.scenario.creature_cohort {
         for _ in 0..spec.count {
             let mut g = apply_overrides_genome(Genome::random(&mut rng), &spec.genome);
@@ -361,14 +358,14 @@ pub fn spawn_scenario_world(
     }
     stats.cstarted = stats.cseeded.len();
 
-    // optional grazing pressure: a few random creatures placed in the band (continuous off -> they don't reseed)
+    // grazing pressure: random creatures in band. Continuous off -> they don't reseed.
     for _ in 0..w.grazers {
         let pos = place(&mut rng, crate::sim::CREATURE_Y);
         crate::sim::spawn_creature(&mut commands, Genome::random(&mut rng), pos, &mut rng, crate::sim::BIRTH_ENERGY);
     }
 }
 
-// --- result schema (Deserialize too: the --merge CLI reads it back to build library entries) ---
+// Result schema. Deserialize too: --merge CLI reads it back to build library entries.
 #[derive(Serialize, Deserialize)]
 pub struct BestGenome {
     pub genome: PlantGenome,
@@ -397,28 +394,28 @@ pub struct ScenarioResult {
     pub trait_drift: HashMap<String, [f32; 2]>,
     pub health_score: f32,
     pub best_genomes: Vec<BestGenome>,
-    // --- creature arm (M4): all #[serde(default)] so plant-only results still parse ---
+    // Creature arm (M4): all #[serde(default)] so plant-only results still parse.
     #[serde(default)]
     pub creature_started: usize,
     #[serde(default)]
     pub creature_survived: usize,
     #[serde(default)]
-    pub creature_survival: f32, // survived / started (the creature health signal the tuner maximizes)
+    pub creature_survival: f32, // survived / started: creature health signal tuner maximizes
     #[serde(default)]
     pub creature_mean_age: f32,
     #[serde(default)]
     pub creature_mean_energy: f32,
     #[serde(default)]
-    pub creature_mean_master: f32, // mean digestion expression (diet fit to the niche food)
+    pub creature_mean_master: f32, // mean digestion expression (diet fit to niche food)
     #[serde(default)]
     pub creature_trait_drift: HashMap<String, [f32; 2]>,
     #[serde(default)]
-    pub best_creatures: Vec<Genome>, // top survivors by fitness (harvested into the seed snapshot)
+    pub best_creatures: Vec<Genome>, // top survivors by fitness (harvested into seed snapshot)
 }
 
-// Classify a plant genome into a biome niche label from its OWN adapted prefs (temp_pref/wet/submerged/
-// light_pref), mirroring sim::plant_for_site's biome logic. Used by the whole-planet co-evolution harvest:
-// a survivor's genome self-describes which biome it adapted to, so we tag it without needing its position.
+// Classify plant genome -> biome niche label from its OWN adapted prefs (temp_pref/wet/submerged/
+// light_pref). Mirrors sim::plant_for_site biome logic. Used by whole-planet co-evolution harvest:
+// survivor genome self-describes its adapted biome, so we tag without needing position.
 fn biome_label(g: &PlantGenome) -> &'static str {
     if g.submerged > 0.5 || g.wet > 0.85 {
         if g.light_pref < 0.4 {
@@ -437,11 +434,10 @@ fn biome_label(g: &PlantGenome) -> &'static str {
     }
 }
 
-// CLI (--merge-snapshot): harvest the surviving plants of a whole-planet co-evolution run (a --save snapshot)
-// into the library, biome-labeled by each genome's own prefs (+ a `suffix`, e.g. "-coevo", so they coexist
-// with the isolated entries for comparison). Tree-like genomes (maturity in the tree range) are skipped:
-// SavedPlant carries no Tree marker, so they can't be re-seeded as trees. score = mass -> merge keeps the
-// most vigorous per biome.
+// CLI --merge-snapshot: harvest surviving plants of whole-planet co-evolution run (a --save snapshot) into
+// library, biome-labeled by each genome's prefs (+ `suffix`, e.g. "-coevo", so they coexist with isolated
+// entries for comparison). Tree-like genomes (maturity in tree range) skipped: SavedPlant carries no Tree
+// marker, can't re-seed as trees. score = mass -> merge keeps most vigorous per biome. persist.rs hooks.
 pub fn merge_snapshot_into_library(snap_path: &str, lib_path: &str, per_niche_cap: usize, suffix: &str) {
     let snap = match crate::persist::load_snapshot(snap_path) {
         Some(s) => s,
@@ -453,7 +449,7 @@ pub fn merge_snapshot_into_library(snap_path: &str, lib_path: &str, per_niche_ca
     let entries: Vec<crate::persist::LibEntry> = snap
         .plants
         .iter()
-        .filter(|sp| sp.g.maturity < 8.0) // skip tree-like genomes (trees clamp maturity >= 8; ground plants <= 10)
+        .filter(|sp| sp.g.maturity < 8.0) // skip tree-like (trees clamp maturity >= 8; ground plants <= 10)
         .map(|sp| crate::persist::LibEntry { niche: format!("{}{}", biome_label(&sp.g), suffix), tree: false, score: sp.mass, genome: sp.g.clone(), missing: Vec::new() })
         .collect();
     let added = entries.len();
@@ -464,9 +460,9 @@ pub fn merge_snapshot_into_library(snap_path: &str, lib_path: &str, per_niche_ca
     println!("merge-snapshot: harvested {} ground plants from {} -> {} now has {} entries", added, snap_path, lib_path, lib.entries.len());
 }
 
-// CLI (--merge): fold a scenario result's best survivor genomes into the plant seed-bank library under
-// `niche`, accumulating across runs (load existing -> merge -> keep best per niche -> save). The harness
-// synthesize stage calls this once per tuned cohort. Gene-agnostic end to end (genomes carry every gene).
+// CLI --merge: fold scenario result's best survivor genomes into plant seed-bank library under `niche`,
+// accumulating across runs (load -> merge -> keep best per niche -> save). Harness synthesize stage calls
+// once per tuned cohort. Gene-agnostic end to end (genomes carry every gene). persist.rs hooks.
 pub fn merge_result_into_library(result_path: &str, niche: &str, lib_path: &str, per_niche_cap: usize) {
     let text = match std::fs::read_to_string(result_path) {
         Ok(t) => t,
@@ -495,11 +491,10 @@ pub fn merge_result_into_library(result_path: &str, niche: &str, lib_path: &str,
     println!("merge: +{} genomes for niche '{}' (score {:.2}) -> {} now has {} entries", added, niche, res.health_score, lib_path, lib.entries.len());
 }
 
-// CLI (--merge-creatures): harvest a scenario result's best survivor creatures into a population SNAPSHOT
-// (the showcase seed, e.g. evolved-continuous.json), accumulating across runs (load -> append -> cap -> save).
-// The creature synthesize stage calls this once per tuned niche; the capped, multi-niche snapshot becomes the
-// fresh evolved seed. Gene-agnostic (genomes carry every gene). Keeps the most-recently-added on overflow so
-// later niches are represented.
+// CLI --merge-creatures: harvest scenario result's best survivor creatures into population SNAPSHOT (showcase
+// seed, e.g. evolved-continuous.json), accumulating across runs (load -> append -> cap -> save). Creature
+// synthesize stage calls once per tuned niche; capped multi-niche snapshot becomes fresh evolved seed.
+// Gene-agnostic. On overflow keeps most-recently-added so later niches represented. persist.rs hooks.
 pub fn merge_creatures_into_snapshot(result_path: &str, snap_path: &str, cap: usize) {
     let text = match std::fs::read_to_string(result_path) {
         Ok(t) => t,
@@ -520,15 +515,15 @@ pub fn merge_creatures_into_snapshot(result_path: &str, snap_path: &str, cap: us
     snap.creatures.extend(res.best_creatures);
     if snap.creatures.len() > cap {
         let excess = snap.creatures.len() - cap;
-        snap.creatures.drain(0..excess); // keep the newest (later niches), cap total for a balanced seed
+        snap.creatures.drain(0..excess); // keep newest (later niches), cap total for balanced seed
     }
     crate::persist::save_snapshot(snap_path, &snap);
     println!("merge-creatures: +{} from {} -> {} now has {} creatures", added, result_path, snap_path, snap.creatures.len());
 }
 
-// gene-agnostic per-field numeric means over a set of genomes (serde reflection -> covers any new gene).
-// Generic over the genome type so it serves both PlantGenome and Genome (top-level f64 fields only; nested
-// arrays/objects like net/sensors/uptake are skipped, which is exactly the scalar genes we want).
+// Gene-agnostic per-field numeric means over genome set (serde reflection -> covers any new gene).
+// Generic over genome type: serves both PlantGenome and Genome. Top-level f64 fields only; nested
+// arrays/objects (net/sensors/uptake) skipped, which is exactly the scalar genes we want.
 fn numeric_means<T: Serialize>(genomes: &[T]) -> HashMap<String, f32> {
     let mut sums: HashMap<String, f64> = HashMap::new();
     let n = genomes.len().max(1) as f64;
@@ -544,7 +539,7 @@ fn numeric_means<T: Serialize>(genomes: &[T]) -> HashMap<String, f32> {
     sums.into_iter().map(|(k, s)| (k, (s / n) as f32)).collect()
 }
 
-// --- per-tick: advance the clock (day/night + season), track peak, write result + exit at the budget ---
+// Per-tick: advance clock (day/night + season), track peak, write result + exit at budget.
 pub fn scenario_step(
     mut gen: ResMut<GenState>,
     cfg: Res<ScenarioCfg>,
@@ -553,7 +548,7 @@ pub fn scenario_step(
     q: Query<(&PlantState, &PlantGenome, Option<&Tree>), (Without<crate::components::Rot>, Without<crate::components::Grass>)>,
     cq: Query<(&Genome, &DietState, &Energy, &Alive, &crate::components::Fitness), With<Creature>>,
 ) {
-    gen.tick = gen.tick.wrapping_add(1); // drives daylight_at + season inside plant_step
+    gen.tick = gen.tick.wrapping_add(1); // drives daylight_at + season in plant_step
 
     let count = q.iter().count();
     if count > stats.peak_count {
@@ -564,7 +559,7 @@ pub fn scenario_step(
         return;
     }
 
-    // budget reached: gather metrics + write the result JSON, then exit.
+    // budget reached: gather metrics, write result JSON, exit.
     let mut survivors: Vec<PlantGenome> = Vec::new();
     let mut best: Vec<(f32, PlantGenome, bool)> = Vec::new();
     let (mut sum_mass, mut max_mass, mut sum_age, mut sum_growth) = (0.0f32, 0.0f32, 0.0f64, 0.0f32);
@@ -580,7 +575,7 @@ pub fn scenario_step(
     let n = survived.max(1) as f32;
     let target = cfg.scenario.target_count.max(1);
 
-    // trait drift: seeded mean vs survivor mean, for every numeric gene (auto-covers new genes)
+    // trait drift: [seeded mean, survivor mean] per numeric gene (auto-covers new genes)
     let seeded_means = numeric_means(&stats.seeded);
     let survivor_means = numeric_means(&survivors);
     let mut trait_drift: HashMap<String, [f32; 2]> = HashMap::new();
@@ -589,11 +584,11 @@ pub fn scenario_step(
         trait_drift.insert(k.clone(), [*sm, vm]);
     }
 
-    let r = stats.births as f32 / stats.deaths.max(1) as f32; // reproductive success over the run
-    // health_score in [0,1]: did the cohort FILL toward the target by the end (sustained, not a transient
-    // peak that then crashed) AND is it self-sustaining (R>=1). final_fill saturates at the target, so a
-    // cohort holding ~target with R>=1 scores ~1.0; one dying back or barely surviving scores low. Bounded
-    // so candidates rank cleanly (the old survived/started ratio overflowed once the cohort reproduced).
+    let r = stats.births as f32 / stats.deaths.max(1) as f32; // R = reproductive success over run
+    // health_score 0..1: cohort FILLED toward target by end (sustained, not transient peak that crashed) AND
+    // self-sustaining (R>=1). final_fill saturates at target, so cohort holding ~target with R>=1 scores
+    // ~1.0; dying back or barely surviving scores low. Bounded so candidates rank cleanly (old
+    // survived/started ratio overflowed once cohort reproduced).
     let final_fill = (survived as f32 / target as f32).min(1.0);
     let r_term = 0.5 + 0.5 * r.min(1.0);
     let health_score = final_fill * r_term;
@@ -601,8 +596,8 @@ pub fn scenario_step(
     best.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
     let best_genomes: Vec<BestGenome> = best.into_iter().take(12).map(|(mass, genome, tree)| BestGenome { genome, mass, tree }).collect();
 
-    // creature cohort metrics: survivors = creatures still alive at the budget. Best survivors (by fitness)
-    // are harvested into the seed snapshot by --merge-creatures.
+    // creature cohort metrics: survivors = creatures alive at budget. Best (by fitness) harvested into seed
+    // snapshot by --merge-creatures.
     let mut csurv: Vec<Genome> = Vec::new();
     let mut cbest: Vec<(f32, Genome)> = Vec::new();
     let (mut csum_age, mut csum_e, mut csum_master) = (0.0f64, 0.0f32, 0.0f32);

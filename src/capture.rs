@@ -1,35 +1,35 @@
-//! GPU screenshot capture (--capture). Renders the REAL Bevy scene (true directional light + shadows +
-//! ambient) from the walk camera at a chosen sun phase, saves a PNG, exits. Lets the world be inspected
-//! offline (unlike snapshot.rs which is a CPU proxy). Needs a GPU + display; render mode only.
+//! GPU screenshot capture (--capture). Renders REAL Bevy scene (true directional light + shadows + ambient)
+//! from walk camera at chosen sun phase, saves PNG, exits. Primary offline render verifier; snapshot.rs is
+//! the CPU proxy. Needs GPU + display, render mode only.
 use crate::camera::{CameraMode, WalkCam};
 use crate::viz::SunOffset;
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 
-// Which time-of-day to frame the walk shot at (sun relative to the homeland the camera stands on).
+// --cap-when: sun phase for walk shot, relative to homeland camera stands on.
 #[derive(Clone, Copy)]
 pub enum CapWhen {
-    Morning, // sun ~45deg up in the east -> long visible shadows
+    Morning, // sun ~45deg up east -> long shadows
     Noon,    // sun overhead -> flat light, tiny shadows
-    Dusk,    // sun near the horizon -> very long shadows
-    Night,   // sun on the far side -> tests "no light through the planet"
+    Dusk,    // sun near horizon -> very long shadows
+    Night,   // sun far side -> tests no light leaks through planet
 }
 
 #[derive(Resource)]
 pub struct CaptureCfg {
     pub prefix: String,
     pub when: CapWhen,
-    pub yaw: f32,     // walk heading (look direction around the surface)
-    pub off: i64,     // raw extra sun-tick offset (overrides `when` when nonzero) for dialing sun angle
-    pub pitch: f32,   // camera pitch (negative = look down at the ground)
-    pub orbit: bool,  // capture from orbit (far) instead of walk (surface)
-    pub dist: f32,    // orbit distance from planet center (test zoom for the eclipse-disc regression)
-    pub underwater: bool, // stand submerged in a deep ocean (verify swim view + blue tint)
-    pub lat: Option<f32>, // --cap-lat: top-down orbit view aimed at this latitude (deg, + = north pole)
+    pub yaw: f32,     // --cap-yaw: walk heading (look dir around surface)
+    pub off: i64,     // --cap-off: raw sun-tick offset, overrides `when` when nonzero, dials sun angle
+    pub pitch: f32,   // --cap-pitch: cam pitch. negative = look down
+    pub orbit: bool,  // --cap-orbit: capture from orbit (space) not walk (surface)
+    pub dist: f32,    // --cap-dist: orbit distance from planet center (95..420). zoom test for eclipse-disc regression
+    pub underwater: bool, // --cap-water: submerge in deep ocean. verifies swim view + blue tint
+    pub lat: Option<f32>, // --cap-lat: top-down orbit view at this latitude (deg, +90 = north pole, -90 = south)
 }
 
-// Deepest-ocean surface direction, found by scanning a Fibonacci sphere (robust to the exact noise seed,
-// unlike a hardcoded direction). Used by --cap-water to stand the camera in real deep water.
+// Deepest-ocean surface dir, found by scanning a Fibonacci sphere (2000 samples). Robust to noise seed
+// vs a hardcoded dir. --cap-water uses it to stand camera in real deep water.
 fn ocean_dir() -> Vec3 {
     let n = 2000usize;
     let golden = std::f32::consts::PI * (3.0 - 5.0_f32.sqrt());
@@ -49,47 +49,47 @@ fn ocean_dir() -> Vec3 {
     best
 }
 
-// Frames to let assets load + the sim settle before grabbing the shot (materials, dressed entities).
+// Frames to wait before shot so assets load + sim settles (materials, dressed entities).
 const WARMUP: u32 = 50;
 
 pub struct CapturePlugin;
 impl Plugin for CapturePlugin {
     fn build(&self, app: &mut App) {
-        // PostStartup (not Startup): spawn_camera (camera plugin Startup) must run first so the WalkCam
-        // entity exists when we drop it into the ocean for --cap-water.
+        // PostStartup not Startup: spawn_camera (camera plugin Startup) must run first so WalkCam entity
+        // exists when we drop it into ocean for --cap-water.
         app.add_systems(PostStartup, setup_capture_view)
             .add_systems(Update, (capture_tick, quit_countdown))
-            // deterministic framing: own the camera transform in PostUpdate, after walk/orbit ran
+            // deterministic framing: own cam transform in PostUpdate, after walk/orbit ran
             .add_systems(PostUpdate, force_cam.before(bevy::transform::TransformSystems::Propagate));
     }
 }
 
-// Point the camera at the homeland from a fixed side+elevated vantage, ignoring walk/orbit. Deterministic
-// so test objects + their shadows are always framed.
+// Aim camera at homeland from fixed side+elevated vantage, ignoring walk/orbit. Deterministic so test
+// objects + shadows always framed.
 fn force_cam(cfg: Res<CaptureCfg>, mut q: Query<&mut Transform, With<Camera3d>>) {
     if cfg.orbit {
-        // --cap-lat: aim the orbit camera straight down at a chosen latitude on the homeland meridian for a
-        // top-down pole view. Own the transform here (not apply_orbit) so we can pick a stable up: look_at with
-        // up=Y collapses at the poles (view axis ~parallel to Y), so near a pole use Z as up instead.
+        // --cap-lat: aim orbit cam straight down at chosen latitude on homeland meridian, top-down pole view.
+        // Own transform here (not apply_orbit) to pick stable up: look_at with up=Y collapses at poles (view
+        // axis ~parallel Y), so near a pole use Z as up instead.
         if let Some(lat_deg) = cfg.lat {
             use std::f32::consts::FRAC_PI_2;
             let lat = lat_deg.to_radians().clamp(-FRAC_PI_2, FRAC_PI_2);
             let (lon, _) = crate::sphere::dir_to_lonlat(crate::sim::homeland_center());
             let dir = Vec3::new(lat.cos() * lon.cos(), lat.sin(), lat.cos() * lon.sin());
             let eye = dir * cfg.dist;
-            let up = if dir.y.abs() > 0.9 { Vec3::Z } else { Vec3::Y };
+            let up = if dir.y.abs() > 0.9 { Vec3::Z } else { Vec3::Y }; // near pole: avoid Y up collapse
             if let Ok(mut t) = q.single_mut() {
                 *t = Transform::from_translation(eye).looking_at(Vec3::ZERO, up);
             }
         }
-        return; // plain orbit framing is owned by apply_orbit (ran in Update); don't override it here
+        return; // plain orbit framing owned by apply_orbit (Update). don't override here
     }
     if cfg.underwater {
-        // submerged in the deep ocean: eye 2 units off the seafloor, looking level + slightly up at the
-        // sunlit surface (so the shot shows the blue tint + water from below).
+        // submerged deep ocean: eye 2u off seafloor, level + slightly up at sunlit surface. shot shows
+        // blue tint + water from below.
         let d = ocean_dir();
         let eye = crate::sphere::surface_pos(d, 2.0);
-        // look along the heading tilted by cap-pitch (negative = down at the lit seafloor through the water)
+        // look along heading tilted by cap-pitch (negative = down at lit seafloor through water)
         let tangent = crate::sphere::heading_tangent(d, cfg.yaw);
         let fwd = (tangent * cfg.pitch.cos() + d * cfg.pitch.sin()).normalize();
         if let Ok(mut t) = q.single_mut() {
@@ -106,7 +106,7 @@ fn force_cam(cfg: Res<CaptureCfg>, mut q: Query<&mut Transform, With<Camera3d>>)
     }
 }
 
-// Stand the walk camera on the homeland, face `yaw`, and set the sun to the requested phase.
+// Stand walk camera on homeland, face `yaw`, set sun to requested phase.
 fn setup_capture_view(
     cfg: Res<CaptureCfg>,
     mut mode: ResMut<CameraMode>,
@@ -115,17 +115,17 @@ fn setup_capture_view(
     mut orbit_q: Query<&mut crate::camera::OrbitCam>,
 ) {
     let home = crate::sim::homeland_center();
-    // sun anchor: overhead the ocean point for --cap-water, else overhead the homeland.
+    // sun anchor: overhead ocean point for --cap-water, else overhead homeland.
     let sun_anchor = if cfg.underwater { ocean_dir() } else { home };
     if cfg.underwater {
-        // submerged swim view: drop the walk eye into the deep ocean so track_underwater flags it (the
-        // tint overlay + murky sky then show in the shot). force_cam owns the final transform.
+        // submerged swim view: drop walk eye into deep ocean so track_underwater flags it (tint overlay +
+        // murky sky then show in shot). force_cam owns final transform.
         *mode = CameraMode::Walk;
         if let Ok(mut w) = q.single_mut() {
             w.dir = ocean_dir();
             w.yaw = cfg.yaw;
             w.pitch = cfg.pitch;
-            w.eye_alt = 2.0; // 2u above the seafloor; deep-ocean depth ~SEA_FLOOR_MAX -> well below the surface -> underwater
+            w.eye_alt = 2.0; // 2u above seafloor. deep-ocean depth ~SEA_FLOOR_MAX -> well below surface -> underwater
         }
     } else if cfg.orbit {
         *mode = CameraMode::Orbit;
@@ -138,13 +138,13 @@ fn setup_capture_view(
     } else {
         *mode = CameraMode::Walk;
         if let Ok(mut w) = q.single_mut() {
-            // stand BACK from the homeland along the heading so the homeland (entities) is in front
+            // stand back 16u from homeland along heading so homeland entities are in front
             w.dir = crate::sphere::step(home, cfg.yaw, -16.0).0;
             w.yaw = cfg.yaw;
             w.pitch = cfg.pitch;
         }
     }
-    // noon_offset puts the sun overhead the anchor; shift it for the requested hour (or raw --cap-off).
+    // noon_offset puts sun overhead anchor. shift for requested hour, or raw --cap-off. offsets in day-ticks.
     let day = crate::sphere::DAY_TICKS as i64;
     let base = crate::viz::noon_offset(sun_anchor, 0);
     offset.0 = base
@@ -160,7 +160,7 @@ fn setup_capture_view(
         };
 }
 
-// Wait WARMUP frames, snap the window to PNG, exit once written.
+// Wait WARMUP frames, snap window to PNG, exit once written.
 fn capture_tick(
     mut frames: Local<u32>,
     mut shot: Local<bool>,
@@ -177,7 +177,7 @@ fn capture_tick(
         return;
     }
     *shot = true;
-    // diagnostics: where is the sun vs the camera, and are shadows on?
+    // diag: sun vs camera, shadows on? home.dot(sd) > 0 = day side.
     let vtick = (gen.tick as i64 + offset.0).rem_euclid(crate::sphere::DAY_TICKS as i64) as u32;
     let sd = crate::sphere::sun_dir(vtick);
     let home = walkers.single().map(|w| w.dir.normalize_or_zero()).unwrap_or(Vec3::Y);
@@ -197,14 +197,14 @@ fn capture_tick(
     commands
         .spawn(Screenshot::primary_window())
         .observe(save_to_disk(path));
-    // give the save one extra frame, then quit
+    // QuitAfter(3): hold a few frames so screenshot flushes to disk before exit
     commands.spawn(QuitAfter(3));
 }
 
 #[derive(Component)]
 struct QuitAfter(u32);
 
-// Count down spawned quit timers; exit when any reaches zero (screenshot flushed to disk).
+// Count down quit timers. exit when any hits zero (screenshot flushed).
 fn quit_countdown(mut q: Query<&mut QuitAfter>, mut exit: MessageWriter<AppExit>) {
     for mut t in &mut q {
         if t.0 == 0 {

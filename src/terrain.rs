@@ -1,14 +1,13 @@
-// Planet globe mesh (render only). The world is spherical: terrain elevation, oceans, climate, and the
-// noise fields all live in `sphere.rs`; this module just turns them into a render mesh. The old flat
-// (x,z) heightfield + its noise/biome/cloud helpers were removed when the world became a planet.
+// Planet globe mesh (render only). World fields (terrain elevation, oceans, climate, noise) live in
+// `sphere.rs`; this module turns them into a render mesh. No flat-heightfield path: world is a planet.
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
-pub const HEIGHT_MAX: f32 = 12.0; // peak terrain elevation above the sea sphere (world units); sphere::ELEV_MAX aliases this
+pub const HEIGHT_MAX: f32 = 12.0; // peak terrain elev above sea sphere (world units). sphere::ELEV_MAX aliases this
 
-// Build the planet globe mesh: a UV sphere displaced by terrain elevation + vertex-colored by biome
-// (oceans blue, land green/sand/rock, polar ice). `res` = latitude bands (longitude uses 2*res).
+// UV sphere displaced by terrain elevation, vertex-colored by biome (oceans blue, land green/sand/rock,
+// polar ice). `res` = latitude bands. longitude uses 2*res.
 pub fn build_globe(res: usize) -> Mesh {
     use crate::sphere;
     let (rows, cols) = (res, res * 2);
@@ -22,7 +21,7 @@ pub fn build_globe(res: usize) -> Mesh {
             let d = sphere::lonlat_to_pos(lon, lat, 0.0).normalize();
             let pos = d * (sphere::PLANET_R + sphere::elevation(d));
             positions.push([pos.x, pos.y, pos.z]);
-            normals.push([d.x, d.y, d.z]); // smooth sphere normal (good enough for shading)
+            normals.push([d.x, d.y, d.z]); // radial normal, not geometric. smooth shading, ignores elev slope
             let c = sphere::biome_color(d);
             colors.push([c[0], c[1], c[2], 1.0]);
         }

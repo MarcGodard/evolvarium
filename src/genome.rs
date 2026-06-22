@@ -1,40 +1,39 @@
-// M3: VARIABLE-TOPOLOGY genome. The GA now directs where the NN's input nodes are:
-//   sensors = evolvable list of directional food-eyes (count + angle + range).
-// Brain resizes to match (dynamic I/O). Hidden-layer size is ALSO evolvable now (add/remove_hidden);
-// per-neuron upkeep (BRAIN_COST) is the trade-off. Weights kept as structured layers so growing/
-// shrinking a sensor or a hidden neuron is clean.
+// M3: variable-topology genome. GA places NN input nodes: sensors = evolvable list of directional
+// food-eyes (count + angle + range). Brain resizes to match (dynamic I/O). Hidden size also evolvable
+// (add/remove_hidden); per-neuron upkeep (BRAIN_COST) = trade-off. Weights = structured layers so
+// growing/shrinking a sensor or hidden neuron stays clean.
 use crate::rng::Rng;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-pub const MIN_HIDDEN: usize = 2; // brains never shrink below this
-pub const MAX_HIDDEN: usize = 16; // ...nor grow beyond (bounds the per-neuron upkeep cost)
-pub const OUTPUTS: usize = 6; // [thrust 0..1, turn -1..1, attack, defend, eat, sprint] (last 4 are 0..1 intents)
-pub const NFOOD: usize = 4; // plant FAMILY count (sensing hue + kind label only; NOT the metabolic axis)
-pub const NUTRIENTS: usize = 10; // distinct nutrients (the metabolic axis: regulatory uptake genome, see 14/05)
+pub const MIN_HIDDEN: usize = 2; // floor
+pub const MAX_HIDDEN: usize = 16; // ceiling (bounds per-neuron upkeep cost)
+pub const OUTPUTS: usize = 6; // [thrust 0..1, turn -1..1, attack, defend, eat, sprint]; last 4 = 0..1 intents
+pub const NFOOD: usize = 4; // plant FAMILY count (hue + kind label only; NOT metabolic axis)
+pub const NUTRIENTS: usize = 10; // distinct nutrients = metabolic axis (regulatory uptake genome, see 14/05)
 
 pub const MIN_SENSORS: usize = 1;
 pub const MAX_SENSORS: usize = 8;
 pub const SIG_PER_SENSOR: usize = 2; // each sensor reports [inv-dist, food type/readiness]
-// global (non-sensor) brain inputs, appended after the per-sensor signals:
-// [energy, daylight, fatigue, bias, toxic_load, shade, threat_dist, threat_bearing, wet]
-// energy+light+fatigue -> diurnal/nocturnal rest; toxic_load -> avoid poison; shade -> seek canopy in heat;
-// threat_dist/bearing -> flee a bigger predator; wet -> sense being in water; mag_lat + compass -> magnetic
-// navigation (gated by the `magneto` gene). (M4 widened 4 -> 9; magneto added 2 -> 11; old saved nets are
-// zero-padded for the new columns on load, see Genome::ensure_net_shape.)
+// Global (non-sensor) brain inputs, appended after per-sensor signals. Column order:
+// [energy, daylight, fatigue, bias, toxic_load, shade, threat_dist, threat_bearing, wet, mag_lat, compass]
+// energy+daylight+fatigue -> diurnal/nocturnal rest; toxic_load -> avoid poison; shade -> seek canopy in heat;
+// threat_dist/bearing -> flee bigger predator; wet -> in water; mag_lat+compass -> magnetic nav (gated by
+// `magneto` gene). GOTCHA: M4 widened 4 -> 9; magneto added 2 -> 11. Old saved nets zero-padded for new
+// columns on load, see Genome::ensure_net_shape.
 pub const GLOBAL_INPUTS: usize = 11;
-pub const CONE_HALF: f32 = 0.7; // sensor field-of-view half-angle (rad)
+pub const CONE_HALF: f32 = 0.7; // sensor FOV half-angle (rad)
 const RANGE_MIN: f32 = 4.0;
-const RANGE_MAX: f32 = 48.0; // long-range vision is possible (big world); its energy cost is the trade-off (see sim SENSE_COST)
+const RANGE_MAX: f32 = 48.0; // long-range vision possible (big world); energy cost = trade-off (see sim SENSE_COST)
 
-// One directional food-eye. angle = offset from heading; range = how far it sees.
+// One directional food-eye. angle = offset from heading; range = sight distance.
 #[derive(Clone, Copy, Serialize, Deserialize)]
 pub struct Sensor {
     pub angle: f32,
     pub range: f32,
 }
 
-// Layered weights. ih: HIDDEN rows, each (n_in + 1) incl. bias. ho: OUTPUTS rows, each (HIDDEN + 1).
+// Layered weights. ih: HIDDEN rows, each (n_in + 1) incl. trailing bias. ho: OUTPUTS rows, each (HIDDEN + 1).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Net {
     pub ih: Vec<Vec<f32>>,
@@ -47,54 +46,54 @@ pub struct Genome {
     pub net: Net,        // initial weights (heritable priors)
     pub plast: Net,      // per-weight plasticity 0..1, same shape as net
     #[serde(default = "default_uptake")]
-    pub uptake: [f32; NUTRIENTS], // gene i = absorption affinity + DEMAND for nutrient i. The "10 genes":
-                                  // many high = generalist (needs varied diet + costly machinery); few = specialist
-                                  // (cheap, needs little, but fragile if that nutrient's food vanishes). They feed
-                                  // the master expression gene (computed per-life from reserves x uptake, see DietState).
+    pub uptake: [f32; NUTRIENTS], // gene i = absorption affinity + DEMAND for nutrient i ("10 genes").
+                                  // Many high = generalist (varied diet + costly machinery); few = specialist
+                                  // (cheap, fragile if that nutrient's food vanishes). Feed master expression
+                                  // gene (per-life from reserves x uptake, see DietState).
     pub rigidity: f32,       // 0=flexible generalist .. 1=pinned specialist (koala)
     pub bite: f32,           // 0..1 eating strength vs plant defense (arms race, see 13); costs energy
     #[serde(default)]
-    pub height: f32,         // 0..1 body height/reach: tall reaches fruit trees but costs upkeep (no free lunch)
+    pub height: f32,         // 0..1 body height/reach: tall reaches fruit trees, costs upkeep (no free lunch)
     #[serde(default = "half")]
-    pub light_pref: f32,     // 0=night .. 1=full sun; being far from preferred light costs energy (diurnal/nocturnal niche)
+    pub light_pref: f32,     // 0=night .. 1=full sun; far from preferred light costs energy (diurnal/nocturnal niche)
     #[serde(default = "third")]
-    pub size: f32,           // 0..1 body mass: more energy store + combat power, but higher basal + move upkeep
+    pub size: f32,           // 0..1 body mass: more energy store + combat power, higher basal + move upkeep
     #[serde(default)]
-    pub swim: f32,           // 0..1 aquatic adaptation: fast + cheap in water/wet lowland, clumsy + costly on dry land
+    pub swim: f32,           // 0..1 aquatic: fast+cheap in water/wet lowland, clumsy+costly on dry land
     #[serde(default)]
-    pub social: f32,         // 0..1 herd instinct: near genetic KIN = predation safety (vigilance); ISOLATED = loneliness energy drain. Drives flocking + speciation; punishes the lone cannibal.
+    pub social: f32,         // 0..1 herd instinct: near KIN = predation safety (vigilance); ISOLATED = loneliness energy drain. Drives flocking + speciation; punishes lone cannibal.
     #[serde(default = "half")]
-    pub temp_pref: f32,      // 0=cold-adapted (poles) .. 1=warm-adapted (equator). Local temp far from this costs energy. Drives a LATITUDINAL niche: poles harsh but uncrowded, equator mild but contested (no free lunch).
+    pub temp_pref: f32,      // 0=cold (poles) .. 1=warm (equator). Local temp far from this costs energy. LATITUDINAL niche: poles harsh+uncrowded, equator mild+contested (no free lunch).
     #[serde(default = "half")]
-    pub longevity: f32,      // 0..1 life-history axis: high = long life (aging slows) but higher basal upkeep; low = short fast life, cheap to run. Default 0.5 = current lifespan + no extra cost (so old saves are unchanged).
+    pub longevity: f32,      // 0..1 life-history: high = long life (aging slows) + higher basal; low = short fast cheap life. Default 0.5 = current lifespan + no extra cost (old saves unchanged).
     #[serde(default = "half")]
-    pub metab: f32,          // 0..1 metabolic tempo: high = frugal (cheaper basal) but sluggish (slower top speed); low = fast (higher top speed) but costly to run. Default 0.5 = neutral (no change), so old saves are unchanged.
+    pub metab: f32,          // 0..1 metabolic tempo: high = frugal (cheaper basal) but sluggish (slower top speed); low = fast (higher top speed) but costly. Default 0.5 = neutral (old saves unchanged).
     #[serde(default = "half")]
-    pub parental: f32,       // 0..1 r/K life-history: 0 = r-strategist (breed young + cheap + many small fragile young), 1 = K-strategist (breed late + costly + few well-provisioned young). Scales repro threshold/cost/birth-energy/maturity. Default 0.5 = current values (neutral), so old saves are unchanged.
+    pub parental: f32,       // 0..1 r/K: 0 = r (breed young+cheap, many small fragile young), 1 = K (breed late+costly, few provisioned young). Scales repro threshold/cost/birth-energy/maturity. Default 0.5 = neutral (old saves unchanged).
     #[serde(default = "zero")]
-    pub alpine: f32,         // 0..1 mountain adaptation: high = cheap rock/highland crossing (climber) but a heavy-build penalty on flat ground; low = lowland-light. Mirror of swim for mountains. Default 0 = neutral (no relief, no penalty), so old saves are unchanged.
+    pub alpine: f32,         // 0..1 mountain: high = cheap highland crossing (climber) + heavy-build penalty on flat; low = lowland-light. Mirror of swim for mountains. Default 0 = neutral (old saves unchanged).
     #[serde(default = "half")]
-    pub adiposity: f32,      // 0..1 fat-storage strategy: high = big fat reserve + easy storage (survives famine) but sluggish (fat mobilizes slow) + carrying-fat upkeep; low = lean/nimble + cheap but famine-fragile. Default 0.5 = baseline.
+    pub adiposity: f32,      // 0..1 fat storage: high = big reserve (survives famine) but sluggish (fat mobilizes slow) + carry upkeep; low = lean+cheap but famine-fragile. Default 0.5 = baseline.
 
-    // --- M4 creature expansion (all #[serde(default)] -> neutral, so old saves load unchanged) ---
+    // --- M4 creature expansion (all #[serde(default)] -> neutral, old saves load unchanged) ---
     #[serde(default = "d30")]
-    pub detox: f32,          // 0..1 toxin-clearance: high = clears toxic_load fast + eats toxic plants/rotten meat safely (costs liver upkeep DETOX_COST); low = cheap but poisons easily. Default 0.3.
+    pub detox: f32,          // 0..1 toxin-clearance: high = clears toxic_load fast + eats toxic plants/rotten meat safely (liver upkeep DETOX_COST); low = cheap but poisons easily. Default 0.3.
     #[serde(default = "d30")]
-    pub carnivory: f32,      // 0..1 gut axis herbivore..carnivore: high = digests meat/protein well but poor at plant sugar; low = opposite. Central to rabbit starvation (lean-meat protein cap). Default 0.3.
+    pub carnivory: f32,      // 0..1 gut herbivore..carnivore: high = digests meat/protein, poor at plant sugar; low = opposite. Central to rabbit starvation (lean-meat protein cap). Default 0.3.
     #[serde(default = "d20")]
-    pub pelt: f32,           // 0..1 hair/fur cover: insulation cuts cold-side temp cost; costs heat-side cost + swim drag + basal upkeep. Default 0.2.
+    pub pelt: f32,           // 0..1 fur cover: insulation cuts cold-side temp cost; costs heat-side + swim drag + basal. Default 0.2.
     #[serde(default = "zero")]
-    pub armor: f32,          // 0..1 body armor: lowers predation success against it; costs move + basal upkeep. Default 0.
+    pub armor: f32,          // 0..1 body armor: lowers predation success vs it; costs move + basal. Default 0.
     #[serde(default = "zero")]
-    pub venom: f32,          // 0..1 toxic flesh: a predator eating it takes a toxic_load hit (deterrent); costs basal upkeep + aposematic look. Default 0.
+    pub venom: f32,          // 0..1 toxic flesh: predator eating it takes toxic_load hit (deterrent); costs basal + aposematic look. Default 0.
     #[serde(default = "d40")]
-    pub limbs: f32,          // 0..1 -> 2..8 walking legs: more limbs = land traction (speed/stability on rough ground); costs more move energy per limb. Default 0.4 (~4 legs).
+    pub limbs: f32,          // 0..1 -> 2..8 legs: more = land traction (speed/stability on rough ground); costs move energy per limb. Default 0.4 (~4 legs).
     #[serde(default = "zero")]
-    pub climb: f32,          // 0..1 tree-climbing: reach fruit trees w/o tall height + tree-refuge predation safety; costs penalty on open flat ground (arboreal build). Default 0.
+    pub climb: f32,          // 0..1 tree-climbing: reach fruit trees w/o tall height + tree-refuge safety; costs penalty on open flat (arboreal build). Default 0.
     #[serde(default = "d40")]
-    pub eyes: f32,           // 0..1 -> 1..6 eyes: small detection bonus (slightly extends effective sense); per-eye upkeep. Default 0.4.
+    pub eyes: f32,           // 0..1 -> 1..6 eyes: small detection bonus (extends effective sense); per-eye upkeep. Default 0.4.
     #[serde(default = "d40")]
-    pub head: f32,           // 0..1 head size: bigger head houses brain cheaper (cuts per-neuron BRAIN_COST); head mass adds basal. Default 0.4.
+    pub head: f32,           // 0..1 head size: bigger houses brain cheaper (cuts per-neuron BRAIN_COST); head mass adds basal. Default 0.4.
     #[serde(default = "d40")]
     pub skin_hue: f32,       // 0..1 base body hue (render). Default 0.4.
     #[serde(default = "half")]
@@ -102,9 +101,9 @@ pub struct Genome {
     #[serde(default = "zero")]
     pub pattern: f32,        // 0..1 markings intensity: stripes/spots (render). Default 0.
     #[serde(default = "zero")]
-    pub magneto: f32,        // 0..1 magnetoreception switch: above a soft knee, feeds 2 brain inputs (magnetic
-                             // latitude "map" + compass heading) for navigation; costs MAG_COST upkeep
-                             // (magnetite organ + neural processing). Default 0 = sense off (old saves unchanged).
+    pub magneto: f32,        // 0..1 magnetoreception switch: above soft knee, feeds 2 brain inputs (mag_lat
+                             // "map" + compass heading) for nav; costs MAG_COST upkeep (magnetite organ +
+                             // neural processing). Default 0 = sense off (old saves unchanged).
 }
 
 // serde defaults for traits absent in old saves
@@ -117,7 +116,7 @@ fn third() -> f32 {
 fn zero() -> f32 {
     0.0
 }
-// extra neutral defaults for the M4 creature-expansion genes (so old saves load unchanged)
+// neutral defaults for M4 creature-expansion genes (old saves load unchanged)
 fn d20() -> f32 {
     0.2
 }
@@ -127,27 +126,27 @@ fn d30() -> f32 {
 fn d40() -> f32 {
     0.4
 }
-// serde default for uptake on saves predating the nutrient genome: a mid generalist (all nutrients
-// absorbed moderately) so old creatures load as functional omnivores.
+// serde default uptake for saves predating nutrient genome: mid generalist (all absorbed moderately) ->
+// old creatures load as functional omnivores.
 fn default_uptake() -> [f32; NUTRIENTS] {
     [0.5; NUTRIENTS]
 }
 
-// Master digestion expression: the single gene the 10 uptake genes feed. A gene that absorbs nutrient i
-// also DEMANDS it (demand = uptake_i). Expression = demand-weighted mean of how stocked each demanded
-// reserve is (reserves_i vs RESERVE_REQ). High when every demanded nutrient is in stock -> rewards a diet
-// that covers what the creature is built to use. Floored so a creature is never fully shut off. No uptake
-// at all -> falls to the floor (an undifferentiated gut digests poorly). Gates energy extraction (see sim).
+// Master digestion expression: single gene the 10 uptake genes feed. Absorbing nutrient i also DEMANDS it
+// (demand = uptake_i). Expression = demand-weighted mean of how stocked each demanded reserve is (reserves_i
+// vs RESERVE_REQ). High when every demanded nutrient stocked -> rewards diet matching what creature uses.
+// Floored so never fully shut off. No uptake -> falls to floor (undifferentiated gut digests poorly). Gates
+// energy extraction (see sim).
 pub fn master_expression(uptake: &[f32; NUTRIENTS], reserves: &[f32; NUTRIENTS], req: f32, floor: f32) -> f32 {
     let mut wsum = 0.0;
     let mut sat = 0.0;
     for i in 0..NUTRIENTS {
         let demand = uptake[i];
         wsum += demand;
-        sat += demand * (reserves[i] / req).min(1.0); // satisfaction of this demand, capped at 1
+        sat += demand * (reserves[i] / req).min(1.0); // demand satisfaction, capped at 1
     }
     if wsum < 1e-3 {
-        return floor; // no uptake genes -> undifferentiated gut -> poor baseline digestion
+        return floor; // no uptake -> undifferentiated gut -> poor baseline digestion
     }
     (sat / wsum).max(floor)
 }
@@ -156,21 +155,21 @@ pub fn n_inputs(n_sensors: usize) -> usize {
     n_sensors * SIG_PER_SENSOR + GLOBAL_INPUTS
 }
 
-/// Magnetoreception expression from the `magneto` gene: a soft switch (smoothstep over a 0.2..0.6 knee).
-/// Below the knee the sense is effectively off (0), above it full (1). Scales the 2 magnetic brain inputs
-/// AND the MAG_COST upkeep, so a half-built organ gives little signal for partial cost (selection sharpens it).
+/// Magnetoreception expression from `magneto` gene: soft switch (smoothstep over 0.2..0.6 knee). Below
+/// knee sense off (0), above it full (1). Scales the 2 magnetic brain inputs AND MAG_COST upkeep, so
+/// half-built organ gives little signal for partial cost (selection sharpens it).
 pub fn mag_expression(magneto: f32) -> f32 {
     let t = ((magneto - 0.2) / 0.4).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
 }
 
-// Pad every ih row to `want_in` input columns (excl. the trailing +1 bias), inserting `fill` for each new
-// column right before the bias weight. Used by ensure_net_shape to migrate older, narrower saved nets.
+// Pad every ih row to `want_in` input columns (excl. trailing +1 bias), inserting `fill` per new column
+// right before bias weight. Used by ensure_net_shape to migrate older, narrower saved nets.
 fn pad_ih_inputs(net: &mut Net, want_in: usize, fill: f32) {
     for row in net.ih.iter_mut() {
         let have_in = row.len().saturating_sub(1); // row = input cols + 1 trailing bias
         if have_in < want_in {
-            let at = row.len() - 1; // insert before the trailing bias weight
+            let at = row.len() - 1; // insert before trailing bias weight
             for _ in 0..(want_in - have_in) {
                 row.insert(at, fill);
             }
@@ -178,21 +177,21 @@ fn pad_ih_inputs(net: &mut Net, want_in: usize, fill: f32) {
     }
 }
 
-// Migration default biases for outputs ADDED after a seed was saved. A migrated creature must behave like it did
-// before the new outputs existed: combat + effort OFF (strong negative bias -> sigmoid ~0, so no unearned
-// ATTACK_COST / SPRINT_COST / brace-drag), but EAT ON (positive bias -> sigmoid ~1, so it still feeds on contact
-// like the pre-eat-gate code). Fresh founders use random_net instead (varied combat outputs) so emergence works.
-// Indices: [thrust, turn, attack, defend, eat, sprint]; 0/1 are never padded (always present).
+// Migration default biases for outputs ADDED after a seed saved. Migrated creature must behave as before
+// new outputs existed: combat+effort OFF (strong negative bias -> sigmoid ~0, no unearned ATTACK_COST /
+// SPRINT_COST / brace-drag), EAT ON (positive bias -> sigmoid ~1, still feeds on contact like pre-eat-gate
+// code). Fresh founders use random_net instead (varied combat outputs) so emergence works. Indices:
+// [thrust, turn, attack, defend, eat, sprint]; 0/1 never padded (always present).
 const OUTPUT_MIGRATE_BIAS: [f32; OUTPUTS] = [0.0, 0.0, -4.0, -4.0, 4.0, -4.0];
 
-// Grow a NET's ho layer up to want_rows (migrating a seed saved when OUTPUTS was smaller, e.g. pre-combat 2-output
-// nets). A new output row is hidden+1 long (matches the live hidden count): zero hidden->output weights + a
-// per-output default bias so the migrated output defaults off/on sensibly. No-op when ho already has enough rows.
+// Grow NET ho layer to want_rows (migrate seed saved when OUTPUTS smaller, e.g. pre-combat 2-output nets).
+// New output row = hidden+1 long (matches live hidden count): zero hidden->output weights + per-output
+// default bias so migrated output defaults off/on sensibly. No-op when ho already has enough rows.
 fn pad_net_ho(net: &mut Net, want_rows: usize) {
     if net.ho.is_empty() {
         return;
     }
-    let row_len = net.ho[0].len(); // hidden + 1 (trailing bias), matches the live hidden count
+    let row_len = net.ho[0].len(); // hidden + 1 (trailing bias), matches live hidden count
     while net.ho.len() < want_rows {
         let idx = net.ho.len();
         let mut row = vec![0.0; row_len];
@@ -201,8 +200,8 @@ fn pad_net_ho(net: &mut Net, want_rows: usize) {
     }
 }
 
-// Grow a PLAST net's ho layer: new rows are uniformly small-plasticity, so the migrated outputs CAN be tuned by
-// lifetime learning (drift off their default bias once a reward signal favors using them).
+// Grow PLAST ho layer: new rows = uniform small-plasticity, so migrated outputs CAN be tuned by lifetime
+// learning (drift off default bias once reward favors using them).
 fn pad_plast_ho(plast: &mut Net, want_rows: usize) {
     if plast.ho.is_empty() {
         return;
@@ -231,8 +230,8 @@ impl Genome {
             .collect();
         let n_in = n_inputs(n_sensors);
         let n_hidden = 3 + (rng.f32() * 4.0) as usize; // 3..6 to start; evolves via add/remove_hidden
-        // uptake: sparse-ish founders -> ~1/3 of nutrients absorbed strongly, rest weakly, so founders
-        // span specialists..partial-generalists and selection can broaden or narrow the gut.
+        // uptake: sparse-ish founders -> ~1/3 nutrients absorbed strongly, rest weakly, so founders span
+        // specialists..partial-generalists and selection can broaden or narrow the gut.
         let mut uptake = [0.0f32; NUTRIENTS];
         for u in uptake.iter_mut() {
             *u = if rng.f32() < 0.35 { rng.f32() } else { rng.f32() * 0.2 };
@@ -249,26 +248,26 @@ impl Genome {
             size: rng.range(0.2, 0.6),
             swim: rng.f32() * 0.3,
             social: rng.f32(),
-            temp_pref: rng.f32(), // founders span cold..warm preferences -> spread across latitudes
+            temp_pref: rng.f32(), // founders span cold..warm -> spread across latitudes
             longevity: rng.f32(),
             metab: rng.f32(),
             parental: rng.f32(),
-            alpine: rng.f32(), // founders span lowland..mountain builds -> a highland niche can emerge
-            adiposity: rng.f32(), // founders span lean..fatty storage strategies
-            // M4 creature expansion: founders span the full range of each new axis so selection has variation
-            detox: rng.f32() * 0.5,   // mostly low-detox founders (cheap), a few tolerant
+            alpine: rng.f32(), // founders span lowland..mountain -> highland niche can emerge
+            adiposity: rng.f32(), // span lean..fatty storage
+            // M4: founders span full range per new axis so selection has variation
+            detox: rng.f32() * 0.5,   // mostly low-detox (cheap), few tolerant
             carnivory: rng.f32(),     // span herbivore..carnivore guts
-            pelt: rng.f32() * 0.5,    // mostly light coats to start
-            armor: rng.f32() * 0.3,   // mostly unarmored founders
-            venom: rng.f32() * 0.2,   // mostly non-toxic founders
+            pelt: rng.f32() * 0.5,    // mostly light coats
+            armor: rng.f32() * 0.3,   // mostly unarmored
+            venom: rng.f32() * 0.2,   // mostly non-toxic
             limbs: rng.f32(),         // span few..many limbs
-            climb: rng.f32() * 0.4,   // mostly ground-dwellers, a few climbers
+            climb: rng.f32() * 0.4,   // mostly ground-dwellers, few climbers
             eyes: rng.f32(),          // span eye counts
             head: rng.range(0.3, 0.7),// mid heads (brain housing)
-            skin_hue: rng.f32(),      // span the color wheel
+            skin_hue: rng.f32(),      // span color wheel
             skin_sat: rng.range(0.3, 0.9),
             pattern: rng.f32() * 0.6, // span plain..marked
-            magneto: rng.f32() * 0.3, // mostly sense-off founders, a few magnetoreceptive -> selection can switch it on
+            magneto: rng.f32() * 0.3, // mostly sense-off, few magnetoreceptive -> selection can switch on
         }
     }
 
@@ -276,10 +275,9 @@ impl Genome {
         self.sensors.len()
     }
 
-    // Rebuild net + plast as fresh random weights sized to the CURRENT sensors (+ the existing hidden count).
-    // Used by the scenario harness after overriding `sensors` so the net shape matches before an optional
-    // reflex prior is applied. (A bare scalar-only override keeps the base net, so this is only called when
-    // sensors change.)
+    // Rebuild net + plast as fresh random weights sized to CURRENT sensors (+ existing hidden count). Used
+    // by scenario harness after overriding `sensors` so net shape matches before optional reflex prior.
+    // (Bare scalar-only override keeps base net, so only called when sensors change.)
     pub fn rebuild_random_net(&mut self, rng: &mut Rng) {
         let n_in = n_inputs(self.n_sensors());
         let n_hidden = self.net.ih.len().clamp(MIN_HIDDEN, MAX_HIDDEN);
@@ -287,26 +285,26 @@ impl Genome {
         self.plast = random_net(rng, n_in, n_hidden, true);
     }
 
-    // Migrate a loaded net to the CURRENT input width. New global brain-inputs (M4) widened n_inputs, so an
-    // older saved net has fewer input columns than the live code expects. Insert columns just before each
-    // row's trailing bias weight: net gets 0.0 (new input starts with no influence) and plast gets a small
-    // value (so the new input CAN be learned). Keeps existing learned weights aligned. No-op when the shape
-    // already matches (fresh genomes + births). Also grows ho rows if OUTPUTS expanded since the seed was saved.
+    // Migrate loaded net to CURRENT input width. New M4 global brain-inputs widened n_inputs, so older saved
+    // net has fewer input columns than live code expects. Insert columns before each row's trailing bias: net
+    // gets 0.0 (new input no influence at first), plast gets small value (new input CAN be learned). Keeps
+    // existing learned weights aligned. No-op when shape already matches (fresh genomes + births). Also grows
+    // ho rows if OUTPUTS expanded since seed saved.
     pub fn ensure_net_shape(&mut self) {
         let want = n_inputs(self.n_sensors());
         pad_ih_inputs(&mut self.net, want, 0.0);
         pad_ih_inputs(&mut self.plast, want, 0.2);
-        // ho rows: a pre-combat seed (OUTPUTS 2) gets the 4 new output rows appended (attack/defend/eat/sprint),
-        // net biased to safe defaults (combat off, eat on) + plast learnable. learn() loops ho generically, so
-        // both layers must grow or it indexes plast.ho out of bounds.
+        // ho rows: pre-combat seed (OUTPUTS 2) gets 4 new output rows appended (attack/defend/eat/sprint),
+        // net biased to safe defaults (combat off, eat on) + plast learnable. learn() loops ho generically,
+        // so both layers must grow or it indexes plast.ho out of bounds.
         pad_net_ho(&mut self.net, OUTPUTS);
         pad_plast_ho(&mut self.plast, OUTPUTS);
     }
 
-    // Two-parent recombination (--mating mode). Body STRUCTURE (sensors + brain net/plast) comes from parent
-    // `a` (variable-topology nets can't be crossed cell-by-cell), while the scalar trait genes + diet
-    // expression are uniform-crossed from both parents. The caller mutates the result. With assortative
-    // mate choice (only similar kin mate) this gives reproductive isolation -> speciation.
+    // Two-parent recombination (--mating mode). Body STRUCTURE (sensors + brain net/plast) from parent `a`
+    // (variable-topology nets can't cross cell-by-cell); scalar trait genes + diet uniform-crossed from both.
+    // Caller mutates result. With assortative mate choice (only similar kin mate) -> reproductive isolation
+    // -> speciation.
     pub fn crossover(a: &Genome, b: &Genome, rng: &mut Rng) -> Genome {
         let pick = |rng: &mut Rng, x: f32, y: f32| if rng.f32() < 0.5 { x } else { y };
         let mut c = a.clone();
@@ -343,7 +341,7 @@ impl Genome {
     }
 
     pub fn mutate(&mut self, rng: &mut Rng, rate: f32, std: f32) {
-        // weight perturbation
+        // weights clamped -5..5
         for row in self.net.ih.iter_mut().chain(self.net.ho.iter_mut()) {
             for x in row.iter_mut() {
                 if rng.f32() < rate {
@@ -358,7 +356,7 @@ impl Genome {
                 }
             }
         }
-        // sensor placement
+        // sensor placement: angle wraps pi, range clamps RANGE_MIN..MAX
         for s in &mut self.sensors {
             if rng.f32() < rate {
                 s.angle = wrap_pi(s.angle + rng.normal() * 0.4);
@@ -367,7 +365,7 @@ impl Genome {
                 s.range = (s.range + rng.normal() * 3.5).clamp(RANGE_MIN, RANGE_MAX);
             }
         }
-        // nutrient-uptake genes (the regulatory gut)
+        // nutrient-uptake genes (regulatory gut)
         for u in &mut self.uptake {
             if rng.f32() < rate {
                 *u = (*u + rng.normal() * 0.15).clamp(0.0, 1.0);
@@ -412,7 +410,7 @@ impl Genome {
         if rng.f32() < rate {
             self.adiposity = (self.adiposity + rng.normal() * 0.12).clamp(0.0, 1.0);
         }
-        // M4 creature-expansion genes drift like the rest
+        // M4 genes drift like the rest
         if rng.f32() < rate {
             self.detox = (self.detox + rng.normal() * 0.12).clamp(0.0, 1.0);
         }
@@ -452,14 +450,14 @@ impl Genome {
         if rng.f32() < rate {
             self.magneto = (self.magneto + rng.normal() * 0.12).clamp(0.0, 1.0);
         }
-        // structural: add / remove a sensor (and the matching input-weight columns)
+        // structural: add/remove sensor (+ matching input-weight columns), p=0.06 each
         if rng.f32() < 0.06 && self.sensors.len() < MAX_SENSORS {
             self.add_sensor(rng);
         }
         if rng.f32() < 0.06 && self.sensors.len() > MIN_SENSORS {
             self.remove_sensor(rng);
         }
-        // structural: grow / shrink the HIDDEN layer (brain capacity evolves; per-neuron upkeep is the cost)
+        // structural: grow/shrink HIDDEN layer (brain capacity evolves; per-neuron upkeep = cost), p=0.05 each
         if rng.f32() < 0.05 && self.net.ih.len() < MAX_HIDDEN {
             self.add_hidden(rng);
         }
@@ -468,14 +466,14 @@ impl Genome {
         }
     }
 
-    // Grow the hidden layer by one neuron: a new ih row (input weights) + a new column in every ho row
-    // (its output weights), in both net + plast (kept same shape). Brain rebuilt from genome on spawn.
+    // Grow hidden layer by one neuron: new ih row (input weights) + new column in every ho row (its output
+    // weights), in both net + plast (same shape). Brain rebuilt from genome on spawn.
     fn add_hidden(&mut self, rng: &mut Rng) {
         let n_in1 = self.net.ih[0].len(); // n_in + 1 (incl. bias column)
         self.net.ih.push((0..n_in1).map(|_| rng.range(-1.0, 1.0)).collect());
         self.plast.ih.push((0..n_in1).map(|_| rng.f32() * 0.2).collect());
         for row in &mut self.net.ho {
-            let bias = row.len() - 1; // insert the new hidden->output weight before the bias
+            let bias = row.len() - 1; // insert new hidden->output weight before bias
             row.insert(bias, rng.range(-1.0, 1.0));
         }
         for row in &mut self.plast.ho {
@@ -484,21 +482,21 @@ impl Genome {
         }
     }
 
-    // Shrink the hidden layer: drop a random hidden neuron's ih row + its column in every ho row.
+    // Shrink hidden layer: drop random hidden neuron's ih row + its column in every ho row.
     fn remove_hidden(&mut self, rng: &mut Rng) {
         let h = self.net.ih.len();
         let idx = (rng.f32() * h as f32) as usize % h;
         self.net.ih.remove(idx);
         self.plast.ih.remove(idx);
         for row in &mut self.net.ho {
-            row.remove(idx); // idx < bias position, so this drops that neuron's output weight
+            row.remove(idx); // idx < bias position -> drops that neuron's output weight
         }
         for row in &mut self.plast.ho {
             row.remove(idx);
         }
     }
 
-    // New sensor's two input columns are inserted right before the GLOBAL_INPUTS (energy, bias).
+    // New sensor's 2 input columns inserted right before GLOBAL_INPUTS (energy, ...).
     fn add_sensor(&mut self, rng: &mut Rng) {
         self.sensors.push(Sensor {
             angle: rng.range(-std::f32::consts::PI, std::f32::consts::PI),
@@ -527,7 +525,7 @@ impl Genome {
     }
 }
 
-// Forward pass over a Net for a given input vector. Returns hidden activations + outputs.
+// Forward pass over Net for input vector. Returns (hidden activations, outputs).
 pub fn forward(net: &Net, input: &[f32]) -> (Vec<f32>, [f32; OUTPUTS]) {
     let n_in = input.len();
     let mut h = vec![0.0f32; net.ih.len()];
@@ -548,8 +546,8 @@ pub fn forward(net: &Net, input: &[f32]) -> (Vec<f32>, [f32; OUTPUTS]) {
     }
     out[0] = sigmoid(out[0]); // thrust
     out[1] = out[1].tanh(); // turn
-    // combat/effort intents: attack, defend/brace, eat-gate, sprint. all 0..1 (sigmoid). loop so a future
-    // OUTPUTS bump can't leave a raw unactivated output.
+    // combat/effort intents: attack, defend/brace, eat-gate, sprint. all 0..1 (sigmoid). loop so future
+    // OUTPUTS bump can't leave raw unactivated output.
     for o in out.iter_mut().skip(2) {
         *o = sigmoid(*o);
     }
@@ -557,6 +555,7 @@ pub fn forward(net: &Net, input: &[f32]) -> (Vec<f32>, [f32; OUTPUTS]) {
 }
 
 // Reward-modulated Hebbian (see 04). Moves weights only when reward != 0; plasticity scales per-weight.
+// Loops ho generically -> plast.ho must match net.ho rows (see ensure_net_shape) or indexes OOB.
 pub fn learn(net: &mut Net, plast: &Net, input: &[f32], h: &[f32], out: &[f32; OUTPUTS], reward: f32, lr: f32) {
     let n_in = input.len();
     for (ri, row) in net.ih.iter_mut().enumerate() {
@@ -608,13 +607,13 @@ mod tests {
         let mut uptake = [0.0f32; NUTRIENTS];
         uptake[0] = 1.0;
         uptake[1] = 1.0;
-        // fully stocked on what it demands -> expression ~1
+        // fully stocked on demands -> expression ~1
         let mut full = [0.0f32; NUTRIENTS];
         full[0] = 0.6;
         full[1] = 0.6;
         let m_full = master_expression(&uptake, &full, 0.6, 0.2);
         assert!(m_full > 0.95, "stocked specialist should express ~1, got {m_full}");
-        // missing one demanded nutrient -> expression drops toward half (one of two demands unmet)
+        // missing one demanded nutrient -> expression drops toward half (1 of 2 demands unmet)
         let mut half = [0.0f32; NUTRIENTS];
         half[0] = 0.6; // nutrient 1 empty
         let m_half = master_expression(&uptake, &half, 0.6, 0.2);
@@ -623,14 +622,14 @@ mod tests {
 
     #[test]
     fn ensure_net_shape_pads_old_narrow_nets() {
-        // simulate an OLD save (pre-M4 + pre-magneto: 7 fewer global inputs) by stripping those columns,
-        // then migrate. (5 M4 globals: toxic_load/shade/threat_dist/threat_bear/wet; 2 magneto: lat/compass.)
+        // simulate OLD save (pre-M4 + pre-magneto: 7 fewer global inputs) by stripping columns, then migrate.
+        // 5 M4 globals: toxic_load/shade/threat_dist/threat_bear/wet; 2 magneto: lat/compass.
         let mut rng = Rng::seed(7);
         let mut g = Genome::random(&mut rng);
         let want = n_inputs(g.n_sensors());
         let strip = 7; // 5 M4 globals + 2 magneto globals
         for row in g.net.ih.iter_mut().chain(g.plast.ih.iter_mut()) {
-            let at = row.len() - 1 - strip; // before the trailing bias
+            let at = row.len() - 1 - strip; // before trailing bias
             row.drain(at..at + strip);
         }
         assert!(g.net.ih[0].len() < want + 1, "rows should be too narrow before migration");
@@ -638,14 +637,14 @@ mod tests {
         for row in g.net.ih.iter().chain(g.plast.ih.iter()) {
             assert_eq!(row.len(), want + 1, "every ih row padded to n_inputs + bias");
         }
-        // a forward pass at the current input width must not panic (shape matches)
+        // forward pass at current input width must not panic (shape matches)
         let input = vec![0.0f32; want];
         let _ = forward(&g.net, &input);
     }
 
     #[test]
     fn ensure_net_shape_grows_old_output_rows() {
-        // simulate a PRE-COMBAT save (OUTPUTS was 2) by truncating ho to 2 rows, then migrate to OUTPUTS=6.
+        // simulate PRE-COMBAT save (OUTPUTS was 2) by truncating ho to 2 rows, then migrate to OUTPUTS=6.
         let mut rng = Rng::seed(11);
         let mut g = Genome::random(&mut rng);
         g.net.ho.truncate(2);
@@ -658,7 +657,7 @@ mod tests {
         for row in g.net.ho.iter().chain(g.plast.ho.iter()) {
             assert_eq!(row.len(), hidden_plus_bias, "new output rows are hidden+1 wide");
         }
-        // forward + learn at OUTPUTS=6 must not panic (the migration covers both layers)
+        // forward + learn at OUTPUTS=6 must not panic (migration covers both layers)
         let want = n_inputs(g.n_sensors());
         let input = vec![0.1f32; want];
         let (h, out) = forward(&g.net, &input);

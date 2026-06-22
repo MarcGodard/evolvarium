@@ -1,13 +1,13 @@
-//! Headless CPU snapshot renderer. Ray-traces the planet (no GPU) + overlays entity dots, writes PNGs so
-//! the world can be inspected offline (e.g. by an agent reading the images). Perspective camera; the sphere
-//! is shaded by terrain biome + sun lambert; clouds whiten; creatures/plants/trees draw as colored dots.
+//! Headless CPU snapshot renderer (--shots). Ray-traces planet (no GPU), overlays entity dots, writes PNGs
+//! for offline inspection (agent reads images). CPU proxy of the real scene; capture.rs is the GPU path.
+//! Perspective cam; sphere shaded by biome * sun lambert; clouds whiten; creatures/plants/trees = colored dots.
 use crate::components::{Creature, Food, Rot, Tree};
 use crate::genome::Genome;
 use crate::sim::GenState;
 use crate::sphere::{self, ELEV_MAX, PLANET_R};
 use bevy::prelude::*;
 
-// --shots config: capture a set of planet views to PNG at `at_tick`, then exit.
+// --shots config: render planet view set to PNG at `at_tick`, then exit.
 #[derive(Resource)]
 pub struct ShotCfg {
     pub enabled: bool,
@@ -23,7 +23,7 @@ impl Default for ShotCfg {
 const SHOT_W: u32 = 900;
 const SHOT_H: u32 = 600;
 
-// Headless capture: once gen.tick reaches at_tick, render several views of the planet, save PNGs, exit.
+// Once gen.tick reaches at_tick: render the view set, save PNGs, exit.
 pub fn snapshot_capture(
     gen: Res<GenState>,
     cfg: Res<ShotCfg>,
@@ -37,26 +37,26 @@ pub fn snapshot_capture(
     }
     *done = true;
     let tick = gen.tick;
-    // build the marker list. Creatures are colored by their thermal gene (cold=blue .. warm=red) so the
-    // latitudinal niche is visible at a glance; trees dark green, carrion grey, plants green.
+    // marker list. Creature color = thermal gene (cold blue .. warm red) so latitudinal niche reads at a glance.
+    // trees dark green, carrion grey, plants green.
     let mut dots: Vec<Dot> = Vec::new();
-    // shade each marker by local daylight (same as the globe) so NIGHT entities go dark too -- otherwise
-    // dots glow full-bright on the night side (misleads day/night inspection).
+    // shade markers by local daylight (matches globe) so night entities go dark. else dots glow full-bright
+    // on night side and mislead day/night inspection.
     let sun = sphere::sun_dir(tick);
     let shade_at = |p: Vec3| -> f32 {
         let lam = p.normalize_or_zero().dot(sun).max(0.0);
         0.30 + 0.70 * lam
     };
-    // niche census: count creatures by their evolved niche so biodiversity is quantified, not just drawn.
+    // niche census: count creatures by evolved niche. quantifies biodiversity, not just drawn.
     let (mut cold, mut warm, mut aquatic, mut land, mut frugal, mut fast, mut spec, mut hidden) =
         (0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32);
     let (mut a_temp, mut a_lng, mut a_met, mut a_par, mut a_swim) = (0.0f32, 0.0f32, 0.0f32, 0.0f32, 0.0f32);
     for (t, g) in &creatures {
         let w = g.temp_pref.clamp(0.0, 1.0);
         let color = [
-            (70.0 + (240.0 - 70.0) * w) as u8,  // cold blue -> warm red (R)
-            (120.0 + (90.0 - 120.0) * w) as u8, // (G)
-            (240.0 + (40.0 - 240.0) * w) as u8, // (B)
+            (70.0 + (240.0 - 70.0) * w) as u8,  // R: cold blue -> warm red across temp_pref
+            (120.0 + (90.0 - 120.0) * w) as u8, // G
+            (240.0 + (40.0 - 240.0) * w) as u8, // B
         ];
         let s = shade_at(t.translation);
         let color = [(color[0] as f32 * s) as u8, (color[1] as f32 * s) as u8, (color[2] as f32 * s) as u8];
@@ -65,7 +65,7 @@ pub fn snapshot_capture(
         if g.swim > 0.6 { aquatic += 1; } else if g.swim < 0.3 { land += 1; }
         if g.metab > 0.6 { frugal += 1; } else if g.metab < 0.4 { fast += 1; }
         if g.rigidity > 0.6 { spec += 1; } // diet specialist
-        hidden += g.net.ih.len() as u32; // brain hidden neurons
+        hidden += g.net.ih.len() as u32; // brain hidden-neuron count
         a_temp += g.temp_pref; a_lng += g.longevity; a_met += g.metab; a_par += g.parental; a_swim += g.swim;
     }
     let nc = creatures.iter().count().max(1) as f32;
@@ -111,7 +111,7 @@ pub struct Cam {
     pub fov_deg: f32,
 }
 
-// A projected world marker: position + RGB color + pixel radius.
+// World marker: world pos + RGB color + pixel radius.
 pub struct Dot {
     pub pos: Vec3,
     pub color: [u8; 3],
@@ -123,7 +123,7 @@ fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
     [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]
 }
 
-// Nearest positive ray-sphere (centered at origin, radius R) hit distance.
+// Nearest positive ray-sphere hit distance. Sphere centered at origin, radius r.
 fn ray_sphere(o: Vec3, d: Vec3, r: f32) -> Option<f32> {
     let b = o.dot(d);
     let c = o.length_squared() - r * r;
@@ -139,7 +139,7 @@ fn ray_sphere(o: Vec3, d: Vec3, r: f32) -> Option<f32> {
     }
 }
 
-/// Ray-trace one frame to an RGB8 buffer (row-major, width*height*3).
+/// Ray-trace one frame. Returns RGB8 buffer, row-major, len = width*height*3.
 pub fn render(width: u32, height: u32, cam: &Cam, tick: u32, dots: &[Dot]) -> Vec<u8> {
     let (w, h) = (width as usize, height as usize);
     let fwd = (cam.target - cam.eye).normalize();
@@ -148,12 +148,12 @@ pub fn render(width: u32, height: u32, cam: &Cam, tick: u32, dots: &[Dot]) -> Ve
     let aspect = w as f32 / h as f32;
     let tan = (cam.fov_deg.to_radians() * 0.5).tan();
     let sun = sphere::sun_dir(tick);
-    let space = [4u8, 6, 12]; // near-black sky
+    let space = [4u8, 6, 12]; // near-black sky bg
     let mut buf = vec![0u8; w * h * 3];
     for c in buf.chunks_exact_mut(3) {
         c.copy_from_slice(&space);
     }
-    // planet pass: enlarge the silhouette slightly so mountains don't clip the mean sphere
+    // planet pass: hit radius padded above mean sphere so mountains don't clip the silhouette
     let r_hit = PLANET_R + 0.5 * ELEV_MAX;
     for py in 0..h {
         for px in 0..w {
@@ -164,10 +164,10 @@ pub fn render(width: u32, height: u32, cam: &Cam, tick: u32, dots: &[Dot]) -> Ve
                 let n = (cam.eye + dir * t).normalize();
                 let mut col = sphere::biome_color(n);
                 let lam = n.dot(sun).max(0.0);
-                let shade = 0.30 + 0.70 * lam; // ambient floor so the night side still reads, day side bright
+                let shade = 0.30 + 0.70 * lam; // 0.30 ambient floor (night side reads) .. 1.0 full sun
                 col = [col[0] * shade, col[1] * shade, col[2] * shade];
                 let cloud = sphere::cloud_cover(n, tick);
-                col = lerp3(col, [shade, shade, shade], cloud * 0.75); // clouds whiten, still sun-lit
+                col = lerp3(col, [shade, shade, shade], cloud * 0.75); // clouds whiten toward shade-grey (stay sun-lit)
                 let i = (py * w + px) * 3;
                 buf[i] = (col[0] * 255.0) as u8;
                 buf[i + 1] = (col[1] * 255.0) as u8;
@@ -175,7 +175,7 @@ pub fn render(width: u32, height: u32, cam: &Cam, tick: u32, dots: &[Dot]) -> Ve
             }
         }
     }
-    // entity overlay: project each dot; skip if behind the camera or on the hidden far hemisphere
+    // entity overlay: project each dot. skip if behind camera or on hidden far hemisphere
     for d in dots {
         let rel = d.pos - cam.eye;
         let zc = rel.dot(fwd);
@@ -184,7 +184,7 @@ pub fn render(width: u32, height: u32, cam: &Cam, tick: u32, dots: &[Dot]) -> Ve
         }
         let n = d.pos.normalize_or_zero();
         if n.dot((cam.eye - d.pos).normalize_or_zero()) <= 0.02 {
-            continue; // facing away (occluded by the globe)
+            continue; // far hemisphere, occluded by globe
         }
         let u = ((rel.dot(right) / zc) / (aspect * tan) * 0.5 + 0.5) * w as f32;
         let v = (0.5 - (rel.dot(up) / zc) / tan * 0.5) * h as f32;

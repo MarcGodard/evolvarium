@@ -150,7 +150,11 @@ design work:
 
 ## Conventions
 
-- Comments follow the existing verbose-prose style in this repo (match surrounding code).
+- Comments are written for an AI agent, never a human (this code is AI-built only). Caveman-lite: drop
+  articles/filler/hedging, fragments OK. Keep only NON-obvious info an AI can't recover by reading the code:
+  why a constant has its value, balance trade-offs, units/ranges (0..1, radians, ticks), cross-file coupling,
+  invariants, gotchas, spec/milestone refs. DELETE comments that just restate what the next line does. Same
+  rule applies to `///` docs and module-header blocks. See the caveman-lite section in the workspace CLAUDE.md.
 - No em/en dashes in generated text; use commas/periods/colons or "and".
 - Balance-affecting sim changes (rain, mortality, reproduction) are sensitive: verify headless population
   stays stable (~70-90 carrying capacity) before committing. Genome/NN-architecture changes invalidate saved

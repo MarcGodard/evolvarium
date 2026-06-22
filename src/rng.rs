@@ -1,5 +1,5 @@
-// Deterministic PRNG (PCG32). Self-contained, seedable, portable = reproducible runs.
-// Placeholder until bevy_rand per-entity streams land (see 09-open-questions, 11-crate-stack).
+// Deterministic PRNG (PCG32). Self-contained + seedable + portable = reproducible runs (key for evolution determinism).
+// Placeholder until bevy_rand per-entity streams land. See 09-open-questions, 11-crate-stack.
 use bevy::prelude::*;
 use std::f32::consts::TAU;
 
@@ -36,7 +36,7 @@ impl Rng {
         a + (b - a) * self.f32()
     }
 
-    // Standard normal via Box-Muller. For weight mutation.
+    // Standard normal via Box-Muller. Used for NN weight mutation.
     pub fn normal(&mut self) -> f32 {
         let u1 = self.f32().max(1e-7);
         let u2 = self.f32();
