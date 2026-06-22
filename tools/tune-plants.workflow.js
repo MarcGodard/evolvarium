@@ -82,9 +82,11 @@ THE HARNESS:
   births, deaths, r (births/deaths; aim >= 1), mean_growth_rate, deaths_by_cause {moisture,temp,drown,
   desiccate,habitat,fire,eaten}, trait_drift {gene:[seeded_mean,survivor_mean]}, health_score, best_genomes.
 
-OBJECTIVE (maximize health_score, which rewards survival * growth-toward-30 * R>=1):
-  1) survival_rate high, 2) peak_count reaches target_count (30), 3) R >= 1 (self-sustaining),
-  4) hold the niche identity (a tree stays a tree, an aquatic stays aquatic).
+OBJECTIVE: maximize health_score in [0,1] = (final_count/target, capped at 1) * (0.5 + 0.5*min(R,1)).
+  So: fill toward the target by the END (sustained, not a transient peak) AND be self-sustaining (R>=1).
+  The cohort population is capped cohort-scale (~2x target), so survived/peak are cohort-scale (not the
+  global cap). Once a config is fully adapted health saturates at 1.0 -> rank ties by mean_mass (vigor) +
+  fewest deaths. Also hold the niche identity (a tree stays a tree, an aquatic stays aquatic).
 
 METHOD (iterate ~4-6 rounds):
   - Start from the niche's archetype + band. Run 3 seeds. Read deaths_by_cause to see WHY it dies:

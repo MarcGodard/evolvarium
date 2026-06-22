@@ -101,6 +101,8 @@ pub struct ScenarioStats {
     pub deaths: u32,
     pub deaths_by_cause: HashMap<String, u32>,
     pub peak_count: usize,
+    pub cap: usize, // cohort-scale population cap (= ~2x target_count) so a viable cohort grows toward the
+    // target + shows vigor WITHOUT booming to the global PLANT_CAP (which saturated every metric).
     pub seeded: Vec<PlantGenome>, // the applied cohort genomes (for trait-drift baseline)
 }
 
@@ -213,6 +215,8 @@ pub fn spawn_scenario_world(
         }
     }
     stats.started = stats.seeded.len();
+    // cap the cohort near the target so it grows toward the goal + shows vigor, not boom to PLANT_CAP.
+    stats.cap = (cfg.scenario.target_count * 2).max(20);
 
     // optional grazing pressure: a few random creatures placed in the band (continuous off -> they don't reseed)
     for _ in 0..w.grazers {
@@ -345,10 +349,13 @@ pub fn scenario_step(
     }
 
     let r = stats.births as f32 / stats.deaths.max(1) as f32; // reproductive success over the run
-    let survival_rate = survived as f32 / stats.started.max(1) as f32;
-    let grow_term = (stats.peak_count as f32 / target as f32).min(1.0);
+    // health_score in [0,1]: did the cohort FILL toward the target by the end (sustained, not a transient
+    // peak that then crashed) AND is it self-sustaining (R>=1). final_fill saturates at the target, so a
+    // cohort holding ~target with R>=1 scores ~1.0; one dying back or barely surviving scores low. Bounded
+    // so candidates rank cleanly (the old survived/started ratio overflowed once the cohort reproduced).
+    let final_fill = (survived as f32 / target as f32).min(1.0);
     let r_term = 0.5 + 0.5 * r.min(1.0);
-    let health_score = survival_rate * grow_term * r_term;
+    let health_score = final_fill * r_term;
 
     best.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
     let best_genomes: Vec<BestGenome> = best.into_iter().take(12).map(|(mass, genome, tree)| BestGenome { genome, mass, tree }).collect();

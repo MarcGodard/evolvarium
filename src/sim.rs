@@ -1214,7 +1214,12 @@ pub fn plant_step(
 ) {
     soil.decay(); // fertility leaches / is taken up over time
     // scenario mode: no PLANT_MIN reseed (the cohort IS the only plants); normal mode keeps the floor.
-    let reseed_floor = if stats.is_some() { 0 } else { PLANT_MIN };
+    // Population caps are cohort-scale in scenario mode (stats.cap ~ 2x target) so a viable cohort grows
+    // toward its target + shows vigor instead of booming to the global PLANT_CAP/TREE_CAP.
+    let (reseed_floor, pcap, tcap) = match stats.as_ref() {
+        Some(s) => (0, s.cap, s.cap),
+        None => (PLANT_MIN, PLANT_CAP, TREE_CAP),
+    };
     // season drifts on the global tick clock (advances in both modes; generation is frozen in continuous)
     let season = (gen.tick as f32 / GEN_TICKS as f32 * SEASON_FREQ).sin(); // -1 dry .. +1 wet
     let mut plant_count = q.iter().filter(|(.., t)| t.is_none()).count();
@@ -1312,7 +1317,7 @@ pub fn plant_step(
             }
             let ambient = mature && local <= TREE_MAX_LOCAL && rng.f32() < P_TREE_REPRO * fert_boost;
             let disperse = mature && tree.edible && grazed && rng.f32() < P_TREE_EAT_DISPERSE; // seed carried off
-            if (ambient || disperse) && tree_count + tree_births.len() < TREE_CAP {
+            if (ambient || disperse) && tree_count + tree_births.len() < tcap {
                 let base = eff_spread(g); // wind/weight shape reach (samara flies, acorn drops); animal-carry adds more
                 let spread = if disperse { base * TREE_EAT_SPREAD_MULT } else { base };
                 let pos = disperse_pos(&mut rng, ppos, spread, FOOD_Y);
@@ -1417,7 +1422,7 @@ pub fn plant_step(
         if mature
             && g.fruiting > 0.2
             && tree_bites.0.contains_key(&e)
-            && plant_count + births.len() < PLANT_CAP
+            && plant_count + births.len() < pcap
             && rng.f32() < P_PLANT_EAT_DISPERSE * g.fruiting * (1.0 - g.toxicity)
         {
             let mut child = g.clone();
@@ -1432,7 +1437,7 @@ pub fn plant_step(
         // aspen). Lets a plant dominate ground clonally; pays in growth (growth_rate cost) + parent mass.
         if mature
             && g.clonal > 0.0
-            && plant_count + births.len() < PLANT_CAP
+            && plant_count + births.len() < pcap
             && rng.f32() < P_CLONAL * g.clonal
         {
             let pos = disperse_pos(&mut rng, ppos, CLONAL_RADIUS, FOOD_Y);
@@ -1446,7 +1451,7 @@ pub fn plant_step(
         // Flat per-tick chance (abstracts animal traffic; no proximity scan). Independent of fruiting/toxicity.
         if mature
             && g.cling > 0.0
-            && plant_count + births.len() < PLANT_CAP
+            && plant_count + births.len() < pcap
             && rng.f32() < P_CLING * g.cling
         {
             let mut child = g.clone();
@@ -1457,7 +1462,7 @@ pub fn plant_step(
             }
         }
         if mature
-            && plant_count + births.len() < PLANT_CAP
+            && plant_count + births.len() < pcap
             && rng.f32() < P_REPRO * (1.0 - DEF_REPRO_COST * g.defense)
         {
             let mut child = g.clone();
@@ -1489,7 +1494,7 @@ pub fn plant_step(
     let mut germinated: Vec<(PlantGenome, Vec3)> = Vec::new();
     bank.0.retain_mut(|(g, pos, ticks)| {
         *ticks = ticks.saturating_sub(1);
-        if *ticks == 0 && plant_count + births.len() + germinated.len() < PLANT_CAP {
+        if *ticks == 0 && plant_count + births.len() + germinated.len() < pcap {
             germinated.push((g.clone(), *pos));
             false // sprouted -> remove from the bank
         } else {
