@@ -114,6 +114,15 @@ fn main() {
         scenario::merge_result_into_library(&rp, &niche, &lib_path, cap);
         return;
     }
+    // --merge-snapshot=run.json: harvest a whole-planet co-evolution run's surviving plants into the library,
+    // biome-labeled (+ --niche-suffix, default "-coevo"), then exit. Pairs with a normal --headless --save run.
+    if let Some(sp) = args.iter().find_map(|a| a.strip_prefix("--merge-snapshot=").map(String::from)) {
+        let cap = args.iter().find_map(|a| a.strip_prefix("--lib-cap=").and_then(|s| s.parse::<usize>().ok())).unwrap_or(8);
+        let suffix = args.iter().find_map(|a| a.strip_prefix("--niche-suffix=").map(String::from)).unwrap_or_else(|| "-coevo".into());
+        let lib_path = plant_lib.clone().unwrap_or_else(|| DEFAULT_PLANT_LIB.into());
+        scenario::merge_snapshot_into_library(&sp, &lib_path, cap, &suffix);
+        return;
+    }
 
     let mut app = App::new();
     // crisp directional shadows (default 2048 is soft at planet scale)

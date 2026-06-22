@@ -262,6 +262,54 @@ pub struct ScenarioResult {
     pub best_genomes: Vec<BestGenome>,
 }
 
+// Classify a plant genome into a biome niche label from its OWN adapted prefs (temp_pref/wet/submerged/
+// light_pref), mirroring sim::plant_for_site's biome logic. Used by the whole-planet co-evolution harvest:
+// a survivor's genome self-describes which biome it adapted to, so we tag it without needing its position.
+fn biome_label(g: &PlantGenome) -> &'static str {
+    if g.submerged > 0.5 || g.wet > 0.85 {
+        if g.light_pref < 0.4 {
+            "deep-kelp"
+        } else {
+            "shallow-sunlit"
+        }
+    } else if g.temp_pref < 0.34 {
+        "polar-alpine"
+    } else if g.wet < 0.32 {
+        "arid-desert"
+    } else if g.wet > 0.68 {
+        "tropical-wet"
+    } else {
+        "temperate-meadow"
+    }
+}
+
+// CLI (--merge-snapshot): harvest the surviving plants of a whole-planet co-evolution run (a --save snapshot)
+// into the library, biome-labeled by each genome's own prefs (+ a `suffix`, e.g. "-coevo", so they coexist
+// with the isolated entries for comparison). Tree-like genomes (maturity in the tree range) are skipped:
+// SavedPlant carries no Tree marker, so they can't be re-seeded as trees. score = mass -> merge keeps the
+// most vigorous per biome.
+pub fn merge_snapshot_into_library(snap_path: &str, lib_path: &str, per_niche_cap: usize, suffix: &str) {
+    let snap = match crate::persist::load_snapshot(snap_path) {
+        Some(s) => s,
+        None => {
+            println!("merge-snapshot: snapshot load failed ({})", snap_path);
+            return;
+        }
+    };
+    let entries: Vec<crate::persist::LibEntry> = snap
+        .plants
+        .iter()
+        .filter(|sp| sp.g.maturity < 8.0) // skip tree-like genomes (trees clamp maturity >= 8; ground plants <= 10)
+        .map(|sp| crate::persist::LibEntry { niche: format!("{}{}", biome_label(&sp.g), suffix), tree: false, score: sp.mass, genome: sp.g.clone(), missing: Vec::new() })
+        .collect();
+    let added = entries.len();
+    let mut lib = crate::persist::load_plant_library(lib_path).unwrap_or_default();
+    lib.version = 1;
+    lib.merge_in(entries, per_niche_cap);
+    crate::persist::save_plant_library(lib_path, &lib);
+    println!("merge-snapshot: harvested {} ground plants from {} -> {} now has {} entries", added, snap_path, lib_path, lib.entries.len());
+}
+
 // CLI (--merge): fold a scenario result's best survivor genomes into the plant seed-bank library under
 // `niche`, accumulating across runs (load existing -> merge -> keep best per niche -> save). The harness
 // synthesize stage calls this once per tuned cohort. Gene-agnostic end to end (genomes carry every gene).
@@ -283,7 +331,7 @@ pub fn merge_result_into_library(result_path: &str, niche: &str, lib_path: &str,
     let entries: Vec<crate::persist::LibEntry> = res
         .best_genomes
         .into_iter()
-        .map(|b| crate::persist::LibEntry { niche: niche.to_string(), tree: b.tree, score: res.health_score, genome: b.genome })
+        .map(|b| crate::persist::LibEntry { niche: niche.to_string(), tree: b.tree, score: res.health_score, genome: b.genome, missing: Vec::new() })
         .collect();
     let added = entries.len();
     let mut lib = crate::persist::load_plant_library(lib_path).unwrap_or_default();
