@@ -681,22 +681,23 @@ impl PlantGenome {
     }
 }
 
-// Plant render color encodes its genome: hue by kind, but tinted by nutrient (brighter = richer)
-// and defense (toward red = tougher). Makes food variability visible at a glance.
+// Foliage color is APOSEMATIC: hue encodes TOXICITY so danger reads at a glance (a real warning palette,
+// like nightshade + poison frogs). Safe (low toxicity) = leafy GREEN; rising toxicity sweeps the warning
+// colors green -> yellow -> orange -> red -> violet (deadliest). leaf_hue jitters within the band for
+// per-plant variety; nutrient brightens; toxic plants are extra-saturated (bold warning). Bright, never
+// drab/muddy. (Creatures learn which plants to avoid by taste + selection; this shows that to the player.)
 pub fn plant_color(g: &PlantGenome) -> Color {
-    let base_hue = match g.kind as usize % NFOOD {
-        0 => 130.0,
-        1 => 285.0,
-        2 => 45.0,
-        _ => 190.0,
+    let tox = g.toxicity.clamp(0.0, 1.0);
+    // green(130) at safe .. red(0) at tox 0.7, then wrap 360 -> 285 violet for the most toxic 0.7..1.0
+    let warn = if tox <= 0.7 {
+        130.0 * (1.0 - tox / 0.7)
+    } else {
+        360.0 - 75.0 * ((tox - 0.7) / 0.3)
     };
-    // leaf_hue gene jitters the family hue (+/-35 deg) -> foliage variety: yellow-green grass, blue-green
-    // succulents, deep-green ferns, straw-dry weeds, all within the same family.
-    let leaf_jit = (g.leaf_hue - 0.5) * 70.0;
-    let hue = base_hue + leaf_jit - 40.0 * g.defense + 60.0 * g.toxicity; // tough -> warmer; toxic -> purple warning
-    let light = 0.35 + 0.35 * g.nutrient; // richer plants brighter
-    let sat = 0.35 + 0.55 * g.quality; // tastier (digestible) plants more vivid; tough/fibrous = washed out
-    Color::hsl(hue.rem_euclid(360.0), sat, light)
+    let hue = (warn + (g.leaf_hue - 0.5) * 36.0).rem_euclid(360.0); // +/-18 deg per-plant variety
+    let sat = (0.6 + 0.4 * tox).min(1.0); // vivid; toxic = boldest warning
+    let light = 0.45 + 0.22 * g.nutrient; // bright (richer = brighter), never near-black/muddy
+    Color::hsl(hue, sat, light)
 }
 
 // Petal color for a flowering plant's bloom child. Fully genetic HSL: flower_hue spans the whole wheel,

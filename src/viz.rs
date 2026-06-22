@@ -5,7 +5,7 @@
 // All cosmetic; never touches sim state.
 use bevy::prelude::*;
 
-use crate::components::{Alive, Creature, DietState, Energy, Fitness, Food, Grass, Heading, Rot, Tree};
+use crate::components::{Alive, Creature, DietState, Energy, Fitness, Food, Grass, Heading, Rot, Seed, Tree};
 use crate::genome::{master_expression, Genome, NFOOD, NUTRIENTS};
 use crate::plant::{flower_color, form, plant_color, PlantGenome, PlantState};
 use crate::sim::{grid_cell_surface, Fire, GenState, GroundWater, ROT_GONE};
@@ -163,10 +163,10 @@ fn add_plant_visuals(
     forms: Option<Res<PlantForms>>,
     trees: Option<Res<TreeMeshes>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    q: Query<(Entity, &PlantGenome, Option<&Tree>), (With<Food>, Without<Mesh3d>, Without<Grass>)>, // grass has its own visuals (add_grass_visuals)
+    q: Query<(Entity, &PlantGenome, Option<&Tree>, Option<&Seed>), (With<Food>, Without<Mesh3d>, Without<Grass>)>, // grass has its own visuals (add_grass_visuals)
 ) {
     let Some(forms) = forms else { return };
-    for (e, g, tree) in &q {
+    for (e, g, tree, seed) in &q {
         // tree = a brown trunk (this entity) + a canopy child. Fruit trees get a round broadleaf crown
         // (greener + a hint of the genome's leaf hue), evergreens a dark cone. Trees ignore `form`.
         if let (Some(t), Some(tm)) = (tree, &trees) {
@@ -235,9 +235,18 @@ fn add_plant_visuals(
             g.form,
             form::FERN | form::REED | form::KELP | form::ROSETTE | form::LILYPAD | form::GROUNDCOVER | form::MOSS
         );
+        // a fallen FRUIT (carries a Seed) renders as a BRIGHT fruity blob (ripe colors) so it pops on the
+        // ground + reads as food, not foliage. Living plants use the aposematic foliage color (toxicity).
+        let body_color = if seed.is_some() {
+            let c = flower_color(g).to_srgba(); // reuse the bright genetic palette for varied ripe-fruit color
+            Color::srgb(c.red, c.green, c.blue)
+        } else {
+            plant_color(g)
+        };
         let mat = materials.add(StandardMaterial {
-            base_color: plant_color(g),
+            base_color: body_color,
             perceptual_roughness: 0.9,
+            emissive: if seed.is_some() { LinearRgba::rgb(0.10, 0.06, 0.0) } else { LinearRgba::BLACK }, // fruit glows a touch
             double_sided: leafy, // thin leaf/frond/disc meshes render from both faces
             cull_mode: if leafy { None } else { Some(bevy::render::render_resource::Face::Back) },
             ..default()
@@ -269,11 +278,31 @@ fn add_plant_visuals(
                 ))
                 .id();
             commands.entity(e).add_child(child);
+            // bright YELLOW center disc sitting on the petals (classic flower: glowing center + colorful petals).
+            // Reuses the small berry sphere; emissive so it reads as a sunny eye even in shade.
+            let bloom = 0.28 + 0.45 * g.flower;
+            let center = commands
+                .spawn((
+                    Mesh3d(forms.berry.clone()),
+                    MeshMaterial3d(materials.add(StandardMaterial {
+                        base_color: Color::srgb(1.0, 0.86, 0.12),
+                        emissive: LinearRgba::rgb(0.55, 0.42, 0.0),
+                        ..default()
+                    })),
+                    Transform::from_xyz(0.0, top + 0.16 * bloom, 0.0).with_scale(Vec3::splat(0.5 * bloom)),
+                ))
+                .id();
+            commands.entity(e).add_child(center);
         }
-        // berry children for a fruiting land bush (red clusters); skip aquatic/flat forms
+        // berry children for a fruiting land bush; skip aquatic/flat forms. Bright ripe-berry colors that pop:
+        // toxic berries warn deep magenta/violet, edible ones glow ripe red/orange (a little emissive sheen).
         if g.fruiting > 0.3 && matches!(g.form, form::SHRUB | form::HERB | form::FLOWER_STALK) {
-            let berry = if g.toxicity > 0.5 { Color::srgb(0.25, 0.0, 0.35) } else { Color::srgb(0.7, 0.06, 0.16) };
-            let bmat = materials.add(berry);
+            let (berry, bem) = if g.toxicity > 0.5 {
+                (Color::srgb(0.62, 0.05, 0.78), LinearRgba::rgb(0.20, 0.0, 0.28)) // toxic: vivid violet warning
+            } else {
+                (Color::srgb(0.95, 0.12, 0.18), LinearRgba::rgb(0.30, 0.02, 0.0)) // ripe: bright red
+            };
+            let bmat = materials.add(StandardMaterial { base_color: berry, emissive: bem, ..default() });
             for k in 0..3 {
                 let a = k as f32 * 2.0944; // 120 deg
                 let c = commands
