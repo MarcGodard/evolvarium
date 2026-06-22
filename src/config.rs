@@ -198,8 +198,14 @@ pub const FERMENT_START: f32 = 0.25;        // rot fraction where fermentation b
 pub const FERMENT_END: f32 = 0.70;          // rot fraction where it spoils (after: toxic, near-zero yield)
 pub const FRUIT_FAST_GAIN: f32 = 22.0;      // fast energy per (mass*nutrient) from fermented fruit
 pub const DETRITUS_FAST_GAIN: f32 = 5.0;    // fast energy from fermented detritus (<< fruit: poor, scrappy)
-pub const FERMENT_TOX_FRUIT: f32 = 0.15;    // toxicity scale of fermented fruit (low: ripe ethanol)
 pub const FERMENT_TOX_DETRITUS: f32 = 0.85; // toxicity scale of fermented detritus (high: rotten sludge)
+// Fruit ripeness (seed development). A fallen fruit's Rot clock now also models RIPENING: before RIPEN_FRAC
+// the fruit is UNRIPE -- the seed is not viable yet (eating it disperses NOTHING, the seed is destroyed) and
+// the flesh is bitter + carries the plant's fruit_toxicity (protects the developing seed). Past RIPEN_FRAC the
+// fruit is ripe: sweet, detoxified, and eating it DISPERSES the seed (animal-carried). Tension: too-palatable
+// unripe fruit gets eaten early (lost reproduction); too-toxic ripe fruit poisons dispersers -> interior optimum.
+pub const RIPEN_FRAC: f32 = 0.12;       // rot fraction at which the seed becomes viable + the fruit sweetens
+pub const UNRIPE_YIELD: f32 = 0.25;     // sugar an UNRIPE fruit yields vs ripe (low: not worth eating early)
 
 // --- rot chain (P3): dead creature -> carrion -> poison -> gone ---
 pub const CARRION_KIND: u8 = 0; // meat = food type 0 (couples to diet expr only via sensing, not digestion)

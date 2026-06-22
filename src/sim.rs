@@ -3,7 +3,7 @@
 use bevy::prelude::*;
 use std::collections::{HashMap, HashSet};
 
-use crate::components::{Alive, Brain, Creature, DietState, Energy, Ferment, Fitness, Food, Grass, Heading, Locomotion, Rot, Tree};
+use crate::components::{Alive, Brain, Creature, DietState, Energy, Ferment, Fitness, Food, Grass, Heading, Locomotion, Rot, Seed, Tree};
 use crate::genome::{forward, learn, master_expression, Genome, CONE_HALF, GLOBAL_INPUTS, NFOOD, NUTRIENTS, SIG_PER_SENSOR};
 use crate::plant::{PlantGenome, PlantState, P_REPRO, PLANT_CAP, PLANT_MIN};
 use crate::rng::Rng;
@@ -583,6 +583,7 @@ fn spawn_carrion(commands: &mut Commands, pos: Vec3, mass: f32) {
             maturity: 999.0, // never reproduces via plant_step (also excluded by Without<Rot>)
             nutrients: [0.0; NUTRIENTS], // unused: meat tops reserves flat (balanced tissue), separate eat branch
             toxicity: 0.0,
+            fruit_toxicity: 0.0,
             // new genes: all neutral/off for carrion (it never grows, reproduces, or renders as a plant)
             temp_pref: 0.5,
             succulence: 0.0,
@@ -726,6 +727,7 @@ pub(crate) fn tree_genome(rng: &mut Rng) -> PlantGenome {
         // fruit trees are nutrient-rich (fruit is good food): a broad, generous profile + low toxicity
         nutrients: [0.55; NUTRIENTS],
         toxicity: rng.f32() * 0.15,
+        fruit_toxicity: rng.f32() * 0.4, // fruit trees protect unripe fruit; ripens sweet for dispersal
         // trees: warm-ish climate niche, fruit-bearing crown, occasional blossom; form ignored (Tree marker)
         temp_pref: rng.range(0.4, 0.8),
         succulence: 0.0,
@@ -803,10 +805,20 @@ fn site_plant(rng: &mut Rng, lib: Option<&crate::persist::PlantLibrary>, d: Vec3
     if let Some(l) = lib {
         if let Some(mut g) = l.pick_for_site(rng, d, false) {
             g.mutate(rng);
-            return g;
+            randomize_flower_color(&mut g, rng); // library genomes predate the bloom sat/light genes -> all bloom
+            return g; // the same dull color; re-roll the COSMETIC flower color so the world seeds in varied bright hues
         }
     }
     plant_for_site(rng, d)
+}
+
+// Give a seeded plant a fresh BRIGHT flower color (cosmetic only, zero sim cost). Used on library draws whose
+// saved genomes lack the flower_sat/flower_light genes (they load at a flat default -> identical dull blooms).
+// flower_hue is full-wheel; sat/light span their bright sub-ranges in plant::flower_color -> any vivid color.
+fn randomize_flower_color(g: &mut PlantGenome, rng: &mut Rng) {
+    g.flower_hue = rng.f32();
+    g.flower_sat = rng.f32();
+    g.flower_light = rng.f32();
 }
 
 // Same, for trees (Tree marker). Draws a tuned tree genome biome-matched; else a fresh founding tree genome.
@@ -814,6 +826,7 @@ fn site_tree(rng: &mut Rng, lib: Option<&crate::persist::PlantLibrary>, d: Vec3)
     if let Some(l) = lib {
         if let Some(mut g) = l.pick_for_site(rng, d, true) {
             g.mutate_tree(rng);
+            randomize_flower_color(&mut g, rng); // varied bright blossoms (also re-rolls the blossom-presence hue)
             return g;
         }
     }
@@ -1493,7 +1506,7 @@ pub fn plant_step(
             && g.fruiting > 0.2
             && tree_bites.0.contains_key(&e)
             && plant_count + births.len() < pcap
-            && rng.f32() < P_PLANT_EAT_DISPERSE * g.fruiting * (1.0 - g.toxicity)
+            && rng.f32() < P_PLANT_EAT_DISPERSE * g.fruiting * (1.0 - g.fruit_toxicity)
         {
             let child = mate_or_self(&mate_pool, e, ppos, g, false, &mut rng);
             let pos = disperse_pos(&mut rng, ppos, eff_spread(g) * PLANT_EAT_SPREAD_MULT, FOOD_Y);
@@ -1584,12 +1597,17 @@ pub fn plant_step(
     // fruit drops: a mature fruit tree drops a fruit nearby. Fallen fruit is a Food carrying the tree's
     // genome (rich + sugary) + a Rot clock + Ferment -> fresh = sugar, ferments to FAST energy, then gone.
     for (g, pos) in fruit_drops {
+        // ferment/unripe toxicity is now the plant's genetic fruit_toxicity (not a constant). The Seed carries
+        // the FULL parent genome so a ripe-eaten fruit plants a true offspring; the Food genome stays height/
+        // defense-zeroed so the fruit renders flat on the ground and any creature can eat it.
+        let ftox = g.fruit_toxicity;
         commands.spawn((
             Food,
             PlantState { mass: FALLEN_FRUIT_MASS, age: 0 },
-            PlantGenome { defense: 0.0, height: 0.0, ..g }, // on the ground: no reach/defense, keeps nutrient/quality
+            PlantGenome { defense: 0.0, height: 0.0, ..g.clone() },
+            Seed(g),
             Rot { age: 0 },
-            Ferment { toxic: FERMENT_TOX_FRUIT },
+            Ferment { toxic: ftox },
             Transform::from_translation(pos),
         ));
     }
@@ -1724,7 +1742,7 @@ pub fn live_step(
     mut tree_bites: ResMut<TreeBites>,
     mut soil: ResMut<Soil>,
     fire: Res<Fire>,
-    fq: Query<(Entity, &Transform, &PlantState, &PlantGenome, Option<&Rot>, Option<&Tree>, Option<&Ferment>), (With<Food>, Without<Creature>)>,
+    fq: Query<(Entity, &Transform, &PlantState, &PlantGenome, Option<&Rot>, Option<&Tree>, Option<&Ferment>, Option<&Seed>), (With<Food>, Without<Creature>)>,
 ) {
     let dt = DT;
     let ntypes = gen.ntypes();
@@ -1735,10 +1753,10 @@ pub fn live_step(
     // snapshot: (entity, pos, genome, mass, rot_age, tree, ferment_toxic). rot_age=Some + ferment=None ->
     // animal carrion (meat); rot_age=Some + ferment=Some -> fermenting plant matter (fruit/detritus);
     // tree=Some(edible) -> a tree; else a living plant.
-    let foods: Vec<(Entity, Vec3, PlantGenome, f32, Option<u32>, Option<bool>, Option<f32>)> = fq
+    let foods: Vec<(Entity, Vec3, PlantGenome, f32, Option<u32>, Option<bool>, Option<f32>, Option<PlantGenome>)> = fq
         .iter()
-        .map(|(e, t, st, pg, rot, tree, ferment)| {
-            (e, t.translation, pg.clone(), st.mass, rot.map(|r| r.age), tree.map(|t| t.edible), ferment.map(|f| f.toxic))
+        .map(|(e, t, st, pg, rot, tree, ferment, seed)| {
+            (e, t.translation, pg.clone(), st.mass, rot.map(|r| r.age), tree.map(|t| t.edible), ferment.map(|f| f.toxic), seed.map(|s| s.0.clone()))
         })
         .collect();
     let mut eaten: HashSet<Entity> = HashSet::new();
@@ -1937,6 +1955,7 @@ pub fn live_step(
             let rot_age = foods[i].4;
             let tree = foods[i].5; // None=plant/carrion, Some(true)=fruit tree, Some(false)=evergreen
             let ferment = foods[i].6; // Some(toxic) -> fermenting plant matter (fruit/detritus); None+rot -> meat
+            let seed = foods[i].7.clone(); // Some(genome) -> fallen fruit carrying a viable seed (planted if eaten ripe)
             if np.distance(fp) < EAT_RADIUS {
                 // trees: a creature reaches an EDIBLE tree if its height + TREE_REACH_MARGIN, EXTENDED by
                 // the tree's branches (BRANCH_REACH), >= the tree's height. So a tall bare tree feeds only
@@ -1989,7 +2008,27 @@ pub fn live_step(
                         // fast-energy yield is whichever source this is (fruit rich, detritus poor)
                         let fast_gain = if pg.nutrient >= DETRITUS_NUTRIENT + 0.05 { FRUIT_FAST_GAIN } else { DETRITUS_FAST_GAIN };
                         if f < FERMENT_START {
-                            // fresh: a sugary plant (gated by eff + tops nutrient reserves)
+                            if seed.is_some() {
+                                // FRUIT, pre-ferment: a RIPENESS gradient. r=0 just-dropped (unripe) .. 1 ripe at
+                                // RIPEN_FRAC. Unripe = little sugar + the genetic fruit_toxicity (`toxic`); ripening
+                                // sweetens + detoxifies, so ripe fruit is sweet + safe EVEN IF the plant body is toxic
+                                // (fruit toxicity decoupled from body). Eating unripe is bitter/poisonous -> the brain
+                                // learns to wait, and the despawn block destroys the unripe seed (no reproduction).
+                                let r = (f / RIPEN_FRAC).min(1.0);
+                                let yield_mult = UNRIPE_YIELD + (1.0 - UNRIPE_YIELD) * r;
+                                let wasted = energy.add_sugar(EAT_GAIN * base * yield_mult * eff, SUGAR_CAP, fat_max);
+                                diet.g += wasted * OVEREAT_G;
+                                fit.0 += base * yield_mult * eff;
+                                if gen.diet {
+                                    // tops reserves (ripe fruit nutrition); discard absorb's body-toxin (fruit uses its own)
+                                    let _ = absorb_and_toxin(&mut diet.reserves, &genome.uptake, &pg, soil_f, base * yield_mult);
+                                }
+                                let toxin = TOXIN_MAX * toxic * (1.0 - r); // full fruit_toxicity unripe -> ~0 when ripe
+                                energy.burn(toxin);
+                                diet.g += toxin * TOXIN_G;
+                                eat_reward = if r < 1.0 { -1.0 + r } else { R_EAT }; // unripe bad, ripe good
+                            } else {
+                            // fresh detritus/greens (no seed): a sugary plant (gated by eff + tops nutrient reserves)
                             let wasted = energy.add_sugar(EAT_GAIN * base * eff, SUGAR_CAP, fat_max);
                             diet.g += wasted * OVEREAT_G;
                             fit.0 += base * eff;
@@ -1999,6 +2038,7 @@ pub fn live_step(
                                 diet.g += toxin * TOXIN_G;
                             }
                             eat_reward = R_EAT;
+                            }
                         } else {
                             // ferment-ness ramps 0->1 across the window, then spoilage kills the yield. Ethanol
                             // is empty calories: FAST energy, no nutrient reserves (fermentation degrades them).
@@ -2063,8 +2103,20 @@ pub fn live_step(
                     // the grazing recorded above, and plant_step despawns any grazed below its min mass.
                     if tree.is_none() {
                         eaten.insert(e); // prevent same-tick re-eat
-                        if rot_age.is_some() {
-                            commands.entity(e).despawn(); // carrion consumed
+                        if let Some(seed_g) = seed {
+                            // FALLEN FRUIT: eaten whole (despawn). If it was RIPE (past RIPEN_FRAC) the seed is
+                            // viable -> it passes through the eater + is planted nearby (endozoochory). Eaten
+                            // UNRIPE the seed isn't developed -> nothing is planted (eating early = no reproduction).
+                            let f = rot_age.map(|a| a as f32 / ROT_GONE as f32).unwrap_or(0.0);
+                            if f >= RIPEN_FRAC && foods.len() < PLANT_CAP && rng.f32() < pg.quality * SEED_VIA_GUT {
+                                let mut child = seed_g.clone();
+                                child.mutate(&mut rng);
+                                let sp = disperse_pos(&mut rng, np, seed_g.spread, FOOD_Y); // carried + dropped nearby
+                                spawn_plant(&mut commands, child, PLANT_START_MASS, sp);
+                            }
+                            commands.entity(e).despawn();
+                        } else if rot_age.is_some() {
+                            commands.entity(e).despawn(); // carrion / detritus consumed whole
                         } else if foods.len() < PLANT_CAP && rng.f32() < pg.quality * SEED_VIA_GUT {
                             // endozoochory (13): grazing a living plant may disperse a mutated offspring
                             let mut child = pg.clone();

@@ -74,7 +74,11 @@ pub struct PlantGenome {
     pub nutrients: [f32; NUTRIENTS], // genetic baseline production per nutrient (sparse: a plant is rich in a few).
                                      // Effective output at eat-time = this x soil fertility (richer ground -> more).
     #[serde(default)]
-    pub toxicity: f32, // 0..1 genetic toxin load: deters eaters (energy hit + growth-load) but costs growth.
+    pub toxicity: f32, // 0..1 genetic toxin load of the PLANT BODY: deters grazers (energy hit + growth-load), costs growth.
+    #[serde(default)]
+    pub fruit_toxicity: f32, // 0..1 toxin load of UNRIPE fruit (separate from body toxicity). High = protects the
+                             // developing seed (eaten-early fruit poisons + yields little), but RIPENING detoxifies,
+                             // so ripe fruit is sweet + disperses the seed. Costs a little growth.
 
     // --- climate + survival genes (affect sim AND visuals) ---
     #[serde(default = "half_light")]
@@ -184,6 +188,7 @@ impl PlantGenome {
             maturity: rng.range(2.0, 6.0),
             nutrients,
             toxicity: rng.f32() * 0.3, // most plants mildly toxic; evolves up as a defense (costs growth)
+            fruit_toxicity: rng.f32() * 0.4, // unripe-fruit protection; evolves to an interior optimum
             temp_pref: rng.f32(),
             succulence: rng.f32() * 0.3,
             submerged: 0.0,
@@ -513,6 +518,7 @@ impl PlantGenome {
             maturity: 1.0, // matures fast
             nutrients,
             toxicity: 0.0,
+            fruit_toxicity: 0.0, // grass doesn't fruit
             temp_pref: 0.5, // climate-tolerant turf
             succulence: 0.0,
             submerged: 0.0,
@@ -553,6 +559,7 @@ impl PlantGenome {
             *n = (*n + rng.normal() * 0.1).clamp(0.0, 1.0);
         }
         self.toxicity = (self.toxicity + rng.normal() * 0.08).clamp(0.0, 1.0);
+        self.fruit_toxicity = (self.fruit_toxicity + rng.normal() * 0.08).clamp(0.0, 1.0);
         // blossom variety drifts on trees (flowering/fruit trees); form is fixed (trees use the Tree marker)
         self.temp_pref = (self.temp_pref + rng.normal() * 0.08).clamp(0.0, 1.0);
         self.fruiting = (self.fruiting + rng.normal() * 0.1).clamp(0.0, 1.0);
@@ -589,6 +596,7 @@ impl PlantGenome {
             *n = (*n + rng.normal() * 0.1).clamp(0.0, 1.0);
         }
         self.toxicity = (self.toxicity + rng.normal() * 0.08).clamp(0.0, 1.0);
+        self.fruit_toxicity = (self.fruit_toxicity + rng.normal() * 0.08).clamp(0.0, 1.0);
         // new genes drift; form stays fixed (visual species identity), submerged drifts only a little
         self.temp_pref = (self.temp_pref + rng.normal() * 0.08).clamp(0.0, 1.0);
         self.succulence = (self.succulence + rng.normal() * 0.08).clamp(0.0, 1.0);
@@ -625,7 +633,7 @@ impl PlantGenome {
         pick!(kind); pick!(form);
         pick!(nutrient); pick!(defense); pick!(quality); pick!(wet); pick!(height);
         pick!(light_pref); pick!(regrow); pick!(branches); pick!(spread); pick!(maturity);
-        pick!(toxicity); pick!(temp_pref); pick!(succulence); pick!(submerged); pick!(fruiting);
+        pick!(toxicity); pick!(fruit_toxicity); pick!(temp_pref); pick!(succulence); pick!(submerged); pick!(fruiting);
         pick!(nitrogen_fix); pick!(fire_seed); pick!(climb); pick!(allelopathy);
         pick!(seed_weight); pick!(windborne); pick!(clonal); pick!(cling); pick!(dormancy); pick!(hydrochory);
         pick!(flower); pick!(flower_hue); pick!(flower_sat); pick!(flower_light); pick!(leaf_hue); pick!(bushiness); pick!(droop);
@@ -667,7 +675,8 @@ impl PlantGenome {
                 // burrs/hooks, a dormant seed coat, and a buoyant seed each cost a little growth
                 - 0.06 * self.cling
                 - 0.08 * self.dormancy
-                - 0.05 * self.hydrochory)
+                - 0.05 * self.hydrochory
+                - 0.04 * self.fruit_toxicity)
                 .clamp(0.12, 1.0)
     }
 }

@@ -38,6 +38,13 @@ pub struct Ferment {
     pub toxic: f32,
 }
 
+// The viable seed a fallen fruit carries: the PARENT'S FULL genome. The fruit's own Food genome is height/
+// defense-zeroed (so it renders flat on the ground + anyone can eat it), so the real genes ride here. When a
+// creature eats a RIPE fruit (past RIPEN_FRAC), this genome is planted nearby (animal dispersal). Eaten unripe
+// -> the seed is not yet viable, so there is no Seed to plant (no reproduction).
+#[derive(Component)]
+pub struct Seed(pub crate::plant::PlantGenome);
+
 // Three energy currencies (metabolic stores), each a distinct burn/storage trade-off (no free lunch):
 //   fast  = fermented-fruit / ethanol: burned FIRST + leaks even at rest, tiny cap -> can't bank, quick power.
 //   sugar = staple (plants deliver ONLY sugar): medium burn, medium cap.
