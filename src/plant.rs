@@ -127,7 +127,11 @@ pub struct PlantGenome {
     #[serde(default)]
     pub flower: f32, // 0..1 bloom presence/size (render: a colored bloom child).
     #[serde(default = "half_light")]
-    pub flower_hue: f32, // 0..1 petal hue (x360).
+    pub flower_hue: f32, // 0..1 petal hue (x360). Spans the full color wheel.
+    #[serde(default = "half_light")]
+    pub flower_sat: f32, // 0..1 petal saturation -> mapped to a BRIGHT range (vivid..pure), never dull/grey.
+    #[serde(default = "half_light")]
+    pub flower_light: f32, // 0..1 petal lightness -> mapped to a BRIGHT range (rich..pale), never dark.
     #[serde(default = "half_light")]
     pub leaf_hue: f32, // 0..1 foliage hue jitter (variety on top of the family hue).
     #[serde(default = "half_light")]
@@ -198,6 +202,8 @@ impl PlantGenome {
             form: (rng.f32() * 8.0) as u8 % 8,
             flower: rng.f32() * 0.5,
             flower_hue: rng.f32(),
+            flower_sat: rng.f32(),
+            flower_light: rng.f32(),
             leaf_hue: rng.f32(),
             bushiness: rng.f32(),
             droop: rng.f32() * 0.3,
@@ -524,6 +530,8 @@ impl PlantGenome {
             form: form::GROUNDCOVER,
             flower: 0.0,
             flower_hue: 0.3,
+            flower_sat: 0.7,
+            flower_light: 0.6,
             leaf_hue: 0.33, // green
             bushiness: 0.5,
             droop: 0.0,
@@ -557,6 +565,8 @@ impl PlantGenome {
         self.hydrochory = (self.hydrochory + rng.normal() * 0.08).clamp(0.0, 1.0);
         self.flower = (self.flower + rng.normal() * 0.1).clamp(0.0, 1.0);
         self.flower_hue = (self.flower_hue + rng.normal() * 0.08).clamp(0.0, 1.0);
+        self.flower_sat = (self.flower_sat + rng.normal() * 0.08).clamp(0.0, 1.0);
+        self.flower_light = (self.flower_light + rng.normal() * 0.08).clamp(0.0, 1.0);
         self.leaf_hue = (self.leaf_hue + rng.normal() * 0.05).clamp(0.0, 1.0);
     }
 
@@ -596,6 +606,8 @@ impl PlantGenome {
         self.hydrochory = (self.hydrochory + rng.normal() * 0.08).clamp(0.0, 1.0);
         self.flower = (self.flower + rng.normal() * 0.1).clamp(0.0, 1.0);
         self.flower_hue = (self.flower_hue + rng.normal() * 0.08).clamp(0.0, 1.0);
+        self.flower_sat = (self.flower_sat + rng.normal() * 0.08).clamp(0.0, 1.0);
+        self.flower_light = (self.flower_light + rng.normal() * 0.08).clamp(0.0, 1.0);
         self.leaf_hue = (self.leaf_hue + rng.normal() * 0.05).clamp(0.0, 1.0);
         self.bushiness = (self.bushiness + rng.normal() * 0.08).clamp(0.0, 1.0);
         self.droop = (self.droop + rng.normal() * 0.06).clamp(0.0, 1.0);
@@ -616,7 +628,7 @@ impl PlantGenome {
         pick!(toxicity); pick!(temp_pref); pick!(succulence); pick!(submerged); pick!(fruiting);
         pick!(nitrogen_fix); pick!(fire_seed); pick!(climb); pick!(allelopathy);
         pick!(seed_weight); pick!(windborne); pick!(clonal); pick!(cling); pick!(dormancy); pick!(hydrochory);
-        pick!(flower); pick!(flower_hue); pick!(leaf_hue); pick!(bushiness); pick!(droop);
+        pick!(flower); pick!(flower_hue); pick!(flower_sat); pick!(flower_light); pick!(leaf_hue); pick!(bushiness); pick!(droop);
         for i in 0..NUTRIENTS {
             c.nutrients[i] = if rng.f32() < 0.5 { a.nutrients[i] } else { b.nutrients[i] };
         }
@@ -678,8 +690,14 @@ pub fn plant_color(g: &PlantGenome) -> Color {
     Color::hsl(hue.rem_euclid(360.0), sat, light)
 }
 
-// Petal color for a flowering plant's bloom child. flower_hue spans the full wheel (any petal color).
+// Petal color for a flowering plant's bloom child. Fully genetic HSL: flower_hue spans the whole wheel,
+// flower_sat + flower_light each map to a BRIGHT sub-range so a flower can evolve to ANY bright color
+// (vivid pure hue, soft pastel, rich jewel tone) but never a dull/grey/dark muddy one. Old saves default
+// the genes to 0.5 -> sat 0.78, light 0.65, i.e. the previous fixed look.
 pub fn flower_color(g: &PlantGenome) -> Color {
-    Color::hsl((g.flower_hue * 360.0).rem_euclid(360.0), 0.75, 0.65)
+    let hue = (g.flower_hue * 360.0).rem_euclid(360.0);
+    let sat = 0.55 + 0.45 * g.flower_sat; // 0.55 .. 1.0: always colorful
+    let light = 0.50 + 0.30 * g.flower_light; // 0.50 .. 0.80: always bright, never near-black/near-white
+    Color::hsl(hue, sat, light)
 }
 

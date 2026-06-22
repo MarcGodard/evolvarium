@@ -601,6 +601,8 @@ fn spawn_carrion(commands: &mut Commands, pos: Vec3, mass: f32) {
             form: crate::plant::form::HERB,
             flower: 0.0,
             flower_hue: 0.5,
+            flower_sat: 0.5,
+            flower_light: 0.5,
             leaf_hue: 0.5,
             bushiness: 0.5,
             droop: 0.0,
@@ -742,6 +744,8 @@ pub(crate) fn tree_genome(rng: &mut Rng) -> PlantGenome {
         form: crate::plant::form::SHRUB,
         flower: rng.f32() * 0.6, // some trees blossom (render: crown bloom ring)
         flower_hue: rng.f32(),
+        flower_sat: rng.f32(),
+        flower_light: rng.f32(),
         leaf_hue: rng.range(0.3, 0.45),
         bushiness: rng.range(0.4, 0.8),
         droop: 0.0,
