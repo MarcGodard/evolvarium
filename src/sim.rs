@@ -393,6 +393,65 @@ fn eff_spread(g: &PlantGenome) -> f32 {
     (g.spread * (1.0 + WIND_RANGE * g.windborne) * (1.0 - SEED_DRAG * g.seed_weight)).max(0.5)
 }
 
+// Plant genetic distance for the species concept (--mating). 0 = identical, larger = more diverged. A `kind`
+// mismatch alone (0.5) already exceeds PLANT_SPECIES_SIM, so different food families never cross (hard gate);
+// within a family, distance is the mean gap across the ecologically meaningful genes. Under PLANT_SPECIES_SIM
+// the two are the same species -> cross-compatible. Drift past it -> reproductive isolation -> speciation.
+fn plant_gene_dist(a: &PlantGenome, b: &PlantGenome) -> f32 {
+    let kind = if a.kind != b.kind { 0.5 } else { 0.0 };
+    let pairs = [
+        (a.nutrient, b.nutrient), (a.defense, b.defense), (a.quality, b.quality), (a.wet, b.wet),
+        (a.height, b.height), (a.light_pref, b.light_pref), (a.temp_pref, b.temp_pref),
+        (a.submerged, b.submerged), (a.fruiting, b.fruiting), (a.toxicity, b.toxicity),
+    ];
+    let sum: f32 = pairs.iter().map(|(x, y)| (x - y).abs()).sum();
+    kind + sum / pairs.len() as f32
+}
+
+// Find the nearest cross-compatible mate for a seeding plant: same reproductive class (plant vs tree), within
+// PLANT_MATE_RADIUS, genetic distance under PLANT_SPECIES_SIM, not itself. None -> selfing. mate_pool is
+// (entity, pos, is_tree, genome), built once per tick only in --mating mode.
+fn find_plant_mate<'a>(
+    pool: &'a [(Entity, Vec3, bool, PlantGenome)],
+    me: Entity,
+    pos: Vec3,
+    g: &PlantGenome,
+    is_tree: bool,
+) -> Option<&'a PlantGenome> {
+    let r2 = PLANT_MATE_RADIUS * PLANT_MATE_RADIUS;
+    pool.iter()
+        .filter(|(e, p, t, mg)| {
+            *e != me && *t == is_tree && pos.distance_squared(*p) < r2 && plant_gene_dist(g, mg) < PLANT_SPECIES_SIM
+        })
+        .min_by(|a, b| {
+            pos.distance_squared(a.1).partial_cmp(&pos.distance_squared(b.1)).unwrap()
+        })
+        .map(|(_, _, _, mg)| mg)
+}
+
+// Produce a child genome for a SEEDING plant/tree: in --mating mode cross with the nearest compatible mate
+// (else self), then mutate. mate_pool empty (no --mating) -> always selfing, i.e. the old single-parent path.
+// is_tree routes both the mate class and the mutation kind (mutate_tree vs mutate).
+fn mate_or_self(
+    pool: &[(Entity, Vec3, bool, PlantGenome)],
+    me: Entity,
+    pos: Vec3,
+    g: &PlantGenome,
+    is_tree: bool,
+    rng: &mut Rng,
+) -> PlantGenome {
+    let mut child = match (pool.is_empty(), find_plant_mate(pool, me, pos, g, is_tree)) {
+        (false, Some(mate)) => PlantGenome::crossover(g, mate, rng),
+        _ => g.clone(),
+    };
+    if is_tree {
+        child.mutate_tree(rng);
+    } else {
+        child.mutate(rng);
+    }
+    child
+}
+
 // A random LAND surface position anywhere on the globe, sitting `offset` above the terrain (dispersal/reseed).
 fn rand_pos(rng: &mut Rng, offset: f32) -> Vec3 {
     let mut d = crate::sphere::random_dir_in_cap(rng, Vec3::Y, std::f32::consts::PI);
@@ -1225,6 +1284,14 @@ pub fn plant_step(
     let mut plant_count = q.iter().filter(|(.., t)| t.is_none()).count();
     let tree_count = q.iter().filter(|(.., t)| t.is_some()).count();
     let tree_positions: Vec<Vec3> = q.iter().filter_map(|(_, _, _, tf, t)| t.map(|_| tf.translation)).collect();
+    // mating mode (--mating, shared with creatures): a pool of (entity, pos, is_tree, genome) so a seeding
+    // plant/tree can find a nearby genetically-similar MATE to cross with. Built only when --mating (cloning
+    // every plant genome each tick isn't free); else stays empty and reproduction is single-parent budding.
+    let mate_pool: Vec<(Entity, Vec3, bool, PlantGenome)> = if gen.mating {
+        q.iter().map(|(e, _, g, tf, tree)| (e, tf.translation, tree.is_some(), g.clone())).collect()
+    } else {
+        Vec::new()
+    };
     let mut births: Vec<(PlantGenome, Vec3)> = Vec::new();
     let mut tree_births: Vec<(Vec3, bool, PlantGenome)> = Vec::new(); // (pos, edible, child genome)
     let mut detritus: Vec<(PlantGenome, f32, Vec3)> = Vec::new(); // moisture-killed plants -> poison
@@ -1241,8 +1308,7 @@ pub fn plant_step(
             // serotiny: a fire-adapted plant releases a seed AS it burns (post-fire recruitment onto the
             // fresh ash, where competition just cleared) -> fire spreads its lineage, not just kills it.
             if tree.is_none() && rng.f32() < g.fire_seed {
-                let mut child = g.clone();
-                child.mutate(&mut rng);
+                let child = mate_or_self(&mate_pool, e, ppos, g, false, &mut rng);
                 births.push((child, disperse_pos(&mut rng, ppos, g.spread, FOOD_Y)));
             }
             if let Some(s) = stats.as_deref_mut() {
@@ -1323,9 +1389,9 @@ pub fn plant_step(
                 let pos = disperse_pos(&mut rng, ppos, spread, FOOD_Y);
                 // trees are land-only: drop seeds that landed in the sea (no ocean forests)
                 if !crate::sphere::is_ocean(pos.normalize_or_zero()) {
-                    // child inherits the parent's full tree genome, mutated (trees evolve like plants)
-                    let mut child = g.clone();
-                    child.mutate_tree(&mut rng);
+                    // child inherits the parent's tree genome: crossed with a nearby compatible tree in
+                    // --mating mode (oak x oak -> tree species), else selfed; then mutated (trees evolve like plants)
+                    let child = mate_or_self(&mate_pool, e, ppos, g, true, &mut rng);
                     tree_births.push((pos, tree.edible, child));
                 }
                 st.mass *= PLANT_REPRO_FRAC; // budding a seed costs the parent mass either way
@@ -1425,8 +1491,7 @@ pub fn plant_step(
             && plant_count + births.len() < pcap
             && rng.f32() < P_PLANT_EAT_DISPERSE * g.fruiting * (1.0 - g.toxicity)
         {
-            let mut child = g.clone();
-            child.mutate(&mut rng);
+            let child = mate_or_self(&mate_pool, e, ppos, g, false, &mut rng);
             let pos = disperse_pos(&mut rng, ppos, eff_spread(g) * PLANT_EAT_SPREAD_MULT, FOOD_Y);
             if !(g.wet > 0.85 && !crate::sphere::is_ocean(pos.normalize_or_zero())) {
                 births.push((child, pos));
@@ -1454,8 +1519,7 @@ pub fn plant_step(
             && plant_count + births.len() < pcap
             && rng.f32() < P_CLING * g.cling
         {
-            let mut child = g.clone();
-            child.mutate(&mut rng);
+            let child = mate_or_self(&mate_pool, e, ppos, g, false, &mut rng);
             let pos = disperse_pos(&mut rng, ppos, eff_spread(g) * CLING_SPREAD_MULT, FOOD_Y);
             if !(g.wet > 0.85 && !crate::sphere::is_ocean(pos.normalize_or_zero())) {
                 births.push((child, pos));
@@ -1465,8 +1529,7 @@ pub fn plant_step(
             && plant_count + births.len() < pcap
             && rng.f32() < P_REPRO * (1.0 - DEF_REPRO_COST * g.defense)
         {
-            let mut child = g.clone();
-            child.mutate(&mut rng);
+            let child = mate_or_self(&mate_pool, e, ppos, g, false, &mut rng);
             // hydrochory: a seed from a plant AT/NEAR water floats + rides far. near_water = 1 at/below sea
             // level, tapering to 0 a short band above -> only coastal/aquatic plants get the long water reach.
             let near_water = ((crate::sphere::SEA_LEVEL + HYDRO_COAST_BAND - e01) / HYDRO_COAST_BAND).clamp(0.0, 1.0);

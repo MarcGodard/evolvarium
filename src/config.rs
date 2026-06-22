@@ -182,6 +182,11 @@ pub const DORMANCY_FRAC: f32 = 0.7;         // at dormancy=1, this fraction of s
 pub const SEED_BANK_CAP: usize = 6000;      // max buried seeds tracked (drop new ones when full)
 pub const DORMANT_TICKS_MIN: u32 = 200;     // shortest a seed waits buried before it germinates
 pub const DORMANT_TICKS_MAX: u32 = 1600;    // longest a seed waits buried (staggers recruitment over time)
+// plant + tree mating (--mating mode, shared with creatures): a seeding plant crosses with the nearest
+// genetically-similar plant within range (assortative -> reproductive isolation -> emergent plant species);
+// no compatible neighbor -> falls back to selfing (a clone), so sparse patches still set seed.
+pub const PLANT_MATE_RADIUS: f32 = 9.0;     // pollen/pollinator reach: a mate must be within this distance
+pub const PLANT_SPECIES_SIM: f32 = 0.18;    // max genetic distance to be the same species (cross-compatible)
 
 // --- fruit + fermentation (Phase B): the forageable source of FAST energy ---
 // Fruit trees drop fruit; fallen fruit + dead-plant detritus ferment over their Rot clock. Eating in

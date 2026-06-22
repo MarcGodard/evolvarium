@@ -139,9 +139,10 @@ fn main() {
         save,
         load,
         diverse,
-        // --mating: two-parent breeding (assortative mate choice + crossover) instead of single-parent
-        // budding. Kid-friendly name; --sexual kept as a back-compat alias.
-        mating: args.iter().any(|a| a == "--mating" || a == "--sexual"),
+        // Two-parent breeding (assortative mate choice + crossover) for creatures AND plants is the DEFAULT
+        // now: --no-mating opts out (single-parent budding, e.g. clean generational runs). --mating / --sexual
+        // kept as no-op back-compat aliases (the feature they named is already on).
+        mating: !args.iter().any(|a| a == "--no-mating"),
         // --garden: seed a botanical showcase (one of every species in a grid at the homeland) for
         // inspecting the flora. Pair with --capture or just `cargo run -- --garden` to walk the garden.
         garden: args.iter().any(|a| a == "--garden"),

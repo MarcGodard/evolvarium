@@ -601,6 +601,28 @@ impl PlantGenome {
         self.droop = (self.droop + rng.normal() * 0.06).clamp(0.0, 1.0);
     }
 
+    // Two-parent recombination (--mating mode): uniform crossover. Each gene is taken from one parent or the
+    // other at 50/50 (discrete kind/form + nutrient axes too). Caller mutates the result. Paired with
+    // assortative mate choice (only genetically-close plants cross, see plant_gene_dist) this gives plant
+    // reproductive isolation -> emergent species, exactly like the creature path.
+    pub fn crossover(a: &Self, b: &Self, rng: &mut Rng) -> Self {
+        let mut c = a.clone();
+        macro_rules! pick {
+            ($f:ident) => { c.$f = if rng.f32() < 0.5 { a.$f } else { b.$f }; };
+        }
+        pick!(kind); pick!(form);
+        pick!(nutrient); pick!(defense); pick!(quality); pick!(wet); pick!(height);
+        pick!(light_pref); pick!(regrow); pick!(branches); pick!(spread); pick!(maturity);
+        pick!(toxicity); pick!(temp_pref); pick!(succulence); pick!(submerged); pick!(fruiting);
+        pick!(nitrogen_fix); pick!(fire_seed); pick!(climb); pick!(allelopathy);
+        pick!(seed_weight); pick!(windborne); pick!(clonal); pick!(cling); pick!(dormancy); pick!(hydrochory);
+        pick!(flower); pick!(flower_hue); pick!(leaf_hue); pick!(bushiness); pick!(droop);
+        for i in 0..NUTRIENTS {
+            c.nutrients[i] = if rng.f32() < 0.5 { a.nutrients[i] } else { b.nutrients[i] };
+        }
+        c
+    }
+
     // Investing in nutrient richness, defense, and digestible quality slows growth (no free lunch, 10).
     // Defense penalty is QUADRATIC: cheap when light, crippling when maxed -> bounds the arms race so
     // plants can't armor up to ~1.0 for free (balance lever, iter 1). Quality (palatable soft tissue)
