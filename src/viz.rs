@@ -50,14 +50,11 @@ pub struct SunLight;
 pub struct Moon;
 #[derive(Component)]
 pub struct SunDisc; // the visible glowing sun (follows the light direction)
-#[derive(Component)]
-pub struct Aurora {
-    pub dir: Vec3, // the magnetic pole this oval rings (used for night-side brightness)
-}
-// auroral magnetic latitude (~66 deg): the ring + curtains sit at this |mag latitude|. Shared by spawn + anim.
+// auroral magnetic latitude (~66 deg): the curtains sit at this |mag latitude|. Shared by spawn + anim.
 pub const AURORA_LAT: f32 = 1.15;
-// aurora altitude above the surface (world units; PLANET_R is 80) -> high in the sky, like a real aurora.
-pub const AURORA_LIFT: f32 = 16.0;
+// aurora base altitude above the surface (world units; PLANET_R is 80). Curtains rise CURTAIN_H tall from
+// here, so the tops reach high in the sky like a real aurora (which spans ~100..300 km).
+pub const AURORA_LIFT: f32 = 4.0;
 // One dancing curtain segment of the auroral oval. Many per pole, each with its own random phase/drift/hue so
 // the band ripples + glides + flickers instead of glowing as one uniform ring. Animated by update_aurora_curtains.
 #[derive(Component)]
@@ -66,7 +63,7 @@ pub struct AuroraCurtain {
     pub ang: f32,    // base angle around the oval
     pub drift: f32,  // slow sideways glide rate (random sign/speed) -> curtains travel along the band
     pub phase: f32,  // flicker phase offset
-    pub hue: f32,    // 0..1 tip-color seed (magenta vs violet)
+    pub width: f32,  // tangential width (random per curtain -> uneven ray structure)
     pub freq: f32,   // flicker frequency
 }
 
@@ -91,7 +88,7 @@ impl Plugin for VizPlugin {
                     add_plant_visuals,
                     size_plants,
                     add_grass_visuals,
-                    (day_night_lighting, time_of_day, toggle_shadows, walk_ambient, update_daycycle, track_underwater, update_sky, toggle_underwater_tint, animate_ocean, update_globe_climate, update_aurora, update_aurora_curtains),
+                    (day_night_lighting, time_of_day, toggle_shadows, walk_ambient, update_daycycle, track_underwater, update_sky, toggle_underwater_tint, animate_ocean, update_globe_climate, update_aurora_curtains),
                     rain_visuals,
                     fire_visuals,
                     update_clouds,
@@ -595,6 +592,73 @@ pub fn frond_clump_mesh(blades: usize, hw: f32, foot: f32, curve: f32, lean: f32
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+    mesh.insert_indices(Indices::U32(indices));
+    mesh
+}
+
+// One aurora curtain: a CROSSED PAIR of vertical sheets (an "X" in plan view: one in local XY facing +Z, one
+// in local ZY facing +X) so the curtain presents broad area from ANY horizontal angle and never looks thin.
+// Both sheets carry the AUTHENTIC Earth-aurora vertical color profile baked into vertex colors (additive, so
+// the falloff lives in RGB): a faint magenta lower fringe -> bright green body (557.7nm oxygen) -> fading
+// crimson/red top (630nm) -> transparent. Soft feathered edges (cosine) so overlapping curtains blend into a
+// continuous rippling sheet with ray structure. Brightness/on-off is multiplied per frame via base_color.
+// Local: X,Z = width (-0.5..0.5), Y = height (0..1, base at 0). The transform scales X,Z by width, Y by height.
+pub fn aurora_curtain_mesh() -> Mesh {
+    let cols = 6usize; // horizontal subdivisions (for the edge feather)
+    let rows = 14usize; // vertical subdivisions (for a smooth color gradient)
+    let mut positions: Vec<[f32; 3]> = Vec::new();
+    let mut normals: Vec<[f32; 3]> = Vec::new();
+    let mut uvs: Vec<[f32; 2]> = Vec::new();
+    let mut colors: Vec<[f32; 4]> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+    // vertical color stops (fy 0=bottom .. 1=top)
+    let stop = |fy: f32| -> [f32; 3] {
+        let pink = [1.1, 0.25, 0.85]; // lower nitrogen fringe (bright so the faint fringe reads)
+        let green = [0.30, 1.0, 0.45]; // main oxygen band (557.7nm, slightly yellow-green)
+        let red = [1.7, 0.30, 0.40]; // high-altitude oxygen red (boosted so the top stays visible past the falloff)
+        if fy < 0.12 {
+            let t = fy / 0.12;
+            [pink[0] + (green[0] - pink[0]) * t, pink[1] + (green[1] - pink[1]) * t, pink[2] + (green[2] - pink[2]) * t]
+        } else if fy < 0.45 {
+            green
+        } else {
+            let t = (fy - 0.45) / 0.55;
+            [green[0] + (red[0] - green[0]) * t, green[1] + (red[1] - green[1]) * t, green[2] + (red[2] - green[2]) * t]
+        }
+    };
+    let stride = (cols + 1) as u32;
+    for plane in 0..2 {
+        let vbase = positions.len() as u32;
+        for r in 0..=rows {
+            let fy = r as f32 / rows as f32;
+            // vertical brightness falloff: solid-ish through the green body, fading to 0 at the top, soft bottom.
+            let va = (1.0 - fy).powf(1.15) * (fy / 0.04).clamp(0.0, 1.0);
+            let c = stop(fy);
+            for cc in 0..=cols {
+                let fx = cc as f32 / cols as f32 - 0.5; // -0.5..0.5
+                let hf = (fx * std::f32::consts::PI).cos().max(0.0); // 1 center -> 0 edges (soft sides)
+                let a = va * hf;
+                // plane 0: sheet in XY (width along X); plane 1: crossed sheet in ZY (width along Z)
+                let pos = if plane == 0 { [fx, fy, 0.0] } else { [0.0, fy, fx] };
+                let nrm = if plane == 0 { [0.0, 0.0, 1.0] } else { [1.0, 0.0, 0.0] };
+                positions.push(pos);
+                normals.push(nrm);
+                uvs.push([fx + 0.5, 1.0 - fy]);
+                colors.push([c[0] * a, c[1] * a, c[2] * a, a]); // RGB carries the falloff (additive); alpha mirrors it
+            }
+        }
+        for r in 0..rows as u32 {
+            for cc in 0..cols as u32 {
+                let i = vbase + r * stride + cc;
+                indices.extend_from_slice(&[i, i + 1, i + stride + 1, i, i + stride + 1, i + stride]);
+            }
+        }
+    }
+    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
     mesh.insert_indices(Indices::U32(indices));
     mesh
 }
@@ -1483,30 +1547,6 @@ fn animate_ocean(gen: Res<GenState>, mut q: Query<&mut Transform, With<Ocean>>) 
     }
 }
 
-// Aurora base ring: a DIM, slowly-shifting glow under the curtains (a soft band tying the curtains together).
-// The dancing comes from update_aurora_curtains; this is just ambience.
-fn update_aurora(
-    gen: Res<GenState>,
-    offset: Res<SunOffset>,
-    mut mats: ResMut<Assets<StandardMaterial>>,
-    mut q: Query<(&Aurora, &MeshMaterial3d<StandardMaterial>, &mut Transform)>,
-) {
-    let vtick = (gen.tick as i64 + offset.0).max(0) as u32;
-    let t = gen.tick as f32;
-    let substorm = ((t * 0.0011).sin() * 0.5 + 0.5).powf(3.0); // occasional planet-wide activity surge
-    for (aur, mm, mut tf) in &mut q {
-        let night = 1.0 - crate::sphere::daylight_at(aur.dir, vtick); // 0 day .. 1 night at this pole
-        let shimmer = 0.5 + 0.3 * (t * 0.02).sin() + 0.2 * (t * 0.047 + aur.dir.x).sin();
-        let bright = (0.12 + 0.5 * night) * (0.6 + 0.8 * substorm); // dim base glow; curtains carry the show
-        let g = (1.2 + 0.8 * shimmer) * bright;
-        let rb = (0.3 + 0.7 * (1.0 - shimmer)) * bright;
-        if let Some(m) = mats.get_mut(&mm.0) {
-            m.emissive = LinearRgba::rgb(rb * 0.6, g, rb);
-        }
-        tf.scale = Vec3::splat(1.0 + 0.04 * (t * 0.018 + aur.dir.x).sin());
-    }
-}
-
 // Aurora curtains: each segment flickers organically (layered sines + a global substorm), glides sideways
 // around the oval, sways, and pulses height -> a restless, random, dancing band. Color is green with tips
 // surging toward magenta/violet during active bursts. Brighter on the night side (daylight washes it out).
@@ -1518,45 +1558,46 @@ fn update_aurora_curtains(
 ) {
     let vtick = (gen.tick as i64 + offset.0).max(0) as u32;
     let t = gen.tick as f32;
-    let r = crate::sphere::PLANET_R + AURORA_LIFT;
-    let substorm = ((t * 0.0011).sin() * 0.5 + 0.5).powf(3.0); // shared planet-wide surge
-    const CURTAIN_H: f32 = 12.0; // base curtain mesh height (scaled per-frame)
+    let base_r = crate::sphere::PLANET_R + AURORA_LIFT;
+    let substorm = ((t * 0.0009).sin() * 0.5 + 0.5).powf(3.0); // shared planet-wide activity surge
+    const CURTAIN_H: f32 = 16.0; // curtain height (mesh is unit-tall; this scales it)
+    const FOLD_AMP: f32 = 0.10; // magnetic-latitude wave amplitude (radians) -> serpentine draperies
     for (c, mm, mut tf) in &mut q {
         let night = 1.0 - crate::sphere::daylight_at(c.pole, vtick);
-        // organic flicker: incommensurate sines + the substorm burst
         let f = c.freq;
+        // organic flicker: incommensurate sines + the substorm burst
         let flick = (0.45
             + 0.30 * (t * f + c.phase).sin()
             + 0.15 * (t * f * 2.3 + c.phase * 1.7).sin()
             + 0.25 * substorm)
-            .clamp(0.0, 1.4);
-        let intensity = night * flick;
-        // drift around the oval + a small wiggle
-        let ang = c.ang + c.drift * t + 0.05 * (t * f * 0.7 + c.phase).sin();
+            .clamp(0.0, 1.5);
+        // drift around the oval + folded draperies: the band waves north/south (two frequencies) like real curtains
+        let ang = c.ang + c.drift * t + 0.04 * (t * f * 0.7 + c.phase).sin();
+        let lat = AURORA_LAT
+            + FOLD_AMP * (ang * 5.0 + t * 0.004 + c.phase).sin()
+            + 0.5 * FOLD_AMP * (ang * 11.0 - t * 0.006).sin();
         // basis perpendicular to the magnetic pole
         let pole = c.pole;
         let a = if pole.x.abs() < 0.9 { Vec3::X } else { Vec3::Y };
         let u = pole.cross(a).normalize();
         let v = pole.cross(u);
         let circ = u * ang.cos() + v * ang.sin();
-        let dirp = (pole * AURORA_LAT.sin() + circ * AURORA_LAT.cos()).normalize();
-        let n = dirp; // outward (radial up)
-        let tang = pole.cross(dirp).normalize(); // around-oval tangent (curtain width axis)
-        let bin = n.cross(tang);
-        let height = 0.5 + 1.1 * flick; // curtains rise when active
-        let p = dirp * r + n * (CURTAIN_H * height * 0.5); // stand outward from the band
-        let sway = Quat::from_axis_angle(tang, 0.12 * (t * f * 1.3 + c.phase).sin());
-        tf.translation = p;
+        let dirp = (pole * lat.sin() + circ * lat.cos()).normalize();
+        let n = dirp; // radial up (curtain rises along this = local Y)
+        let tang = pole.cross(dirp).normalize(); // around-oval tangent (curtain width = local X)
+        let bin = tang.cross(n); // local Z, RIGHT-HANDED (X x Y = Z) so the quaternion is a real rotation (not a mirror)
+        let height = 0.55 + 0.9 * flick; // curtains grow tall when active
+        let sway = Quat::from_axis_angle(tang, 0.10 * (t * f * 1.3 + c.phase).sin());
+        tf.translation = dirp * base_r; // base sits on the band; the mesh (local Y) rises outward
         tf.rotation = sway * Quat::from_mat3(&Mat3::from_cols(tang, n, bin));
-        tf.scale = Vec3::new(0.7 + 0.6 * flick, height, 1.0);
-        // color: green base; tips surge magenta (hue<0.5) or violet during bursts
-        let m = (0.5 + 0.5 * (t * 0.006 + c.hue * 6.2832).sin()) * (0.3 + 0.7 * substorm);
-        let tip_b = if c.hue < 0.5 { 0.7 } else { 1.0 };
-        let er = m * intensity * 2.2;
-        let eg = (1.0 - 0.4 * m) * intensity * 2.2;
-        let eb = (tip_b * m + 0.3) * intensity * 2.2;
+        let w = c.width * (0.85 + 0.3 * flick);
+        tf.scale = Vec3::new(w, CURTAIN_H * height, w); // X and Z both = width so the crossed sheets match
+        // brightness + overall fade; the authentic green->red gradient lives in the mesh vertex colors.
+        // Kept soft (cores don't blow to white) for an ethereal look rather than laser beams.
+        let i = (night * (0.30 + 0.7 * flick)).clamp(0.0, 1.25);
+        let alpha = (night * (0.2 + 0.7 * flick)).clamp(0.0, 0.85);
         if let Some(mat) = mats.get_mut(&mm.0) {
-            mat.emissive = LinearRgba::rgb(er, eg, eb);
+            mat.base_color = Color::LinearRgba(LinearRgba::new(i, i, i, alpha));
         }
     }
 }

@@ -396,42 +396,28 @@ fn setup_scene(
     // sphere::mag_pole_dir() (tilted off the spin axis -> ovals sit OFF the geographic poles). A DIM base ring
     // (viz::update_aurora) glows under a band of independently dancing CURTAIN segments
     // (viz::AuroraCurtain + update_aurora_curtains) that flicker, glide, sway, and shift color randomly.
-    let lam = viz::AURORA_LAT;
-    let r = sphere::PLANET_R + viz::AURORA_LIFT; // high in the sky
-    let curtain_mesh = meshes.add(Cuboid::new(2.4, 12.0, 0.05)); // a tall thin glowing sheet
+    let curtain_mesh = meshes.add(viz::aurora_curtain_mesh()); // crossed gradient curtain (green->crimson, soft)
     // deterministic per-curtain pseudo-random (no RNG state): hash an int -> 0..1
     let h = |k: u32| {
         let x = (k.wrapping_mul(2_654_435_761) ^ 0x9e37_79b9) as f32;
         (x.sin() * 43_758.5453).fract().abs()
     };
     for (pi, s) in [1.0_f32, -1.0].into_iter().enumerate() {
-        let axis = sphere::mag_pole_dir() * s; // the magnetic pole this oval rings
-        // dim base ring
-        commands.spawn((
-            Mesh3d(meshes.add(Torus { minor_radius: 1.1, major_radius: r * lam.cos() }.mesh().build())),
-            MeshMaterial3d(materials.add(StandardMaterial {
-                base_color: Color::srgba(0.2, 1.0, 0.6, 0.4),
-                emissive: LinearRgba::rgb(0.1, 0.5, 0.25),
-                alpha_mode: AlphaMode::Add,
-                unlit: true,
-                ..default()
-            })),
-            Transform::from_translation(axis * (r * lam.sin())).with_rotation(Quat::from_rotation_arc(Vec3::Y, axis)),
-            bevy::light::NotShadowCaster,
-            viz::Aurora { dir: axis },
-        ));
-        // dancing curtain segments around the oval (transform set per-frame by update_aurora_curtains)
-        let n_cur = 30u32;
+        let axis = sphere::mag_pole_dir() * s; // the magnetic pole (BOTH north + south get curtains)
+        // dancing curtain segments around the oval (transform set per-frame by update_aurora_curtains).
+        // Dense + overlapping (soft-edged) so they blend into a continuous folded sheet with ray structure.
+        let n_cur = 72u32;
         for i in 0..n_cur {
             let k = i + pi as u32 * 977;
-            let base = i as f32 / n_cur as f32 * std::f32::consts::TAU + h(k * 7) * 0.3;
+            let base = i as f32 / n_cur as f32 * std::f32::consts::TAU + h(k * 7) * 0.12;
             commands.spawn((
                 Mesh3d(curtain_mesh.clone()),
                 MeshMaterial3d(materials.add(StandardMaterial {
-                    base_color: Color::srgba(0.2, 1.0, 0.6, 0.5),
-                    emissive: LinearRgba::rgb(0.2, 1.5, 0.7),
+                    base_color: Color::LinearRgba(LinearRgba::new(0.6, 0.6, 0.6, 0.5)),
                     alpha_mode: AlphaMode::Add,
                     unlit: true,
+                    double_sided: true, // both crossed sheets visible from any side
+                    cull_mode: None,
                     ..default()
                 })),
                 Transform::default(),
@@ -441,7 +427,7 @@ fn setup_scene(
                     ang: base,
                     drift: (h(k * 13) - 0.5) * 0.0008, // slow sideways glide, random dir + speed
                     phase: h(k * 17) * std::f32::consts::TAU,
-                    hue: h(k * 23),
+                    width: 4.5 + h(k * 23) * 4.0, // uneven widths -> ray structure
                     freq: 0.02 + h(k * 29) * 0.05,
                 },
             ));
