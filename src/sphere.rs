@@ -34,6 +34,11 @@ pub const DAY_TICKS: u32 = 2400; // ticks per planet rotation (one day) -- same 
 pub const MOON_PERIOD_DAYS: f32 = 8.0; // moon orbits once per 8 days (a visible monthly cycle, sped up)
 pub const AXIAL_TILT: f32 = 0.41; // ~23.5 deg in radians: gives seasons + keeps poles cold
 
+// --- planet magnetic field (tilted geomagnetic dipole) ---
+// Magnetic north tilted off the spin axis (+Y). Offset -> nonzero compass declination + an auroral oval
+// that sits off the geographic pole (Earth: ~11 deg). Field fed to creatures via the `magneto` sense gene.
+pub const MAG_TILT: f32 = 0.20; // dipole tilt off the rotation axis (~11.5 deg)
+
 // ---------- lat/lon <-> 3D ----------
 
 /// Unit surface direction -> (lon, lat) in radians. lat in [-pi/2, pi/2] (poles at +/-Y), lon in (-pi, pi].
@@ -220,6 +225,43 @@ pub fn moisture(d: Vec3) -> f32 {
     // dry subtropical belts ~ +/-30 deg, wetter equator + poles
     let belt = 0.5 + 0.5 * (lat * 3.0).cos();
     (0.45 * coastal + 0.35 * patch + 0.20 * belt).clamp(0.0, 1.0)
+}
+
+/// Magnetic north pole direction (unit): spin axis +Y tilted by MAG_TILT toward +X (fixed longitude).
+pub fn mag_pole_dir() -> Vec3 {
+    Vec3::new(MAG_TILT.sin(), MAG_TILT.cos(), 0.0) // already unit (sin^2+cos^2=1)
+}
+
+/// Geomagnetic dipole field VECTOR at unit surface dir `d` (world frame, magnitude in dipole units).
+/// B = 3(m.d)d - m with m = magnetic moment along the (tilted) pole. Stronger + more vertical near poles.
+pub fn mag_field(d: Vec3) -> Vec3 {
+    let m = mag_pole_dir();
+    3.0 * m.dot(d) * d - m
+}
+
+/// Magnetic latitude proxy at `d`: sin of magnetic latitude, -1 (mag south pole) .. +1 (mag north pole),
+/// 0 on the magnetic equator. The inclination/"map" cue: tells a creature how far from the magnetic poles.
+pub fn mag_latitude(d: Vec3) -> f32 {
+    d.dot(mag_pole_dir()).clamp(-1.0, 1.0)
+}
+
+/// Bearing of the horizontal field component toward magnetic north, in radians rel. GEOGRAPHIC north
+/// (the "compass" cue). Nonzero declination under MAG_TILT, so it carries real direction info. 0 at a pole.
+pub fn mag_north_bearing(d: Vec3) -> f32 {
+    let b = mag_field(d);
+    let bh = b - d * b.dot(d); // horizontal component (project out the radial/vertical part)
+    if bh.length_squared() < 1e-8 {
+        return 0.0; // near a magnetic pole the field is vertical -> no horizontal heading
+    }
+    let (east, north) = tangent_frame(d);
+    bh.dot(east).atan2(bh.dot(north))
+}
+
+/// Field intensity proxy at `d` (closed-form dipole magnitude): ~1 at the magnetic equator, ~2 at the poles.
+/// Used to brighten the aurora; not a brain input in v1.
+pub fn mag_intensity(d: Vec3) -> f32 {
+    let md = d.dot(mag_pole_dir());
+    (1.0 + 3.0 * md * md).sqrt()
 }
 
 /// World position sitting `offset` above the terrain surface at direction `d` (d need not be unit).
@@ -505,6 +547,24 @@ mod tests {
         assert!(east.dot(d).abs() < 1e-4);
         assert!(north.dot(d).abs() < 1e-4);
         assert!(east.dot(north).abs() < 1e-3, "east/north should be orthogonal");
+    }
+
+    #[test]
+    fn magnetic_field_cues() {
+        // latitude cue: +1 at the magnetic pole, ~0 on the magnetic equator (a dir perpendicular to the pole)
+        assert!((mag_latitude(mag_pole_dir()) - 1.0).abs() < 1e-5, "mag lat at pole should be ~1");
+        assert!(mag_latitude(Vec3::Z).abs() < 1e-5, "mag lat on the magnetic equator should be ~0");
+        // intensity: stronger (more vertical) at the pole than the equator
+        assert!(mag_intensity(mag_pole_dir()) > mag_intensity(Vec3::Z) + 0.5);
+        // compass: finite + bounded everywhere; nonzero declination somewhere (tilted dipole)
+        let mut max_dec = 0.0f32;
+        for &(lon, lat) in &[(0.0f32, 0.3f32), (1.2, -0.5), (-2.0, 0.7), (2.5, 0.1)] {
+            let d = lonlat_to_pos(lon, lat, 0.0).normalize();
+            let bear = mag_north_bearing(d);
+            assert!(bear.is_finite() && bear.abs() <= std::f32::consts::PI + 1e-4, "bearing out of range: {bear}");
+            max_dec = max_dec.max(bear.abs());
+        }
+        assert!(max_dec > 1e-3, "tilted dipole should produce a nonzero declination somewhere");
     }
 
     #[test]
