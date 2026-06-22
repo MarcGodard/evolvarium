@@ -227,6 +227,17 @@ impl Genome {
         self.sensors.len()
     }
 
+    // Rebuild net + plast as fresh random weights sized to the CURRENT sensors (+ the existing hidden count).
+    // Used by the scenario harness after overriding `sensors` so the net shape matches before an optional
+    // reflex prior is applied. (A bare scalar-only override keeps the base net, so this is only called when
+    // sensors change.)
+    pub fn rebuild_random_net(&mut self, rng: &mut Rng) {
+        let n_in = n_inputs(self.n_sensors());
+        let n_hidden = self.net.ih.len().clamp(MIN_HIDDEN, MAX_HIDDEN);
+        self.net = random_net(rng, n_in, n_hidden, false);
+        self.plast = random_net(rng, n_in, n_hidden, true);
+    }
+
     // Migrate a loaded net to the CURRENT input width. New global brain-inputs (M4) widened n_inputs, so an
     // older saved net has fewer input columns than the live code expects. Insert columns just before each
     // row's trailing bias weight: net gets 0.0 (new input starts with no influence) and plast gets a small

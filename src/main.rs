@@ -123,6 +123,15 @@ fn main() {
         scenario::merge_snapshot_into_library(&sp, &lib_path, cap, &suffix);
         return;
     }
+    // --merge-creatures=result.json --snap=PATH: harvest a creature scenario result's best survivors into a
+    // population snapshot (the showcase seed), accumulating across runs (--cap caps the total), then exit. The
+    // creature tuning workflow calls this per niche to build a fresh evolved-continuous.json.
+    if let Some(rp) = args.iter().find_map(|a| a.strip_prefix("--merge-creatures=").map(String::from)) {
+        let snap_out = args.iter().find_map(|a| a.strip_prefix("--snap=").map(String::from)).unwrap_or_else(|| "evolved-continuous.json".into());
+        let cap = args.iter().find_map(|a| a.strip_prefix("--cap=").and_then(|s| s.parse::<usize>().ok())).unwrap_or(90);
+        scenario::merge_creatures_into_snapshot(&rp, &snap_out, cap);
+        return;
+    }
 
     let mut app = App::new();
     // crisp directional shadows (default 2048 is soft at planet scale)
@@ -168,16 +177,20 @@ fn main() {
         let scen_seed = if seed_given { seed } else { scn.seed };
         scn.seed = scen_seed; // stamp the EFFECTIVE seed so the result JSON echoes the real run seed (not the file default)
         let grazers = scn.world.grazers;
+        let has_creatures = grazers > 0 || !scn.creature_cohort.is_empty();
         app.insert_resource(rng::Rng::seed(scen_seed));
-        // scenario GenState: headless clock, continuous OFF (so grazers don't reseed), no garden/library.
+        // scenario GenState: headless clock, no garden/library. A creature_cohort runs CONTINUOUS (past
+        // warm-up) so the cohort can BREED + evolve + test self-sustaining (like the plant arm grows toward
+        // target); the global reseed floor is gated off in scenario mode (live_step). Plant-only stays
+        // continuous-off (grazers don't reseed). generation = WARMUP_GENS so live_continuous fires at once.
         app.insert_resource(sim::GenState {
-            generation: 0,
+            generation: if has_creatures { sim::WARMUP_GENS } else { 0 },
             ticks_left: sim::GEN_TICKS,
             headless: true,
             learn: true,
             poison: false,
             diet: true,
-            continuous: false,
+            continuous: has_creatures && !scn.creature_cohort.is_empty(),
             tick: 0,
             max_gens: 1,
             save: None,
@@ -192,8 +205,8 @@ fn main() {
         app.add_plugins(MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(Duration::ZERO)))
             .add_plugins(bevy::log::LogPlugin::default())
             .add_systems(Startup, scenario::spawn_scenario_world);
-        // grazers => include the creature systems (forage + predation) so they actually graze the cohort.
-        if grazers > 0 {
+        // creatures present (a creature_cohort OR grazers) => include the creature systems (forage + predation).
+        if has_creatures {
             app.add_systems(Update, (sim::live_step, sim::predation_step, sim::plant_step, sim::rot_step, scenario::scenario_step).chain());
         } else {
             app.add_systems(Update, (sim::plant_step, sim::rot_step, scenario::scenario_step).chain());

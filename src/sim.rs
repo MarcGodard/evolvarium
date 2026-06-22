@@ -1788,6 +1788,7 @@ pub fn live_step(
     mut soil: ResMut<Soil>,
     fire: Res<Fire>,
     fq: Query<(Entity, &Transform, &PlantState, &PlantGenome, Option<&Rot>, Option<&Tree>, Option<&Ferment>, Option<&Seed>), (With<Food>, Without<Creature>)>,
+    scen: Option<Res<crate::scenario::ScenarioStats>>, // present => scenario mode: disable the global reseed floor
 ) {
     let dt = DT;
     let ntypes = gen.ntypes();
@@ -2378,7 +2379,9 @@ pub fn live_step(
     // Creature reseed floor (safety net, mirrors the plant PLANT_MIN floor): if continuous population
     // crashes toward extinction, spawn mutated offspring of a survivor so the world can't fully die.
     // Only fires near-extinction -> self-sustaining populations never touch it. Needs a survivor (pop>0).
-    if live_continuous && pop > 0 && pop < CREATURE_MIN {
+    // scenario mode (ScenarioStats present): NO reseed floor -> the isolated cohort stays the only creatures
+    // (rand_pos reseed would scatter strangers planet-wide + break cohort isolation).
+    if scen.is_none() && live_continuous && pop > 0 && pop < CREATURE_MIN {
         if let Some(g) = sample_genome {
             for _ in 0..(CREATURE_MIN - pop) {
                 let mut child = g.clone();

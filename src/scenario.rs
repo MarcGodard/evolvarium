@@ -12,10 +12,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 
-use crate::components::Tree;
-use crate::genome::NFOOD;
+use crate::components::{Alive, Creature, DietState, Energy, Tree};
+use crate::genome::{master_expression, n_inputs, Genome, Net, Sensor, NFOOD};
 use crate::plant::{Archetype, PlantGenome, PlantState};
-use crate::sim::GenState;
+use crate::sim::{GenState, MASTER_FLOOR, RESERVE_REQ};
 
 // --- scenario input schema ---
 
@@ -32,8 +32,16 @@ pub struct Scenario {
     #[serde(default)]
     pub plant_cohort: Vec<PlantSpec>,
     #[serde(default)]
-    #[allow(dead_code)] // LATER: creature specs parsed-but-inert until the creature arm is wired (doc 14)
-    pub creature_cohort: Vec<Value>,
+    pub creature_cohort: Vec<CreatureSpec>,
+}
+
+#[derive(Deserialize)]
+pub struct CreatureSpec {
+    pub count: usize,
+    #[serde(default)]
+    pub genome: Map<String, Value>, // free-form Genome overrides merged onto a random base (ANY gene)
+    #[serde(default)]
+    pub reflex: Option<String>, // optional named brain prior: approach-food | flee-predator | rest-at-night | wander
 }
 
 #[derive(Deserialize)]
@@ -108,6 +116,8 @@ pub struct ScenarioStats {
     pub cap: usize, // cohort-scale population cap (= ~2x target_count) so a viable cohort grows toward the
     // target + shows vigor WITHOUT booming to the global PLANT_CAP (which saturated every metric).
     pub seeded: Vec<PlantGenome>, // the applied cohort genomes (for trait-drift baseline)
+    pub cstarted: usize,          // creatures seeded
+    pub cseeded: Vec<Genome>,     // applied creature genomes (creature trait-drift baseline)
 }
 
 impl ScenarioStats {
@@ -162,6 +172,73 @@ fn archetype_by_name(name: &str) -> Option<Archetype> {
     })
 }
 
+// generic serde merge of free-form overrides onto a base Genome (mirror of apply_overrides for plants).
+// Scalar genes, uptake[], even `sensors` can be overridden; the caller rebuilds the net when sensors change.
+fn apply_overrides_genome(base: Genome, ov: &Map<String, Value>) -> Genome {
+    if ov.is_empty() {
+        return base;
+    }
+    let mut v = match serde_json::to_value(&base) {
+        Ok(v) => v,
+        Err(_) => return base,
+    };
+    if let Value::Object(map) = &mut v {
+        for (k, val) in ov {
+            if map.contains_key(k) {
+                map.insert(k.clone(), val.clone());
+            } else {
+                bevy::log::warn!("scenario creature override key '{}' is not a Genome field (ignored)", k);
+            }
+        }
+    }
+    serde_json::from_value(v).unwrap_or(base)
+}
+
+// Reflex brain priors (hand-wired starting weights; lifetime learning refines them in the run). Input layout
+// (genome.rs): per sensor i -> [inv_dist @ 2i, type @ 2i+1]; then globals at base = n_sensors*2:
+// [energy, daylight, fatigue, bias, toxic_load, shade, threat_dist, threat_bear, wet]. Outputs [thrust, turn].
+// Returns None for an unknown name (caller keeps the random net).
+fn reflex_brain(name: &str, sensors: &[Sensor]) -> Option<Net> {
+    let n_s = sensors.len();
+    let base = n_s * crate::genome::SIG_PER_SENSOR;
+    let n_in = n_inputs(n_s);
+    let n_hidden = 3usize;
+    // zeroed net of the right shape (ih: n_hidden rows of n_in+1; ho: OUTPUTS rows of n_hidden+1)
+    let mut ih: Vec<Vec<f32>> = (0..n_hidden).map(|_| vec![0.0; n_in + 1]).collect();
+    let mut ho: Vec<Vec<f32>> = (0..crate::genome::OUTPUTS).map(|_| vec![0.0; n_hidden + 1]).collect();
+    let (i_daylight, i_threat_d, i_threat_b) = (base + 1, base + 6, base + 7);
+    match name {
+        "approach-food" => {
+            // h0 = food proximity (sum of sensor inv-distances); h1 = steering (food on the left vs right)
+            for (i, s) in sensors.iter().enumerate() {
+                ih[0][2 * i] = 1.0;
+                ih[1][2 * i] = if s.angle < 0.0 { -1.0 } else { 1.0 };
+            }
+            ih[0][n_in] = -0.2; // bias: ~0 when no food in view
+            ho[0][0] = 3.0; // thrust rises with food proximity
+            ho[0][n_hidden] = -0.3; // idle-ish when nothing near
+            ho[1][1] = 2.0; // turn toward the side with food
+        }
+        "flee-predator" => {
+            ih[0][i_threat_d] = 2.0; // h0 = predator proximity
+            ih[1][i_threat_b] = 1.0; // h1 = predator bearing
+            ho[0][0] = 3.0; // sprint when a predator is near
+            ho[0][n_hidden] = -0.4;
+            ho[1][1] = -2.5; // steer AWAY from the predator's bearing
+        }
+        "rest-at-night" => {
+            ih[0][i_daylight] = 1.0; // h0 = daylight
+            ho[0][0] = 2.0; // active by day
+            ho[0][n_hidden] = -0.5; // rest (low thrust) at night
+        }
+        "wander" => {
+            ho[0][n_hidden] = 0.2; // steady low cruise, no target
+        }
+        _ => return None,
+    }
+    Some(Net { ih, ho })
+}
+
 // --- startup: pin the environment band, seed ONLY the cohort ---
 pub fn spawn_scenario_world(
     mut commands: Commands,
@@ -192,16 +269,39 @@ pub fn spawn_scenario_world(
 
     // place a cohort member: pick a |latitude| in the band (or the second band for MIXED cohorts), then a
     // matching surface position (aquatic = shallow sea, rocky = high ground, else low land).
-    let place = |rng: &mut crate::rng::Rng| -> Vec3 {
+    // creatures can only forage if they + their food share a LOCAL patch (a full latitude ring spreads them
+    // around the whole planet -> they never meet food). So when a creature cohort is present, co-locate the
+    // whole cohort (plants too) in one compact patch around a single center; plant-only scenarios keep the
+    // wide latitude-ring placement (climate is what's tuned there, position doesn't matter).
+    let patch = !cfg.scenario.creature_cohort.is_empty();
+    const PATCH_CAP: f32 = 0.13; // ~7.5 deg cap: a local foraging region
+    let mid_lat = (w.lat_band[0] + w.lat_band[1]) * 0.5;
+    let patch_center = if w.aquatic {
+        crate::sim::niche_water_pos(&mut rng, mid_lat, 0.0).normalize_or_zero()
+    } else {
+        crate::sim::niche_pos(&mut rng, !w.rocky, mid_lat, 0.0).normalize_or_zero()
+    };
+    let place = |rng: &mut crate::rng::Rng, y: f32| -> Vec3 {
+        if patch {
+            // scatter within the patch; keep land/water matching the niche (retry a few times like homeland_pos)
+            let mut d = crate::sphere::random_dir_in_cap(rng, patch_center, PATCH_CAP);
+            for _ in 0..8 {
+                if crate::sphere::is_ocean(d) == w.aquatic {
+                    break;
+                }
+                d = crate::sphere::random_dir_in_cap(rng, patch_center, PATCH_CAP);
+            }
+            return crate::sphere::surface_pos(d, y);
+        }
         let band = match (w.second_band, rng.f32() < 0.5) {
             (Some(b2), true) => b2,
             _ => w.lat_band,
         };
         let target_lat = rng.range(band[0], band[1]);
         if w.aquatic {
-            crate::sim::niche_water_pos(rng, target_lat, crate::sim::FOOD_Y)
+            crate::sim::niche_water_pos(rng, target_lat, y)
         } else {
-            crate::sim::niche_pos(rng, !w.rocky, target_lat, crate::sim::FOOD_Y)
+            crate::sim::niche_pos(rng, !w.rocky, target_lat, y)
         }
     };
 
@@ -215,7 +315,7 @@ pub fn spawn_scenario_world(
             };
             let g = apply_overrides(base, &spec.genome);
             stats.seeded.push(g.clone());
-            let pos = place(&mut rng);
+            let pos = place(&mut rng, crate::sim::FOOD_Y);
             if spec.tree {
                 crate::sim::spawn_tree(&mut commands, rng.range(2.0, 5.0), pos, true, g);
             } else {
@@ -227,11 +327,30 @@ pub fn spawn_scenario_world(
     // cap the cohort near the target so it grows toward the goal + shows vigor, not boom to PLANT_CAP.
     stats.cap = (cfg.scenario.target_count * 2).max(20);
 
+    // creature cohort (M4 creature arm): apply free-form overrides onto a random base, rebuild the net if
+    // sensors were overridden (shape must match), apply an optional reflex prior, then spawn into the band.
+    for spec in &cfg.scenario.creature_cohort {
+        for _ in 0..spec.count {
+            let mut g = apply_overrides_genome(Genome::random(&mut rng), &spec.genome);
+            if spec.genome.contains_key("sensors") {
+                g.rebuild_random_net(&mut rng);
+            }
+            if let Some(name) = spec.reflex.as_deref() {
+                if let Some(net) = reflex_brain(name, &g.sensors) {
+                    g.net = net;
+                }
+            }
+            stats.cseeded.push(g.clone());
+            let pos = place(&mut rng, crate::sim::CREATURE_Y);
+            crate::sim::spawn_creature(&mut commands, g, pos, &mut rng, crate::sim::BIRTH_ENERGY);
+        }
+    }
+    stats.cstarted = stats.cseeded.len();
+
     // optional grazing pressure: a few random creatures placed in the band (continuous off -> they don't reseed)
     for _ in 0..w.grazers {
-        let target_lat = rng.range(w.lat_band[0], w.lat_band[1]);
-        let pos = crate::sim::niche_pos(&mut rng, true, target_lat, crate::sim::CREATURE_Y);
-        crate::sim::spawn_creature(&mut commands, crate::genome::Genome::random(&mut rng), pos, &mut rng, crate::sim::BIRTH_ENERGY);
+        let pos = place(&mut rng, crate::sim::CREATURE_Y);
+        crate::sim::spawn_creature(&mut commands, Genome::random(&mut rng), pos, &mut rng, crate::sim::BIRTH_ENERGY);
     }
 }
 
@@ -264,6 +383,23 @@ pub struct ScenarioResult {
     pub trait_drift: HashMap<String, [f32; 2]>,
     pub health_score: f32,
     pub best_genomes: Vec<BestGenome>,
+    // --- creature arm (M4): all #[serde(default)] so plant-only results still parse ---
+    #[serde(default)]
+    pub creature_started: usize,
+    #[serde(default)]
+    pub creature_survived: usize,
+    #[serde(default)]
+    pub creature_survival: f32, // survived / started (the creature health signal the tuner maximizes)
+    #[serde(default)]
+    pub creature_mean_age: f32,
+    #[serde(default)]
+    pub creature_mean_energy: f32,
+    #[serde(default)]
+    pub creature_mean_master: f32, // mean digestion expression (diet fit to the niche food)
+    #[serde(default)]
+    pub creature_trait_drift: HashMap<String, [f32; 2]>,
+    #[serde(default)]
+    pub best_creatures: Vec<Genome>, // top survivors by fitness (harvested into the seed snapshot)
 }
 
 // Classify a plant genome into a biome niche label from its OWN adapted prefs (temp_pref/wet/submerged/
@@ -345,8 +481,41 @@ pub fn merge_result_into_library(result_path: &str, niche: &str, lib_path: &str,
     println!("merge: +{} genomes for niche '{}' (score {:.2}) -> {} now has {} entries", added, niche, res.health_score, lib_path, lib.entries.len());
 }
 
+// CLI (--merge-creatures): harvest a scenario result's best survivor creatures into a population SNAPSHOT
+// (the showcase seed, e.g. evolved-continuous.json), accumulating across runs (load -> append -> cap -> save).
+// The creature synthesize stage calls this once per tuned niche; the capped, multi-niche snapshot becomes the
+// fresh evolved seed. Gene-agnostic (genomes carry every gene). Keeps the most-recently-added on overflow so
+// later niches are represented.
+pub fn merge_creatures_into_snapshot(result_path: &str, snap_path: &str, cap: usize) {
+    let text = match std::fs::read_to_string(result_path) {
+        Ok(t) => t,
+        Err(e) => {
+            println!("merge-creatures: result read failed ({}): {}", result_path, e);
+            return;
+        }
+    };
+    let res: ScenarioResult = match serde_json::from_str(&text) {
+        Ok(r) => r,
+        Err(e) => {
+            println!("merge-creatures: result parse failed ({}): {}", result_path, e);
+            return;
+        }
+    };
+    let mut snap = crate::persist::load_snapshot(snap_path).unwrap_or(crate::persist::Snapshot { generation: 0, creatures: Vec::new(), plants: Vec::new() });
+    let added = res.best_creatures.len();
+    snap.creatures.extend(res.best_creatures);
+    if snap.creatures.len() > cap {
+        let excess = snap.creatures.len() - cap;
+        snap.creatures.drain(0..excess); // keep the newest (later niches), cap total for a balanced seed
+    }
+    crate::persist::save_snapshot(snap_path, &snap);
+    println!("merge-creatures: +{} from {} -> {} now has {} creatures", added, result_path, snap_path, snap.creatures.len());
+}
+
 // gene-agnostic per-field numeric means over a set of genomes (serde reflection -> covers any new gene).
-fn numeric_means(genomes: &[PlantGenome]) -> HashMap<String, f32> {
+// Generic over the genome type so it serves both PlantGenome and Genome (top-level f64 fields only; nested
+// arrays/objects like net/sensors/uptake are skipped, which is exactly the scalar genes we want).
+fn numeric_means<T: Serialize>(genomes: &[T]) -> HashMap<String, f32> {
     let mut sums: HashMap<String, f64> = HashMap::new();
     let n = genomes.len().max(1) as f64;
     for g in genomes {
@@ -368,6 +537,7 @@ pub fn scenario_step(
     mut stats: ResMut<ScenarioStats>,
     mut exit: MessageWriter<AppExit>,
     q: Query<(&PlantState, &PlantGenome, Option<&Tree>), (Without<crate::components::Rot>, Without<crate::components::Grass>)>,
+    cq: Query<(&Genome, &DietState, &Energy, &Alive, &crate::components::Fitness), With<Creature>>,
 ) {
     gen.tick = gen.tick.wrapping_add(1); // drives daylight_at + season inside plant_step
 
@@ -417,6 +587,34 @@ pub fn scenario_step(
     best.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
     let best_genomes: Vec<BestGenome> = best.into_iter().take(12).map(|(mass, genome, tree)| BestGenome { genome, mass, tree }).collect();
 
+    // creature cohort metrics: survivors = creatures still alive at the budget. Best survivors (by fitness)
+    // are harvested into the seed snapshot by --merge-creatures.
+    let mut csurv: Vec<Genome> = Vec::new();
+    let mut cbest: Vec<(f32, Genome)> = Vec::new();
+    let (mut csum_age, mut csum_e, mut csum_master) = (0.0f64, 0.0f32, 0.0f32);
+    for (g, diet, en, alive, fit) in &cq {
+        if !alive.0 {
+            continue;
+        }
+        csum_age += diet.age as f64;
+        csum_e += en.total();
+        csum_master += master_expression(&g.uptake, &diet.reserves, RESERVE_REQ, MASTER_FLOOR);
+        cbest.push((fit.0, g.clone()));
+        csurv.push(g.clone());
+    }
+    let creature_survived = csurv.len();
+    let cn = creature_survived.max(1) as f32;
+    let cseeded_means = numeric_means(&stats.cseeded);
+    let csurv_means = numeric_means(&csurv);
+    let mut creature_trait_drift: HashMap<String, [f32; 2]> = HashMap::new();
+    for (k, sm) in &cseeded_means {
+        let vm = csurv_means.get(k).copied().unwrap_or(*sm);
+        creature_trait_drift.insert(k.clone(), [*sm, vm]);
+    }
+    cbest.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    let best_creatures: Vec<Genome> = cbest.into_iter().take(12).map(|(_, g)| g).collect();
+    let creature_survival = if stats.cstarted > 0 { creature_survived as f32 / stats.cstarted as f32 } else { 0.0 };
+
     let result = ScenarioResult {
         seed: cfg.scenario.seed,
         ticks: cfg.scenario.ticks,
@@ -437,6 +635,14 @@ pub fn scenario_step(
         trait_drift,
         health_score,
         best_genomes,
+        creature_started: stats.cstarted,
+        creature_survived,
+        creature_survival,
+        creature_mean_age: (csum_age / cn as f64) as f32,
+        creature_mean_energy: csum_e / cn,
+        creature_mean_master: csum_master / cn,
+        creature_trait_drift,
+        best_creatures,
     };
 
     match serde_json::to_string_pretty(&result) {
