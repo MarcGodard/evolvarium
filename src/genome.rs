@@ -16,7 +16,12 @@ pub const NUTRIENTS: usize = 10; // distinct nutrients (the metabolic axis: regu
 pub const MIN_SENSORS: usize = 1;
 pub const MAX_SENSORS: usize = 8;
 pub const SIG_PER_SENSOR: usize = 2; // each sensor reports [inv-dist, food type/readiness]
-pub const GLOBAL_INPUTS: usize = 4; // [energy, daylight, fatigue, bias] -- light+fatigue let brains evolve diurnal/nocturnal rest
+// global (non-sensor) brain inputs, appended after the per-sensor signals:
+// [energy, daylight, fatigue, bias, toxic_load, shade, threat_dist, threat_bearing, wet]
+// energy+light+fatigue -> diurnal/nocturnal rest; toxic_load -> avoid poison; shade -> seek canopy in heat;
+// threat_dist/bearing -> flee a bigger predator; wet -> sense being in water. (M4 widened 4 -> 9; old saved
+// nets are zero-padded for the 5 new columns on load, see Genome::ensure_net_shape.)
+pub const GLOBAL_INPUTS: usize = 9;
 pub const CONE_HALF: f32 = 0.7; // sensor field-of-view half-angle (rad)
 const RANGE_MIN: f32 = 4.0;
 const RANGE_MAX: f32 = 48.0; // long-range vision is possible (big world); its energy cost is the trade-off (see sim SENSE_COST)
@@ -146,6 +151,20 @@ pub fn n_inputs(n_sensors: usize) -> usize {
     n_sensors * SIG_PER_SENSOR + GLOBAL_INPUTS
 }
 
+// Pad every ih row to `want_in` input columns (excl. the trailing +1 bias), inserting `fill` for each new
+// column right before the bias weight. Used by ensure_net_shape to migrate older, narrower saved nets.
+fn pad_ih_inputs(net: &mut Net, want_in: usize, fill: f32) {
+    for row in net.ih.iter_mut() {
+        let have_in = row.len().saturating_sub(1); // row = input cols + 1 trailing bias
+        if have_in < want_in {
+            let at = row.len() - 1; // insert before the trailing bias weight
+            for _ in 0..(want_in - have_in) {
+                row.insert(at, fill);
+            }
+        }
+    }
+}
+
 fn random_net(rng: &mut Rng, n_in: usize, n_hidden: usize, plasticity: bool) -> Net {
     let cell = |rng: &mut Rng| if plasticity { rng.f32() * 0.2 } else { rng.range(-1.0, 1.0) };
     let ih = (0..n_hidden).map(|_| (0..n_in + 1).map(|_| cell(rng)).collect()).collect();
@@ -206,6 +225,17 @@ impl Genome {
 
     pub fn n_sensors(&self) -> usize {
         self.sensors.len()
+    }
+
+    // Migrate a loaded net to the CURRENT input width. New global brain-inputs (M4) widened n_inputs, so an
+    // older saved net has fewer input columns than the live code expects. Insert columns just before each
+    // row's trailing bias weight: net gets 0.0 (new input starts with no influence) and plast gets a small
+    // value (so the new input CAN be learned). Keeps existing learned weights aligned. No-op when the shape
+    // already matches (fresh genomes + births). ho rows unaffected (hidden count unchanged).
+    pub fn ensure_net_shape(&mut self) {
+        let want = n_inputs(self.n_sensors());
+        pad_ih_inputs(&mut self.net, want, 0.0);
+        pad_ih_inputs(&mut self.plast, want, 0.2);
     }
 
     // Two-parent recombination (--mating mode). Body STRUCTURE (sensors + brain net/plast) comes from parent
@@ -515,6 +545,27 @@ mod tests {
         half[0] = 0.6; // nutrient 1 empty
         let m_half = master_expression(&uptake, &half, 0.6, 0.2);
         assert!(m_half < 0.6 && m_half >= 0.2, "half-deficient should drop, got {m_half}");
+    }
+
+    #[test]
+    fn ensure_net_shape_pads_old_narrow_nets() {
+        // simulate an OLD save (pre-M4: 5 fewer global inputs) by stripping those columns, then migrate.
+        let mut rng = Rng::seed(7);
+        let mut g = Genome::random(&mut rng);
+        let want = n_inputs(g.n_sensors());
+        let strip = 5; // the 5 new M4 globals
+        for row in g.net.ih.iter_mut().chain(g.plast.ih.iter_mut()) {
+            let at = row.len() - 1 - strip; // before the trailing bias
+            row.drain(at..at + strip);
+        }
+        assert!(g.net.ih[0].len() < want + 1, "rows should be too narrow before migration");
+        g.ensure_net_shape();
+        for row in g.net.ih.iter().chain(g.plast.ih.iter()) {
+            assert_eq!(row.len(), want + 1, "every ih row padded to n_inputs + bias");
+        }
+        // a forward pass at the current input width must not panic (shape matches)
+        let input = vec![0.0f32; want];
+        let _ = forward(&g.net, &input);
     }
 
     #[test]

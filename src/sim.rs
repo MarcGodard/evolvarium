@@ -616,6 +616,10 @@ fn spawn_carrion(commands: &mut Commands, pos: Vec3, mass: f32) {
 // Spawn one creature (no render mesh; viz::add_creature_visuals gives it one in render mode).
 // Used for continuous-mode offspring; fresh brain from the genome's priors, learns over its own life.
 pub(crate) fn spawn_creature(commands: &mut Commands, g: Genome, pos: Vec3, rng: &mut Rng, birth_energy: f32) {
+    // migrate older saved nets to the current brain-input width before the Brain copies the weights (a
+    // shape mismatch would index out of bounds in forward()). No-op for fresh genomes + births.
+    let mut g = g;
+    g.ensure_net_shape();
     let h = rng.range(-std::f32::consts::PI, std::f32::consts::PI);
     let brain = Brain { net: g.net.clone(), prev_dist: f32::INFINITY };
     let diet = diet_state(&g);
@@ -945,6 +949,8 @@ pub fn spawn_world_headless(mut commands: Commands, mut rng: ResMut<Rng>, mut ge
     for (i, g) in genomes.into_iter().enumerate() {
         // --diverse: niche-adapt each creature + place it in its region; else founding pop in the homeland.
         let (g, p) = if gen.diverse { diverse_creature(g, i, &mut rng) } else { (g, homeland_pos(&mut rng, CREATURE_Y)) };
+        let mut g = g;
+        g.ensure_net_shape(); // migrate older saved nets to the current brain-input width
         let h = rng.range(-std::f32::consts::PI, std::f32::consts::PI);
         let brain = Brain { net: g.net.clone(), prev_dist: f32::INFINITY };
         let mut diet = diet_state(&g);
@@ -1158,6 +1164,8 @@ pub fn spawn_world_render(
     let n_creatures = if gen.garden { 4 } else { usize::MAX };
     for (i, g) in genomes.into_iter().take(n_creatures).enumerate() {
         let (g, p) = if gen.diverse { diverse_creature(g, i, &mut rng) } else { (g, homeland_pos(&mut rng, CREATURE_Y)) };
+        let mut g = g;
+        g.ensure_net_shape(); // migrate older saved nets to the current brain-input width
         let h = rng.range(-std::f32::consts::PI, std::f32::consts::PI);
         let brain = Brain { net: g.net.clone(), prev_dist: f32::INFINITY };
         let mut diet = diet_state(&g);
@@ -1793,11 +1801,12 @@ pub fn live_step(
         .collect();
     let mut eaten: HashSet<Entity> = HashSet::new();
     let mut sample_genome: Option<Genome> = None; // a living genome, for the near-extinction reseed floor
-    // creature snapshot for the social/kin need: (entity, pos, phenotype signature)
-    let cre_snap: Vec<(Entity, Vec3, [f32; 10])> = cq
+    // creature snapshot for the social/kin need + threat sense: (entity, pos, signature, combat). Combat =
+    // bite + size, so a creature can sense a bigger-combat neighbor as a predator (flee).
+    let cre_snap: Vec<(Entity, Vec3, [f32; 10], f32)> = cq
         .iter()
         .filter(|(_, _, _, _, _, a, _, _, _, _)| a.0)
-        .map(|(e, t, _, _, _, _, g, _, _, _)| (e, t.translation, signature(g)))
+        .map(|(e, t, _, _, _, _, g, _, _, _)| (e, t.translation, signature(g), g.bite + SIZE_COMBAT * g.size))
         .collect();
     // mating mode: a pool of (entity, pos, signature, genome) so a breeding creature can find a nearby
     // genetically-similar MATE to cross with. Built only when --mating (cloning genomes isn't free).
@@ -1838,6 +1847,7 @@ pub fn live_step(
         let mut best: Option<(usize, f32)> = None;
         let mut sd = vec![f32::INFINITY; n_s]; // nearest dist per sensor
         let mut skind = vec![0u8; n_s]; // food kind that nearest sensor-food is
+        let mut nearest_tree_d2 = f32::INFINITY; // nearest tree (canopy shade), any kind
         let _r = max_range.max(NEAR_QUERY);
         // scan a neighborhood of food-grid (lon/lat) cells around this creature. SPAN cells each way covers
         // the sensor + near-query radius at this grid resolution. (Longitude does not wrap here + pole cells
@@ -1861,6 +1871,9 @@ pub fn live_step(
                     if best.is_none_or(|(_, bd2)| d2 < bd2) {
                         best = Some((i, d2));
                     }
+                    if f.5.is_some() && d2 < nearest_tree_d2 {
+                        nearest_tree_d2 = d2; // f.5 = tree marker -> overhead canopy for shade
+                    }
                     let dist = d2.sqrt();
                     if dist > max_range {
                         continue; // out of every sensor's range -> skip the bearing + cone tests
@@ -1880,6 +1893,37 @@ pub fn live_step(
         // positional day/night: daylight depends on WHERE on the globe this creature is (the lit half faces
         // the sun, terminator sweeps as the planet spins) -> light niches now also vary by location.
         let light = crate::sphere::daylight_at(pdir, gen.tick);
+        // aquatic factor at this spot: 1 in ocean / wet lowland, 0 on high dry ground (low elevation = wet).
+        // Swimmers move faster here (fins) + pay on dry land (see metabolism); also a brain input.
+        let h0 = crate::sphere::elevation(pdir);
+        let wet_here = ((SWIM_WET_LEVEL - h0) / SWIM_WET_LEVEL).clamp(0.0, 1.0);
+        // shade: how shaded by overhead canopy (near a tree). Relieves open-sun heat + a brain input to seek it.
+        let shade01 = if nearest_tree_d2.is_finite() {
+            (1.0 - nearest_tree_d2.sqrt() / SHADE_RADIUS).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        // nearest THREAT: a bigger-combat creature nearby drives flee behavior. O(n) over the snapshot.
+        let my_combat = genome.bite + SIZE_COMBAT * genome.size;
+        let mut threat_d2 = f32::INFINITY;
+        let mut threat_pos = Vec3::ZERO;
+        for (e2, p2, _, c2) in &cre_snap {
+            if *e2 == entity || *c2 <= my_combat + THREAT_MARGIN {
+                continue;
+            }
+            let d2 = pos.distance_squared(*p2);
+            if d2 < threat_d2 {
+                threat_d2 = d2;
+                threat_pos = *p2;
+            }
+        }
+        let (threat_dist, threat_bear) = if threat_d2 < THREAT_RADIUS * THREAT_RADIUS {
+            let to = threat_pos - pos;
+            let bearing = wrap_angle(to.dot(east).atan2(to.dot(north)) - head.0);
+            (1.0 / (1.0 + threat_d2.sqrt()), bearing / std::f32::consts::PI)
+        } else {
+            (0.0, 0.0)
+        };
 
         // build inputs from the EVOLVABLE sensors: each is a directional eye that reports nearest food
         // in its cone (+ what type). The GA decides how many sensors + where they point.
@@ -1900,6 +1944,12 @@ pub fn live_step(
         input.push(light * 2.0 - 1.0); // daylight signal (-1 night .. +1 noon): brain can time rest by it
         input.push(diet.fatigue * 2.0 - 1.0); // exertion debt: lets the brain "feel tired" and choose to rest
         input.push(1.0); // bias
+        // M4 global inputs (order must match GLOBAL_INPUTS + ensure_net_shape padding):
+        input.push((diet.toxic_load / TOX_LOAD_CAP).clamp(0.0, 1.0)); // own toxic load -> avoid poison
+        input.push(shade01); // overhead canopy shade -> seek it in heat
+        input.push(threat_dist); // nearest bigger-predator inv-distance -> flee
+        input.push(threat_bear); // bearing to that predator (-1..1) -> which way to flee
+        input.push(wet_here); // submersion / in-water
 
         // think (per-life learned brain, dynamic topology matching this genome's sensor count)
         let (h, out) = forward(&brain.net, &input);
@@ -1911,11 +1961,6 @@ pub fn live_step(
         // fatigue saps usable output (tired = sluggish); intended effort still costs full MOVE_COST below,
         // so flailing while exhausted is a net loss -> resting to recover is the only way out.
         let move_thrust = thrust * (1.0 - FATIGUE_DRAG * diet.fatigue);
-        // aquatic factor at this spot: 1 in water / wet lowland, 0 on high dry ground. Swimmers move
-        // faster here (fins) and pay a penalty on dry land (see metabolism) -> a wetland/fish niche.
-        // aquatic factor at this spot: 1 in ocean / wet lowland, 0 on high dry ground (low elevation = wet)
-        let h0 = crate::sphere::elevation(pdir);
-        let wet_here = ((SWIM_WET_LEVEL - h0) / SWIM_WET_LEVEL).clamp(0.0, 1.0);
         // metabolic tempo: frugal (metab>0.5) trades top speed for cheaper basal; fast (metab<0.5) the reverse
         let metab_f = genome.metab - 0.5; // -0.5 fast .. +0.5 frugal
         let speed = MOVE_SPEED
@@ -1963,6 +2008,7 @@ pub fn live_step(
             + HEIGHT_COST * genome.height
             + LIGHT_COST * (light - genome.light_pref).abs() // positional daylight at this creature's location
             + TEMP_COST * (warm_miss + cold_miss * (1.0 - PELT_COLD_RELIEF * genome.pelt)) // fur insulates the cold side
+            + HEAT_SUN_COST * (light * temp_here - HEAT_COMFORT).max(0.0) * (1.0 - SHADE_RELIEF * shade01) // open-sun heat: seek shade
             + PELT_HEAT_COST * genome.pelt * temp_here // a coat overheats in hot places
             + PELT_WATER_DRAG * genome.pelt * wet_here // a waterlogged coat drags in water
             + PELT_UPKEEP * genome.pelt // growing + carrying a coat
@@ -2365,10 +2411,10 @@ fn sig_dist(a: &[f32; 10], b: &[f32; 10]) -> f32 {
 
 // Fraction of social satisfaction from nearby kin (0 isolated .. 1 fully in a herd), given a snapshot
 // of (entity, pos, signature). Excludes self by entity id.
-fn kin_fraction(me: Entity, pos: Vec3, sig: &[f32; 10], snap: &[(Entity, Vec3, [f32; 10])]) -> f32 {
+fn kin_fraction(me: Entity, pos: Vec3, sig: &[f32; 10], snap: &[(Entity, Vec3, [f32; 10], f32)]) -> f32 {
     let r2 = SOCIAL_RADIUS * SOCIAL_RADIUS;
     let mut kin = 0.0f32;
-    for (e, p, s) in snap {
+    for (e, p, s, _) in snap {
         if *e == me {
             continue;
         }

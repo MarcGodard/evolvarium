@@ -379,3 +379,16 @@ pub const EYE_COST: f32 = 0.3;        // energy/sec basal at full eyes (eyes are
 // head: a bigger head houses the brain more efficiently (cuts per-neuron BRAIN_COST) but adds basal mass.
 pub const HEAD_BRAIN_RELIEF: f32 = 0.5; // fraction of BRAIN_COST removed at full head (roomy braincase)
 pub const HEAD_BASAL: f32 = 0.4;        // energy/sec basal at full head (carrying a big head)
+
+// --- M4 brain inputs + need-for-shade (Phase 3) ---
+// threat sense: a nearby creature with enough COMBAT edge over you registers as a predator -> the brain can
+// learn to flee (new threat_dist/threat_bearing inputs).
+pub const THREAT_RADIUS: f32 = 22.0; // a bigger-combat creature within this is sensed as a threat
+pub const THREAT_MARGIN: f32 = 0.4;  // combat edge a neighbor needs over you to register as a threat
+// need for shade: in hot SUN (daylight x local temperature) an exposed creature overheats + burns energy;
+// standing within canopy shade (near a tree) or being a heat-tolerant build relieves it. A new `shade`
+// brain input lets brains learn to seek trees at midday.
+pub const SHADE_RADIUS: f32 = 6.0;   // within this of a tree counts as canopy shade
+pub const HEAT_SUN_COST: f32 = 1.4;  // energy/sec scale of open-sun heat stress in hot places
+pub const HEAT_COMFORT: f32 = 0.45;  // sun x temp below this is comfortable (no heat cost)
+pub const SHADE_RELIEF: f32 = 0.85;  // fraction of heat stress removed standing in full shade
