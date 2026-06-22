@@ -870,6 +870,27 @@ pub fn dome_mesh() -> Mesh {
     b.finish(idx)
 }
 
+// Cave mouth: a craggy GRAY rock rim (a ring of varied boulders) ringing a DARK recessed opening -> reads as a
+// cave entrance / sinkhole rather than a flat black dome. Base ~y=0; the render scales it + sinks it into the
+// slope so the dark mouth sits at ground = a hole into the rock. Vertex shades give the rim/hole contrast (gray
+// boulders, near-black mouth); the rock material tints it. Mirrors the boulder/blob look so it blends with the terrain.
+pub fn cave_mesh() -> Mesh {
+    let mut blobs: Vec<(Vec3, f32, f32)> = Vec::new();
+    // dark recessed opening in the middle (the mouth): low + near-black so it reads as a hollow
+    blobs.push((Vec3::new(0.0, 0.05, 0.0), 0.58, 0.05));
+    // craggy rock rim: a ring of boulders, varied size/height/shade so it reads as a piled outcrop, not a smooth ring
+    let rim = 8usize;
+    for k in 0..rim {
+        let a = std::f32::consts::TAU * k as f32 / rim as f32;
+        let (s, c) = a.sin_cos();
+        let r = 0.36 + 0.14 * ((k * 3 % 5) as f32 / 5.0); // varied boulder size
+        let h = 0.42 + 0.20 * ((k % 3) as f32 / 2.0); // varied height -> uneven crag
+        let shade = 0.46 + 0.24 * ((k * 7 % 4) as f32 / 4.0); // gray rock, slightly varied
+        blobs.push((Vec3::new(c * 0.64, h, s * 0.64), r, shade));
+    }
+    blob_cluster_mesh(&blobs)
+}
+
 // Cactus: tall rounded column + couple stubby up-curved arms (saguaro silhouette). Base at y=0.
 pub fn cactus_mesh() -> Mesh {
     let mut b = MeshBuf::new();

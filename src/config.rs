@@ -183,6 +183,7 @@ pub const CAVE_ROCK_MIN: f32 = 0.30;   // min rockiness to host a cave (high roc
 pub const CAVE_ELEV_MIN: f32 = 0.75;   // min normalized elevation for a cave (ridges + peaks, not lowland rock)
 pub const CAVE_RADIUS: f32 = 5.0;      // within this of a cave mouth counts as sheltered (like SHADE_RADIUS)
 pub const CAVE_SHELTER: f32 = 0.45;    // max predation-success reduction at a cave mouth (a real hide, below a full escape)
+pub const CAVE_SEA_COUNT: usize = 3;   // underwater caves, clustered on a submerged seabed ridge (a place for swimmers to hide)
 pub const ROCK_GRASS_FRAC: f32 = 0.15; // chance rocky-ground sample still seeds thin grass tuft -> sparse grass between rocks, not bare stone
 pub const ROCK_GRASS_HAB: f32 = 0.28;  // survival-habitability floor for grass on rocky ground (keeps sparse rocky tufts alive, not churning)
 
@@ -298,6 +299,11 @@ pub const TEMP_TOL: f32 = 0.3;           // temp_pref mismatch under this harmle
 // edge band (0.25..0.34) keeps cold-adapted flora (alpine cushion, moss); only genuinely frozen cap kills
 // outright. Independent of temp_pref: even cold-lover freezes on ice.
 pub const FREEZE_TEMP: f32 = 0.22;       // base_temperature below this = frozen -> plants/trees die instantly
+// Cold gates for ground-cover (grass) + ocean carpet (seaweed), which lack the plant_step freeze kill. Match
+// the biome_color render bands so green stops where white starts. Grass fades across ICE_CAP_TEMP..FREEZE_TEMP
+// (tundra fringe) then hard-culls; seaweed culled below SEA_ICE_TEMP so no kelp under rendered pack ice.
+pub const ICE_CAP_TEMP: f32 = 0.34;      // land ice-cap render onset: grass fully faded by here
+pub const SEA_ICE_TEMP: f32 = 0.30;      // ocean pack-ice render onset: seaweed gone below this (cold kelp OK above)
 // Trees get climate niche too, but SOFTER than ground plants (long-lived, deep roots): wider harmless band
 // + gentler per-tick kill, so tree dies back only well off thermal niche (frozen pole / desert heat), not
 // at first mismatch. Growth still tapers off-niche via shared TEMP_FLOOR factor.

@@ -925,7 +925,12 @@ fn spawn_grass(commands: &mut Commands, g: PlantGenome, mass: f32, pos: Vec3) {
 fn grass_hab(d: Vec3, gw: Option<&GroundWater>) -> f32 {
     let water = gw.map_or(0.0, |g| g.get(crate::sphere::surface_pos(d, 0.0)));
     let m = (crate::sphere::moisture(d) + WET_GAIN * water).clamp(0.0, 1.0);
-    crate::sphere::plant_habitability_with_moisture(d, m)
+    // cold gate: grass alone lacks plant_step's freeze kill, so without this it carpets the rendered ice cap.
+    // Fade habitability to 0 across ICE_CAP_TEMP..FREEZE_TEMP -> tundra fringe at the frost edge, bare on the
+    // white cap (matches biome_color). grass_step also hard-culls below FREEZE_TEMP as a backstop.
+    let t = crate::sphere::base_temperature(d);
+    let cold = ((t - FREEZE_TEMP) / (crate::config::ICE_CAP_TEMP - FREEZE_TEMP)).clamp(0.0, 1.0);
+    crate::sphere::plant_habitability_with_moisture(d, m) * cold
 }
 
 // Whole-planet: grass blankets ALL plant-capable land worldwide (not just homeland). Rejection-samples the
@@ -934,7 +939,8 @@ fn grass_hab(d: Vec3, gw: Option<&GroundWater>) -> f32 {
 fn grass_pos(rng: &mut Rng, gw: Option<&GroundWater>) -> Vec3 {
     let mut d = crate::sphere::random_dir_in_cap(rng, Vec3::Y, std::f32::consts::PI);
     for _ in 0..8 {
-        if !crate::sphere::is_ocean(d) {
+        // frozen cap excluded for ALL paths (rocky too) -> no spawn-then-freeze-cull churn on the ice
+        if !crate::sphere::is_ocean(d) && crate::sphere::base_temperature(d) >= FREEZE_TEMP {
             // grassland + rain-bloomed desert clear the gate; rocky ground gets SOME grass between rocks but only
             // a small fraction of rocky samples take -> sparse + thin.
             let hab = grass_hab(d, gw);
@@ -971,7 +977,8 @@ fn seaweed_pos(rng: &mut Rng) -> Vec3 {
     let mut d = crate::sphere::random_dir_in_cap(rng, Vec3::Y, std::f32::consts::PI);
     for _ in 0..8 {
         let e01 = crate::sphere::elevation01(d);
-        if crate::sphere::is_ocean(d) && e01 > crate::sphere::AQUATIC_FLOOR {
+        // skip pack-ice water (below SEA_ICE_TEMP) so kelp doesn't seed under the rendered ice
+        if crate::sphere::is_ocean(d) && e01 > crate::sphere::AQUATIC_FLOOR && crate::sphere::base_temperature(d) >= crate::config::SEA_ICE_TEMP {
             // denser in lit shallows, thinner deep -> accept with prob ~ shallowness
             let shallow = ((e01 - crate::sphere::AQUATIC_FLOOR) / (crate::sphere::SEA_LEVEL - crate::sphere::AQUATIC_FLOOR)).clamp(0.0, 1.0);
             if rng.f32() < 0.35 + 0.65 * shallow {
@@ -1026,6 +1033,40 @@ fn place_caves(rng: &mut Rng) -> Vec<Vec3> {
     }
     let (_lon, lat) = crate::sphere::dir_to_lonlat(center);
     info!("caves: {} placed in a rocky highland cluster near lat {:.0} deg", out.len(), lat.to_degrees());
+    out
+}
+
+// Underwater caves: a cluster on a SUBMERGED seabed ridge (ocean, above the abyssal floor so reachable + lit),
+// a place for swimmers to hide. Same idea as place_caves but in the sea; folded into the same CavePositions, so
+// the shelter + predation-defense mechanics cover aquatic prey for free. Prefers the SHALLOWER seabed (a reef
+// ridge) by accepting a candidate with prob ~ how shallow it is.
+fn place_sea_caves(rng: &mut Rng) -> Vec<Vec3> {
+    let band = |d: Vec3| crate::sphere::is_ocean(d) && crate::sphere::elevation01(d) > crate::sphere::AQUATIC_FLOOR;
+    let shallow = |d: Vec3| ((crate::sphere::elevation01(d) - crate::sphere::AQUATIC_FLOOR) / (crate::sphere::SEA_LEVEL - crate::sphere::AQUATIC_FLOOR)).clamp(0.0, 1.0);
+    // pick a shallow seabed-ridge center for the cluster
+    let mut center = None;
+    for _ in 0..4000 {
+        let d = crate::sphere::random_dir_in_cap(rng, Vec3::Y, std::f32::consts::PI);
+        if band(d) && rng.f32() < shallow(d) {
+            center = Some(d);
+            break;
+        }
+    }
+    let Some(center) = center else { return Vec::new() };
+    let mut out = Vec::with_capacity(CAVE_SEA_COUNT);
+    let mut tries = 0usize;
+    while out.len() < CAVE_SEA_COUNT && tries < CAVE_SEA_COUNT * 200 {
+        tries += 1;
+        let d = crate::sphere::random_dir_in_cap(rng, center, CAVE_CLUSTER_CAP);
+        if band(d) {
+            out.push(crate::sphere::surface_pos(d, 0.0));
+        }
+    }
+    if out.is_empty() {
+        out.push(crate::sphere::surface_pos(center, 0.0));
+    }
+    let (_lon, lat) = crate::sphere::dir_to_lonlat(center);
+    info!("sea caves: {} placed on a submerged seabed ridge near lat {:.0} deg", out.len(), lat.to_degrees());
     out
 }
 
@@ -1140,8 +1181,11 @@ pub fn spawn_world_headless(mut commands: Commands, mut rng: ResMut<Rng>, mut ge
             spawn_seaweed(&mut commands, PlantGenome::seaweed(&mut rng), SEAWEED_START_MASS, seaweed_pos(&mut rng));
         }
     }
-    // cave sites: positions only (no render assets headless), but the shelter + predation-defense mechanics read them.
-    commands.insert_resource(CavePositions { positions: place_caves(&mut rng) });
+    // cave sites: positions only (no render assets headless), but the shelter + predation-defense mechanics read
+    // them. Land caves (rocky highland) + sea caves (submerged ridge) share one list.
+    let mut caves = place_caves(&mut rng);
+    caves.extend(place_sea_caves(&mut rng));
+    commands.insert_resource(CavePositions { positions: caves });
 }
 
 // Scatter initial trees (half fruit trees, half uneatable evergreens) on habitable land. Always WHOLE-PLANET:
@@ -1300,25 +1344,27 @@ pub fn spawn_world_render(
         }
     }
 
-    // caves: shelter + a place to hide. Render-only dark dome (a rock hood/cave mouth) at each cave site on the
-    // rocky highland, sunk into the slope; the same positions drive the shade-relief + predation-hide mechanics.
-    let caves = place_caves(&mut rng);
+    // caves: shelter + a place to hide. Render-only dark dome (a rock hood/cave mouth) at each cave site, sunk
+    // into the slope; the same positions drive the shade-relief + predation-hide mechanics. Land caves (rocky
+    // highland) + sea caves (submerged seabed ridge) share one list -> the dome loop dresses both.
+    let mut caves = place_caves(&mut rng);
+    caves.extend(place_sea_caves(&mut rng));
     {
         use std::f32::consts::PI;
-        let cave_mesh = meshes.add(crate::viz::dome_mesh());
+        let cave_m = meshes.add(crate::viz::cave_mesh());
         let cave_mat = materials.add(StandardMaterial {
-            base_color: Color::srgb(0.16, 0.15, 0.15), // dark recessed basalt
+            base_color: Color::srgb(0.50, 0.46, 0.42), // rock gray-brown; the mesh vertex shades give the dark mouth
             perceptual_roughness: 1.0,
             ..default()
         });
         for &c in &caves {
             let up = c.normalize_or_zero();
             let base = crate::sphere::surface_pos(up, 0.0);
-            let s = rng.range(3.0, 5.0); // a cave hood reads bigger than a boulder
-            let mut tf = Transform::from_translation(base - up * (s * 0.22)); // sink the hood into the slope
+            let s = rng.range(4.0, 6.0); // a cave outcrop reads bigger than a boulder
+            let mut tf = Transform::from_translation(base - up * (s * 0.18)); // sink the crag base into the slope
             tf.rotation = Quat::from_rotation_arc(Vec3::Y, up) * Quat::from_rotation_y(rng.range(-PI, PI));
-            tf.scale = Vec3::new(s * rng.range(0.9, 1.3), s * rng.range(0.6, 0.9), s * rng.range(0.9, 1.3));
-            commands.spawn((Mesh3d(cave_mesh.clone()), MeshMaterial3d(cave_mat.clone()), tf, bevy::light::NotShadowCaster));
+            tf.scale = Vec3::new(s * rng.range(0.95, 1.25), s * rng.range(0.7, 0.95), s * rng.range(0.95, 1.25));
+            commands.spawn((Mesh3d(cave_m.clone()), MeshMaterial3d(cave_mat.clone()), tf, bevy::light::NotShadowCaster));
         }
     }
     commands.insert_resource(CavePositions { positions: caves });
@@ -1445,6 +1491,13 @@ pub fn grass_step(
             count = count.saturating_sub(1);
             continue;
         }
+        // hard freeze: grass on the frozen ice cap dies outright (mirrors plant_step). grass_hab cold-fade
+        // already thins tufts toward the edge; this culls any that landed on the rendered white cap.
+        if crate::sphere::base_temperature(pdir) < FREEZE_TEMP {
+            commands.entity(e).despawn();
+            count = count.saturating_sub(1);
+            continue;
+        }
         // mortality off plant-capable soil: dry/wet mismatch, poor site (rock/desert/cold), or submerged.
         // Confines grass to the plant-growth band. Dead grass just vanishes (no detritus).
         let water = gw.get(ppos);
@@ -1498,6 +1551,13 @@ pub fn seaweed_step(
         // cull fronds no longer in the submerged band (terrain drift / bad placement): stranded above sea level,
         // or sunk past abyssal floor (too dark to live).
         if !crate::sphere::is_ocean(pdir) || e01 <= crate::sphere::AQUATIC_FLOOR {
+            commands.entity(e).despawn();
+            count = count.saturating_sub(1);
+            continue;
+        }
+        // pack ice: cold polar ocean freezes over. Cull seaweed below the sea-ice render band -> no kelp poking
+        // through white ice. Cold-water kelp above SEA_ICE_TEMP fine (cold seas grow the best kelp in reality).
+        if crate::sphere::base_temperature(pdir) < crate::config::SEA_ICE_TEMP {
             commands.entity(e).despawn();
             count = count.saturating_sub(1);
             continue;
