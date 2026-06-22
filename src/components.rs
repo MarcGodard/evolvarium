@@ -147,6 +147,12 @@ use crate::genome::Net;
 pub struct Brain {
     pub net: Net, // working copy of genome weights, tuned by lifetime learning
     pub prev_dist: f32, // distance to nearest food last tick, for approach-reward shaping
+    // combat intents stashed each tick in live_step (out[2]/out[3]) for predation_step to read same-tick.
+    pub attack: f32,  // NN attack intent 0..1: hunts when above ATTACK_INTENT_THRESH
+    pub defend: f32,  // NN brace intent 0..1: raises defense, costs mobility
+    // pending combat reward set by predation_step (kill/defend/whiff), consumed + cleared next live_step
+    // learn() call. 1-tick delay, same pattern as prev_dist.
+    pub fight_reward: f32,
 }
 
 // Per-life locomotion diagnostic: where the creature was born + total path walked. Lets us measure

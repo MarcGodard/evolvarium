@@ -196,8 +196,9 @@ fn apply_overrides_genome(base: Genome, ov: &Map<String, Value>) -> Genome {
 
 // Reflex brain priors (hand-wired starting weights; lifetime learning refines them in the run). Input layout
 // (genome.rs): per sensor i -> [inv_dist @ 2i, type @ 2i+1]; then globals at base = n_sensors*2:
-// [energy, daylight, fatigue, bias, toxic_load, shade, threat_dist, threat_bear, wet]. Outputs [thrust, turn].
-// Returns None for an unknown name (caller keeps the random net).
+// [energy, daylight, fatigue, bias, toxic_load, shade, threat_dist, threat_bear, wet]. Outputs
+// [thrust, turn, attack, defend, eat, sprint]; reflex priors only wire thrust/turn (rows 0/1), the combat
+// rows 2..6 stay zero and are learned. Returns None for an unknown name (caller keeps the random net).
 fn reflex_brain(name: &str, sensors: &[Sensor]) -> Option<Net> {
     let n_s = sensors.len();
     let base = n_s * crate::genome::SIG_PER_SENSOR;

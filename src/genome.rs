@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 pub const MIN_HIDDEN: usize = 2; // brains never shrink below this
 pub const MAX_HIDDEN: usize = 16; // ...nor grow beyond (bounds the per-neuron upkeep cost)
-pub const OUTPUTS: usize = 2; // [thrust 0..1, turn -1..1]
+pub const OUTPUTS: usize = 6; // [thrust 0..1, turn -1..1, attack, defend, eat, sprint] (last 4 are 0..1 intents)
 pub const NFOOD: usize = 4; // plant FAMILY count (sensing hue + kind label only; NOT the metabolic axis)
 pub const NUTRIENTS: usize = 10; // distinct nutrients (the metabolic axis: regulatory uptake genome, see 14/05)
 
@@ -165,6 +165,41 @@ fn pad_ih_inputs(net: &mut Net, want_in: usize, fill: f32) {
     }
 }
 
+// Migration default biases for outputs ADDED after a seed was saved. A migrated creature must behave like it did
+// before the new outputs existed: combat + effort OFF (strong negative bias -> sigmoid ~0, so no unearned
+// ATTACK_COST / SPRINT_COST / brace-drag), but EAT ON (positive bias -> sigmoid ~1, so it still feeds on contact
+// like the pre-eat-gate code). Fresh founders use random_net instead (varied combat outputs) so emergence works.
+// Indices: [thrust, turn, attack, defend, eat, sprint]; 0/1 are never padded (always present).
+const OUTPUT_MIGRATE_BIAS: [f32; OUTPUTS] = [0.0, 0.0, -4.0, -4.0, 4.0, -4.0];
+
+// Grow a NET's ho layer up to want_rows (migrating a seed saved when OUTPUTS was smaller, e.g. pre-combat 2-output
+// nets). A new output row is hidden+1 long (matches the live hidden count): zero hidden->output weights + a
+// per-output default bias so the migrated output defaults off/on sensibly. No-op when ho already has enough rows.
+fn pad_net_ho(net: &mut Net, want_rows: usize) {
+    if net.ho.is_empty() {
+        return;
+    }
+    let row_len = net.ho[0].len(); // hidden + 1 (trailing bias), matches the live hidden count
+    while net.ho.len() < want_rows {
+        let idx = net.ho.len();
+        let mut row = vec![0.0; row_len];
+        *row.last_mut().unwrap() = OUTPUT_MIGRATE_BIAS.get(idx).copied().unwrap_or(0.0); // bias sets default activation
+        net.ho.push(row);
+    }
+}
+
+// Grow a PLAST net's ho layer: new rows are uniformly small-plasticity, so the migrated outputs CAN be tuned by
+// lifetime learning (drift off their default bias once a reward signal favors using them).
+fn pad_plast_ho(plast: &mut Net, want_rows: usize) {
+    if plast.ho.is_empty() {
+        return;
+    }
+    let row_len = plast.ho[0].len();
+    while plast.ho.len() < want_rows {
+        plast.ho.push(vec![0.2; row_len]);
+    }
+}
+
 fn random_net(rng: &mut Rng, n_in: usize, n_hidden: usize, plasticity: bool) -> Net {
     let cell = |rng: &mut Rng| if plasticity { rng.f32() * 0.2 } else { rng.range(-1.0, 1.0) };
     let ih = (0..n_hidden).map(|_| (0..n_in + 1).map(|_| cell(rng)).collect()).collect();
@@ -242,11 +277,16 @@ impl Genome {
     // older saved net has fewer input columns than the live code expects. Insert columns just before each
     // row's trailing bias weight: net gets 0.0 (new input starts with no influence) and plast gets a small
     // value (so the new input CAN be learned). Keeps existing learned weights aligned. No-op when the shape
-    // already matches (fresh genomes + births). ho rows unaffected (hidden count unchanged).
+    // already matches (fresh genomes + births). Also grows ho rows if OUTPUTS expanded since the seed was saved.
     pub fn ensure_net_shape(&mut self) {
         let want = n_inputs(self.n_sensors());
         pad_ih_inputs(&mut self.net, want, 0.0);
         pad_ih_inputs(&mut self.plast, want, 0.2);
+        // ho rows: a pre-combat seed (OUTPUTS 2) gets the 4 new output rows appended (attack/defend/eat/sprint),
+        // net biased to safe defaults (combat off, eat on) + plast learnable. learn() loops ho generically, so
+        // both layers must grow or it indexes plast.ho out of bounds.
+        pad_net_ho(&mut self.net, OUTPUTS);
+        pad_plast_ho(&mut self.plast, OUTPUTS);
     }
 
     // Two-parent recombination (--mating mode). Body STRUCTURE (sensors + brain net/plast) comes from parent
@@ -490,6 +530,11 @@ pub fn forward(net: &Net, input: &[f32]) -> (Vec<f32>, [f32; OUTPUTS]) {
     }
     out[0] = sigmoid(out[0]); // thrust
     out[1] = out[1].tanh(); // turn
+    // combat/effort intents: attack, defend/brace, eat-gate, sprint. all 0..1 (sigmoid). loop so a future
+    // OUTPUTS bump can't leave a raw unactivated output.
+    for o in out.iter_mut().skip(2) {
+        *o = sigmoid(*o);
+    }
     (h, out)
 }
 
@@ -577,6 +622,28 @@ mod tests {
         // a forward pass at the current input width must not panic (shape matches)
         let input = vec![0.0f32; want];
         let _ = forward(&g.net, &input);
+    }
+
+    #[test]
+    fn ensure_net_shape_grows_old_output_rows() {
+        // simulate a PRE-COMBAT save (OUTPUTS was 2) by truncating ho to 2 rows, then migrate to OUTPUTS=6.
+        let mut rng = Rng::seed(11);
+        let mut g = Genome::random(&mut rng);
+        g.net.ho.truncate(2);
+        g.plast.ho.truncate(2);
+        assert_eq!(g.net.ho.len(), 2, "pre-migration ho has the old output count");
+        g.ensure_net_shape();
+        assert_eq!(g.net.ho.len(), OUTPUTS, "net ho padded up to current OUTPUTS");
+        assert_eq!(g.plast.ho.len(), OUTPUTS, "plast ho padded up too (learn() indexes it)");
+        let hidden_plus_bias = g.net.ih.len() + 1;
+        for row in g.net.ho.iter().chain(g.plast.ho.iter()) {
+            assert_eq!(row.len(), hidden_plus_bias, "new output rows are hidden+1 wide");
+        }
+        // forward + learn at OUTPUTS=6 must not panic (the migration covers both layers)
+        let want = n_inputs(g.n_sensors());
+        let input = vec![0.1f32; want];
+        let (h, out) = forward(&g.net, &input);
+        learn(&mut g.net, &g.plast, &input, &h, &out, 1.0, 0.04);
     }
 
     #[test]

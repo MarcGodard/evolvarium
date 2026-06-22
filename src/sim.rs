@@ -637,7 +637,7 @@ pub(crate) fn spawn_creature(commands: &mut Commands, g: Genome, pos: Vec3, rng:
     let mut g = g;
     g.ensure_net_shape();
     let h = rng.range(-std::f32::consts::PI, std::f32::consts::PI);
-    let brain = Brain { net: g.net.clone(), prev_dist: f32::INFINITY };
+    let brain = Brain { net: g.net.clone(), prev_dist: f32::INFINITY, attack: 0.0, defend: 0.0, fight_reward: 0.0 };
     let diet = diet_state(&g);
     commands.spawn((
         Creature,
@@ -982,7 +982,7 @@ pub fn spawn_world_headless(mut commands: Commands, mut rng: ResMut<Rng>, mut ge
         let mut g = g;
         g.ensure_net_shape(); // migrate older saved nets to the current brain-input width
         let h = rng.range(-std::f32::consts::PI, std::f32::consts::PI);
-        let brain = Brain { net: g.net.clone(), prev_dist: f32::INFINITY };
+        let brain = Brain { net: g.net.clone(), prev_dist: f32::INFINITY, attack: 0.0, defend: 0.0, fight_reward: 0.0 };
         let mut diet = diet_state(&g);
         if skip_warmup {
             diet.age = (rng.f32() * 600.0) as u32;
@@ -1213,7 +1213,7 @@ pub fn spawn_world_render(
         let mut g = g;
         g.ensure_net_shape(); // migrate older saved nets to the current brain-input width
         let h = rng.range(-std::f32::consts::PI, std::f32::consts::PI);
-        let brain = Brain { net: g.net.clone(), prev_dist: f32::INFINITY };
+        let brain = Brain { net: g.net.clone(), prev_dist: f32::INFINITY, attack: 0.0, defend: 0.0, fight_reward: 0.0 };
         let mut diet = diet_state(&g);
         if skip_warmup {
             diet.age = (rng.f32() * 600.0) as u32;
@@ -1730,16 +1730,17 @@ pub fn predation_step(
     mut rng: ResMut<Rng>,
     mut commands: Commands,
     mut soil: ResMut<Soil>,
-    mut cq: Query<(Entity, &Transform, &mut Energy, &mut Fitness, &mut Alive, &Genome), With<Creature>>,
+    mut cq: Query<(Entity, &Transform, &mut Energy, &mut Fitness, &mut Alive, &Genome, &mut Brain), With<Creature>>,
 ) {
-    // snapshot living creatures: (entity, pos, ATTACK combat, energy, kin-sig, DEFENSE combat, venom, climb).
-    // attack = bite + size; defense = attack + armor (armor protects but doesn't help you hunt).
-    let snap: Vec<(Entity, Vec3, f32, f32, [f32; 10], f32, f32, f32)> = cq
+    // snapshot living creatures: (entity, pos, ATTACK combat, energy, kin-sig, DEFENSE combat, venom, climb,
+    // attack-intent, defend-intent). attack = bite + size; defense = attack + armor (armor protects but doesn't
+    // help you hunt); intents = the brain's out[2]/out[3] stashed this tick in live_step.
+    let snap: Vec<(Entity, Vec3, f32, f32, [f32; 10], f32, f32, f32, f32, f32)> = cq
         .iter()
-        .filter(|(_, _, _, _, a, _)| a.0)
-        .map(|(e, t, en, _, _, g)| {
+        .filter(|(_, _, _, _, a, _, _)| a.0)
+        .map(|(e, t, en, _, _, g, b)| {
             let attack = g.bite + SIZE_COMBAT * g.size;
-            (e, t.translation, attack, en.total(), signature(g), attack + ARMOR_DEF * g.armor, g.venom, g.climb)
+            (e, t.translation, attack, en.total(), signature(g), attack + ARMOR_DEF * g.armor, g.venom, g.climb, b.attack, b.defend)
         })
         .collect();
     if snap.len() < 2 {
@@ -1747,19 +1748,23 @@ pub fn predation_step(
     }
     let mut killed: HashSet<Entity> = HashSet::new();
     let mut gains: HashMap<Entity, f32> = HashMap::new();
+    let mut committed: HashSet<Entity> = HashSet::new(); // attackers that chose to hunt this tick (intent > thresh)
+    let mut defended: HashSet<Entity> = HashSet::new(); // prey that braced and repelled an attack
     let r2 = ATTACK_RADIUS * ATTACK_RADIUS;
     let rs2 = SOCIAL_RADIUS * SOCIAL_RADIUS;
-    for (ai, &(ae, apos, abite, aenergy, _asig, _, _, _)) in snap.iter().enumerate() {
+    for (ai, &(ae, apos, abite, _aenergy, _asig, _, _, _, a_atk_intent, _)) in snap.iter().enumerate() {
         if killed.contains(&ae) {
             continue; // a creature killed this tick doesn't also attack
         }
-        // only a HUNGRY creature hunts -> well-fed crowds don't cannibalize each other (this was the
-        // continuous-mode killer: at high density, packed well-fed creatures mass-cannibalized -> crash).
-        if aenergy > PREDATION_HUNGER {
+        // NN-DRIVEN: a creature hunts iff its brain raised the attack output past the threshold (no hunger gate).
+        // What keeps well-fed crowds from mass-cannibalizing is now the energy cost of committing (ATTACK_COST,
+        // paid in live_step) + the learned R_WASTE penalty for whiffing, not a blanket well-fed skip.
+        if a_atk_intent <= ATTACK_INTENT_THRESH {
             continue;
         }
+        committed.insert(ae);
         let mut best: Option<(f32, usize)> = None;
-        for (bi, &(be, bpos, _, _, _, _, _, _)) in snap.iter().enumerate() {
+        for (bi, &(be, bpos, _, _, _, _, _, _, _, _)) in snap.iter().enumerate() {
             if bi == ai || killed.contains(&be) {
                 continue;
             }
@@ -1769,36 +1774,44 @@ pub fn predation_step(
             }
         }
         if let Some((_, bi)) = best {
-            let (be, bpos, _battack, _, bsig, bdef, bven, bclimb) = snap[bi];
+            let (be, bpos, _battack, _, bsig, bdef, bven, bclimb, _, b_def_intent) = snap[bi];
             // herd safety: prey surrounded by KIN is harder to pick off (vigilance) -> being social pays
             let mut kin = 0.0f32;
-            for (e2, p2, _, _, s2, _, _, _) in &snap {
+            for (e2, p2, _, _, s2, _, _, _, _, _) in &snap {
                 if *e2 != be && bpos.distance_squared(*p2) < rs2 && sig_dist(&bsig, s2) < SOCIAL_SIM {
                     kin += 1.0;
                 }
             }
             let prey_kin = (kin / SOCIAL_TARGET).min(1.0);
-            // success = attacker combat vs prey DEFENSE (combat + armor), minus a required edge
-            // (PREDATION_BIAS: equal-combat creatures barely prey on each other), reduced by herd safety
-            // AND the prey's climb agility (arboreal escape).
-            let success = sigmoid(BITE_K * (abite - bdef) - PREDATION_BIAS)
+            // success = attacker combat vs prey EFFECTIVE defense (combat + armor + active BRACE), minus a
+            // required edge (PREDATION_BIAS), reduced by herd safety AND the prey's climb agility (arboreal escape).
+            let eff_def = bdef + BRACE_DEF * b_def_intent;
+            let success = sigmoid(BITE_K * (abite - eff_def) - PREDATION_BIAS)
                 * (1.0 - SOCIAL_SAFETY * prey_kin)
                 * (1.0 - CLIMB_EVADE * bclimb);
             if rng.f32() < success {
                 killed.insert(be);
                 // venomous prey is a sickening kill -> the predator gains far less (the venom deterrent)
                 *gains.entry(ae).or_insert(0.0) += PREDATION_GAIN * (1.0 - VENOM_DETER * bven);
+            } else if b_def_intent > 0.5 {
+                defended.insert(be); // attack repelled while actively bracing -> reward that defense
             }
         }
     }
-    if killed.is_empty() {
-        return;
+    if committed.is_empty() {
+        return; // nobody chose to attack -> no kills, no combat rewards to assign
     }
     let continuous_live = gen.continuous && gen.generation >= WARMUP_GENS;
-    for (e, t, mut energy, mut fit, mut alive, gen_e) in &mut cq {
+    for (e, t, mut energy, mut fit, mut alive, gen_e, mut brain) in &mut cq {
         if let Some(g) = gains.get(&e) {
             energy.add_fat(*g, fat_cap(gen_e)); // a kill = meat -> fat store
             fit.0 += g * 0.3; // predation counts toward selection
+            brain.fight_reward += R_KILL; // this attack paid off -> reinforce the attack output
+        } else if committed.contains(&e) {
+            brain.fight_reward += R_WASTE; // committed but landed nothing -> discourage pointless aggression
+        }
+        if defended.contains(&e) {
+            brain.fight_reward += R_DEFEND; // braced + survived an attack -> reinforce the defend output
         }
         if killed.contains(&e) {
             alive.0 = false;
@@ -2018,15 +2031,22 @@ pub fn live_step(
         let power_frac = (energy.power() / MOVE_POWER_REF).clamp(0.0, 1.0);
         let thrust = out[0] * power_frac;
         let turn = out[1];
+        // stash combat intents for predation_step (runs later this same tick): attack drives hunting,
+        // defend/brace raises defense there at the cost of mobility (applied here).
+        brain.attack = out[2];
+        brain.defend = out[3];
+        let sprint = out[5]; // burst-effort 0..1: faster chase OR flee, paid in energy + fatigue below
         // fatigue saps usable output (tired = sluggish); intended effort still costs full MOVE_COST below,
-        // so flailing while exhausted is a net loss -> resting to recover is the only way out.
-        let move_thrust = thrust * (1.0 - FATIGUE_DRAG * diet.fatigue);
+        // so flailing while exhausted is a net loss -> resting to recover is the only way out. Bracing
+        // (defend) immobilizes: trade ground speed for a harder-to-kill stance.
+        let move_thrust = thrust * (1.0 - FATIGUE_DRAG * diet.fatigue) * (1.0 - BRACE_DRAG * out[3]);
         // metabolic tempo: frugal (metab>0.5) trades top speed for cheaper basal; fast (metab<0.5) the reverse
         let metab_f = genome.metab - 0.5; // -0.5 fast .. +0.5 frugal
         let speed = MOVE_SPEED
             * (1.0 + SWIM_SPEED * genome.swim * wet_here) // swimmers fast in water
             * (1.0 + LIMB_TRACTION * genome.limbs * (1.0 - wet_here)) // more legs = land traction (ground speed)
-            * (1.0 - 0.5 * metab_f);
+            * (1.0 - 0.5 * metab_f)
+            * (1.0 + SPRINT_BOOST * sprint); // sprint: burst speed for chase/flee
 
         // act: turn, then take a great-circle step along the heading over the planet surface
         head.0 = wrap_angle(head.0 + turn * TURN_SPEED * dt);
@@ -2129,12 +2149,14 @@ pub fn live_step(
             + SWIM_LAND_COST * genome.swim * (1.0 - wet_here) // fins are a liability on dry land
             + WATER_PRESSURE_COST * (1.0 - genome.swim) * (-h1 / crate::sphere::SEA_FLOOR_MAX).clamp(0.0, 1.0) // non-swimmers struggle in deep water (depth pressure)
             + FAT_UPKEEP * genome.adiposity * fat_frac // carrying fat costs upkeep (no free lunch)
+            + SPRINT_COST * sprint // burst effort burns extra fuel
+            + ATTACK_COST * brain.attack // committing to an attack costs energy whether or not it lands (the stabilizer replacing the hunger gate)
             + STRESS_COST * diet.fatigue)
             * dt);
         // fast store leaks even at rest (volatile -> can't bank quick energy, use-it-or-lose-it)
         energy.fast = (energy.fast - FAST_LEAK * dt).max(0.0);
         // fatigue dynamics: exertion (thrust) accrues debt; idling (low thrust) sheds it. Clamped 0..1.
-        diet.fatigue = (diet.fatigue + (FATIGUE_GAIN * thrust - FATIGUE_REST * (1.0 - thrust)) * dt).clamp(0.0, 1.0);
+        diet.fatigue = (diet.fatigue + (FATIGUE_GAIN * thrust + SPRINT_FATIGUE * sprint - FATIGUE_REST * (1.0 - thrust)) * dt).clamp(0.0, 1.0);
         // wildfire: standing in fire burns energy fast (deadly to anything caught in a blaze)
         let here_fire = fire.get(np);
         if here_fire > 0.05 {
@@ -2160,7 +2182,9 @@ pub fn live_step(
             let tree = foods[i].5; // None=plant/carrion, Some(true)=fruit tree, Some(false)=evergreen
             let ferment = foods[i].6; // Some(toxic) -> fermenting plant matter (fruit/detritus); None+rot -> meat
             let seed = foods[i].7.clone(); // Some(genome) -> fallen fruit carrying a viable seed (planted if eaten ripe)
-            if np.distance(fp) < EAT_RADIUS {
+            // eat-gate (out[4]): ingestion is now a CHOICE -> the brain can refuse bad food (unripe/spoiled/toxic).
+            // EAT_GATE sits BELOW the fresh-net 0.5 baseline so founders can feed before learning (no gen-0 starve).
+            if out[4] > EAT_GATE && np.distance(fp) < EAT_RADIUS {
                 // trees: a creature reaches an EDIBLE tree if its height + TREE_REACH_MARGIN, EXTENDED by
                 // the tree's branches (BRANCH_REACH), >= the tree's height. So a tall bare tree feeds only
                 // tall creatures, but a branchy one hangs fruit low enough for short creatures too.
@@ -2347,7 +2371,8 @@ pub fn live_step(
         // edibility is modeled by POSITION: a HUNGRY creature standing on grass-bearing soil (plant-capable,
         // non-ocean land = where grass grows) nibbles a small sugar trickle. Hunger-gated so well-fed
         // creatures ignore it (no gorging), and it never distracts foraging (grass isn't sensed at all).
-        if energy.total() < START_ENERGY {
+        // eat-gated too (out[4]) for coherence: grazing is ingestion, so it's a choice like any other meal.
+        if out[4] > EAT_GATE && energy.total() < START_ENERGY {
             let gdir = np.normalize_or_zero();
             let hab = crate::sphere::plant_habitability(gdir);
             if !crate::sphere::is_ocean(gdir) && hab > GRASS_HAB_MIN {
@@ -2401,17 +2426,20 @@ pub fn live_step(
             }
         }
 
-        // learn: reward = approach shaping (base mode only) + eat signal. Tunes brain (04/09).
+        // learn: reward = approach shaping (base mode only) + eat signal + combat outcome. Tunes brain (04/09).
         // Poison/diet drop approach shaping (it rewards nearing ANY food, fighting selectivity).
+        // fight_reward was set last tick by predation_step (kill/braced-survival/whiff) -> reinforces attack/
+        // defend outputs. Cleared every tick below (even when not learning) so it can't accumulate unbounded.
         if gen.learn {
             let approach = if !gen.diet && brain.prev_dist.is_finite() && cur_dist.is_finite() {
                 (brain.prev_dist - cur_dist).clamp(-1.0, 1.0) * R_APPROACH
             } else {
                 0.0
             };
-            let reward = approach + eat_reward;
+            let reward = approach + eat_reward + brain.fight_reward;
             learn(&mut brain.net, &genome.plast, &input, &h, &out, reward, LEARN_RATE);
         }
+        brain.fight_reward = 0.0; // consumed (or discarded when not learning): never accumulate across ticks
         brain.prev_dist = cur_dist;
 
         // starvation death. Outright empty -> dead. Otherwise, a creature pinned BELOW the starvation floor
@@ -2778,6 +2806,9 @@ pub fn generation_step(
     {
         brain.net = child.net.clone();
         brain.prev_dist = f32::INFINITY;
+        brain.attack = 0.0; // clear stale combat intent/reward so a reused entity starts fresh
+        brain.defend = 0.0;
+        brain.fight_reward = 0.0;
         diet.reserves = [RESERVE_REQ; NUTRIENTS]; // fresh life starts with stocked reserves
         diet.g = 0.0;
         diet.age = if desync { (rng.f32() * 600.0) as u32 } else { 0 };

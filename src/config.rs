@@ -110,12 +110,28 @@ pub const EAT_GAIN: f32 = 19.0; // energy per (mass * nutrient) consumed. Raised
 pub const MEAT_BONUS: f32 = 1.6; // meat (carrion) is richer + longer-lasting than plant food
 pub const ATTACK_RADIUS: f32 = 1.6; // must be adjacent to attack
 pub const PREDATION_GAIN: f32 = 16.0; // energy a predator gains from a kill (moderate: a big windfall fuels boom-bust)
-pub const PREDATION_HUNGER: f32 = 20.0; // only creatures below this energy hunt (fed crowds don't cannibalize)
+// (the old PREDATION_HUNGER gate was removed in M6: attack is now NN-gated by ATTACK_INTENT_THRESH, not hunger)
 // Predation needs a real combat EDGE, not just proximity. Success = sigmoid(BITE_K*(adv) - BIAS) where
 // adv = attacker combat - prey combat. With equal combat (a uniform population) success ~= sigmoid(-BIAS)
 // = low, so creatures can't cannibalize their own kind into a boom-bust crash; a genuine carnivore (high
 // bite + size vs smaller prey) still wins. Turns predation from population-wide churn into a real niche.
 pub const PREDATION_BIAS: f32 = 2.2; // combat-edge required: equal-combat success = sigmoid(-2.2) ~= 0.10
+// --- combat outputs (M6): NN-driven attack + active defense + sprint (brain out[2]/out[3]/out[5]) ---
+// Attack is the brain's choice now (no hunger gate). Committing costs energy land-or-miss, and a whiff earns a
+// learned penalty -> pointless aggression is selected against (this + the cost replace the old well-fed skip).
+// Defense (out[3]): bracing raises effective defense but immobilizes. Sprint (out[5]): burst chase/flee speed,
+// paid in fuel + fatigue. All single dials for tuning fight-vs-flight balance.
+pub const ATTACK_INTENT_THRESH: f32 = 0.5; // out[2] above this = the creature is hunting this tick
+pub const ATTACK_COST: f32 = 1.2; // energy/sec at full attack intent, paid whether the attack lands or misses
+pub const BRACE_DEF: f32 = 2.0; // prey effective-defense bonus at full brace (compare ARMOR_DEF 2.5)
+pub const BRACE_DRAG: f32 = 0.7; // fraction of move speed lost at full brace (the immobilize cost)
+pub const SPRINT_BOOST: f32 = 0.6; // max burst-speed multiplier added at full sprint
+pub const SPRINT_COST: f32 = 1.5; // extra energy/sec at full sprint
+pub const SPRINT_FATIGUE: f32 = 0.8; // extra fatigue/sec weight at full sprint
+pub const R_KILL: f32 = 1.5; // learn reward for a successful kill (reinforce the attack output)
+pub const R_DEFEND: f32 = 0.8; // learn reward for surviving an attack while bracing (reinforce the defend output)
+pub const R_WASTE: f32 = -0.3; // learn penalty for a committed attack that landed nothing
+pub const EAT_GATE: f32 = 0.3; // out[4] threshold to ingest; BELOW the fresh-net 0.5 baseline so founders feed before learning
 // Kin-based social need (herd instinct). Being near genetically-SIMILAR creatures (kin) satisfies a
 // social creature + protects it from predators (herd vigilance); ISOLATION drains energy (loneliness).
 // Trade-off: social creatures must stay with their kind (constrains roaming) but gain safety; asocial
@@ -124,7 +140,7 @@ pub const SOCIAL_RADIUS: f32 = 13.0; // distance within which kin count as compa
 pub const SOCIAL_SIM: f32 = 0.7; // max signature distance to count as KIN (smaller = stricter species)
 pub const SOCIAL_TARGET: f32 = 2.0; // just 2 kin nearby satisfies (avoids an Allee death-spiral at low density)
 pub const SOCIAL_COST: f32 = 0.6; // energy/sec loneliness drain at full social gene + full isolation (MILD: a flavor pressure + herd benefit, NOT a population killer -- a strong drain spirals a spread-out population to extinction)
-pub const SOCIAL_SAFETY: f32 = 0.7; // max predation-success reduction for prey surrounded by kin (herd safety)
+pub const SOCIAL_SAFETY: f32 = 0.5; // max predation-success reduction for prey surrounded by kin (herd safety); softened from 0.7 so active defense (brace) competes with passive herd-hiding
 // Body collision (M4): creatures are solid + don't pass through each other. Two bodies whose collision
 // radii overlap get a soft tangential SHOVE apart (no hard stacking) + pay a jostle energy cost scaled by
 // penetration depth. SOCIAL creatures are crowd-tolerant (herd animals pack tight) so the cost is x(1-social):
@@ -392,7 +408,7 @@ pub const LIMB_TRACTION: f32 = 0.25; // max land-speed bonus fraction at full li
 pub const LIMB_MOVE_COST: f32 = 0.5; // move-cost multiplier add at full limbs (more legs to drive)
 // climb (arboreal): nimble -> evades predators; reaches fruit trees w/o a tall body; an arboreal build
 // wastes energy on open flat ground.
-pub const CLIMB_EVADE: f32 = 0.5;     // max predation-success reduction at full climb (agile escape)
+pub const CLIMB_EVADE: f32 = 0.35;    // max predation-success reduction at full climb (agile escape); softened from 0.5 so fleeing/hiding doesn't dominate active fighting + defense
 pub const CLIMB_REACH: f32 = 0.6;     // effective tree-reach height added at full climb (climbs to fruit)
 pub const CLIMB_FLAT_COST: f32 = 0.6; // energy/sec at full climb on flat non-rocky ground (arboreal misfit)
 // eyes: a small detection bonus (effective sensor range) for per-eye upkeep. The gene maps to a rendered

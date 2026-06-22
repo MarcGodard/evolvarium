@@ -36,6 +36,24 @@ live in `config.rs`; the live conversion plan is `SPHERE-PLAN.md`.
       **wet now gates water survival** (drown mortality x submersion x (1-wet)): land flora drowns in the
       sea, aquatic flora (high wet) thrives -> wet splits land vs aquatic plants. Trees are land-only.
 
+### Combat brain outputs M6 (2026-06-22)
+- [x] **Brain 2 -> 6 outputs**: `[thrust, turn, attack, defend, eat, sprint]`. attack/defend/eat/sprint are
+      0..1 sigmoid intents learned in-life (reward-modulated) + selected across generations. `forward()`
+      activates them with a loop; `learn()` already loops ho generically.
+- [x] **NN-driven predation**: removed the hunger gate; a creature hunts iff its brain raises `attack` past
+      `ATTACK_INTENT_THRESH`. Committing costs `ATTACK_COST` land-or-miss; a kill grants `R_KILL`, a whiff
+      `R_WASTE` (so pointless aggression is selected against -- the stabilizer that replaced the well-fed skip).
+- [x] **Active defense**: `defend` (brace) adds `BRACE_DEF` to effective defense in predation but immobilizes
+      (`BRACE_DRAG` on movement); surviving an attack while braced earns `R_DEFEND`. Passive evasion softened
+      (`CLIMB_EVADE` 0.5->0.35, `SOCIAL_SAFETY` 0.7->0.5) so fighting/defending competes with flee/hide.
+- [x] **Eat-gate** (`eat`): ingestion is now a choice (gate 0.3, below the 0.5 founder baseline so founders
+      still feed) -> the brain can refuse toxic/unripe/spoiled food. **Sprint**: burst speed for chase OR flee,
+      paid in energy + fatigue.
+- [x] **Seed migration**: old 2-output nets pad to 6 ho rows on load (`pad_net_ho`/`pad_plast_ho`), new
+      outputs biased to safe defaults (combat/sprint OFF, eat ON) so a loaded pre-combat seed behaves as
+      before; unit-tested. Verified: scenario w/ predator cohort is stable (no cannibalism crash) + carnivory
+      drifts up (predation emerging). Retune via `tools/retune-combat.workflow.js` (predator pressure per niche).
+
 ### Creature overhaul M4 (2026-06-22)
 - [x] **12 new genes** (all serde-default, save-safe): detox, carnivory, pelt, armor, venom (physiology/
       defense); limbs, climb, eyes, head (morphology); skin_hue, skin_sat, pattern (appearance). Each has a
