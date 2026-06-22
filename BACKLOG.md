@@ -197,6 +197,9 @@ live in `config.rs`; the live conversion plan is `SPHERE-PLAN.md`.
       big, do cautiously in validated steps.
 
 ### Bigger
+- [ ] Solar system: real Tychos orbital model drives the sky (sun/moon + wandering planets) — spec
+      `clients/evolvarium/15-solar-system-tychos.md`. Literal Tychos geometry (TSN deferent/epicycle data),
+      drives existing sky, real orbital proportions. New `orrery.rs`; `sun_dir`/`moon_pos` delegate.
 - [ ] Sexual reproduction + speciation (mate choice, genetic-distance species) — spec M6.
 - [ ] God-panel UI + live charts (population/traits over time) — spec 07.
 
