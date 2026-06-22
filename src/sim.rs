@@ -1410,7 +1410,6 @@ pub fn spawn_world_render(
     {
         use std::f32::consts::PI;
         let cliff_m = meshes.add(crate::viz::cliff_mesh()); // land: low-poly escarpment
-        let hole_m = meshes.add(crate::viz::cave_mesh()); // sea: recessed hole in the seabed
         let rock_mat = materials.add(StandardMaterial {
             base_color: Color::srgb(0.46, 0.43, 0.4), // muted gray rock; vertex shades give face/top contrast
             perceptual_roughness: 1.0,
@@ -1465,16 +1464,8 @@ pub fn spawn_world_render(
             });
         }
         commands.insert_resource(CliffBlocks { blocks: cliff_blocks });
-        // sea caves: keep the recessed-hole look (a hole in the seabed reads fine underwater)
-        for &c in &sea_caves {
-            let up = c.normalize_or_zero();
-            let base = crate::sphere::surface_pos(up, 0.0);
-            let s = rng.range(4.0, 6.0);
-            let mut tf = Transform::from_translation(base - up * (s * 0.18)); // sink the crag base into the seabed
-            tf.rotation = Quat::from_rotation_arc(Vec3::Y, up) * Quat::from_rotation_y(rng.range(-PI, PI));
-            tf.scale = Vec3::new(s * rng.range(0.95, 1.25), s * rng.range(0.7, 0.95), s * rng.range(0.95, 1.25));
-            commands.spawn((Mesh3d(hole_m.clone()), MeshMaterial3d(rock_mat.clone()), tf, bevy::light::NotShadowCaster));
-        }
+        // sea caves: positions only (invisible underwater hide spots, folded into CavePositions below). Old
+        // recessed-hole dressing removed (ugly blob look at the shoreline); a proper sea-cave look can come later.
     }
     let mut caves = land_caves; // land first, then sea (order matches the shelter/predation scan; mechanics unchanged)
     caves.extend(sea_caves);
