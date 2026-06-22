@@ -1315,7 +1315,7 @@ pub fn grass_step(
         }
         let e01 = crate::sphere::elevation01(pdir);
         let submersion = ((crate::sphere::SEA_LEVEL - e01) / crate::sphere::SEA_LEVEL).clamp(0.0, 1.0);
-        let drown = DROWN_KILL * submersion * (1.0 - g.wet);
+        let drown = DROWN_KILL * submersion * (1.0 - g.wet.max(g.submerged)); // F22/F27: submerged is a 2nd aquatic axis (was inert) -> deep-water plants don't drown, softens the wet=1.0 wall
         let p_mort = MOISTURE_KILL * (stress - MOISTURE_TOLERANCE).max(0.0) + HABITAT_KILL * (0.3 - hab).max(0.0) + drown;
         if rng.f32() < p_mort {
             commands.entity(e).despawn();
@@ -1537,7 +1537,7 @@ pub fn plant_step(
         // (1-wet) -> land flora (low wet) drowns, aquatic flora (high wet) thrives. Splits land vs aquatic.
         let e01 = crate::sphere::elevation01(pdir);
         let submersion = ((crate::sphere::SEA_LEVEL - e01) / crate::sphere::SEA_LEVEL).clamp(0.0, 1.0);
-        let drown = DROWN_KILL * submersion * (1.0 - g.wet);
+        let drown = DROWN_KILL * submersion * (1.0 - g.wet.max(g.submerged)); // F22/F27: submerged is a 2nd aquatic axis (was inert) -> deep-water plants don't drown, softens the wet=1.0 wall
         // desiccation (mirror of drown): an aquatic plant (high wet) stranded on DRY land (not submerged AND
         // low moisture) dries out and dies -> aquatic flora can't carpet the land. Marsh/wet ground (high m)
         // and shallow water spare it, so reeds at the water's edge survive.
