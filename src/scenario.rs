@@ -170,9 +170,14 @@ pub fn spawn_scenario_world(
 ) {
     let w = &cfg.scenario.world;
     // pin the controlled environment ONCE (no weather_step runs in scenario mode, so these stay fixed ->
-    // a reproducible niche). Ground water + climate moisture biased to `wetness`; fire pressure pinned.
+    // a reproducible niche). `wetness` IS the effective local moisture: pin the slow CLIMATE grid to it
+    // (CLIMATE_VEG=1 -> plants read climate as their moisture). Ground water is left at ~0: on the real
+    // planet gw is transient rain that averages ~0.01, and adding it here would DOUBLE-COUNT wetness
+    // (m = climate + WET_GAIN*gw) so `wetness=0.6` would feel like ~0.87 and a plant tuned to wet=0.6 would
+    // be wet-stressed. With gw~0, effective moisture = wetness (+ a small seasonal wobble) -> intuitive to
+    // tune against AND faithful to real-planet biome moisture (so tuned genomes transfer to planet seeding).
     for c in gw.cell.iter_mut() {
-        *c = w.wetness;
+        *c = 0.0;
     }
     for c in climate.cell.iter_mut() {
         *c = w.wetness;
