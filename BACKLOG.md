@@ -276,6 +276,23 @@ live in `config.rs`; the live conversion plan is `SPHERE-PLAN.md`.
 - [ ] Scale-up toward thousands of creatures (original spec headline) via density-invariant rebalance —
       big, do cautiously in validated steps. (Carrying cap now ~1100 w/ parallel live_step; see PARALLELIZATION.md Phase 6.)
 
+### Perf findings (2026-06-23 session) — for future tuning
+- [x] Headless skips render-only grass + seaweed (`gen.headless` early-return in grass_step/seaweed_step):
+      ~1.37x faster headless tick (5785->4223 us @ pop 1100). Windowed/capture/shots keep the carpets.
+- [ ] **Creature spatial grid: NOT worth it at ~1100** (tried + reverted). The O(n^2) social/threat/collision
+      scans are already parallel, so at 16 cores they're only ~225 us -- the grid's per-tick build + per-creature
+      candidate-gather overhead exceeded the saving (tick got SLOWER). Revisit ONLY at ~10k+ creatures where
+      O(n^2) re-dominates. Don't re-attempt below that without a profile showing the scans dominate.
+- [ ] **Grass cost is now a WINDOWED-only concern** (headless skips it). Windowed is render-bound, not sim-bound
+      (PARALLELIZATION.md), so the 1814 us grass_step sim cost rarely gates frame rate. If ever needed: cache the
+      STATIC per-tuft field samples (base_temperature/moisture/rockiness/elevation are position-only -> compute
+      once at spawn, store on the tuft; re-sample only the dynamic groundwater/fire/daylight/soil) for a
+      behavior-preserving ~30% grass cut. Lower priority given the headless skip + render-bound windowed.
+- [ ] **live_step now dominates the tick at 1100** (~2300 us, top system). Cost is per-creature food-sensing +
+      brain forward()/learn(), all O(n) + already parallel. Next real lever would be cheaper brains (the evolved
+      nets grew ~2x -> bird seed is 12MB); a soft brain-size cost/cap could trim both perf + seed size, but it's
+      balance-sensitive (changes what evolves) -> needs the multi-seed equivalence fan-out before committing.
+
 ### Bigger
 - [x] Multi-core sim tick (Phases 0-5 DONE 2026-06-23, full plan + report in `PARALLELIZATION.md`).
       Parallelized grass/plant/seaweed (snapshot->par decide->serial apply, per-entity deterministic RNG) +
