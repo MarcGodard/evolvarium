@@ -179,9 +179,11 @@ section updated as the source of truth.
       the stable id (deterministic spawn order), no extra component needed. (2026-06-23)
 - [x] Phase 2 - grass_step parallel (snapshot->par decide->serial apply). 10333->1972 us/tick = 5.2x.
       Overall tick 16.5->8.2 ms. Deterministic; equivalent (plants/trees <1.5%, traits within seed noise). (2026-06-23)
-- [ ] Phase 3 - plant_step (now 48% of tick, top hotspot)
-- [ ] Phase 4 - seaweed_step (7.1%)
-- [ ] Phase 5 - weather/climate grids (3.3%, if not already Amdahl-capped)
+- [x] Phase 3 - plant_step parallel (trees + ~12 repro pathways, PlantBatch intents, coarse cap gate +
+      precise spawn cap). 3968->917 us/tick = 4.3x. Tick 8.2->5.0 ms. Deterministic; equivalent (flora <3%,
+      creature trait means within +-10% pooled over 4 seeds). (2026-06-23)
+- [ ] Phase 4 - seaweed_step (now 23%; identical pattern to grass)
+- [ ] Phase 5 - weather/climate grids (~10%, if not already Amdahl-capped)
 - [ ] (deferred) live_step / predation - only 2.1% / ~0%; do only if creature pop scales up
 - [ ] Phase 6 - system unchaining + final report
 

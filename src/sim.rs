@@ -1454,34 +1454,45 @@ pub fn seaweed_step(
     if gen.garden {
         return; // --garden: no ambient carpet
     }
-    let mut count = q.iter().count();
-    for (e, mut st, g, tf) in &mut q {
-        let pdir = tf.translation.normalize_or_zero();
-        let e01 = crate::sphere::elevation01(pdir);
-        // cull fronds no longer in the submerged band (terrain drift / bad placement): stranded above sea level,
-        // or sunk past abyssal floor (too dark to live).
-        if !crate::sphere::is_ocean(pdir) || e01 <= crate::sphere::AQUATIC_FLOOR {
-            commands.entity(e).despawn();
-            count = count.saturating_sub(1);
-            continue;
-        }
-        // pack ice: cold polar ocean freezes over. Cull seaweed below the sea-ice render band -> no kelp poking
-        // through white ice. Cold-water kelp above SEA_ICE_TEMP fine (cold seas grow the best kelp in reality).
-        if crate::sphere::base_temperature(pdir) < crate::config::SEA_ICE_TEMP {
-            commands.entity(e).despawn();
-            count = count.saturating_sub(1);
-            continue;
-        }
-        // grow toward maturity: light fades with depth (deeper = dimmer) -> shallow kelp grows fastest.
-        let depth = ((crate::sphere::SEA_LEVEL - e01) / crate::sphere::SEA_LEVEL).clamp(0.0, 1.0);
-        let light = crate::sphere::daylight_at(pdir, gen.tick) * (1.0 - 0.6 * depth);
-        let lf = 0.4 + 0.6 * light.clamp(0.0, 1.0);
-        st.mass = (st.mass + g.growth_rate() * lf * DT).min(g.maturity);
-        st.age += 1;
+    let count = q.iter().count();
+    let tick = gen.tick;
+    // DECIDE (parallel): each frond grows its OWN mass/age in place; out-of-band/iced fronds push a despawn
+    // intent. No RNG here (death is deterministic band+ice checks) so determinism is automatic. PARALLELIZATION.md.
+    let mut deaths: bevy::utils::Parallel<Vec<(u32, Entity)>> = bevy::utils::Parallel::default();
+    q.par_iter_mut().for_each_init(
+        || deaths.borrow_local_mut(),
+        |out, (e, mut st, g, tf)| {
+            let pdir = tf.translation.normalize_or_zero();
+            let e01 = crate::sphere::elevation01(pdir);
+            // cull fronds out of the submerged band: stranded above sea level, or sunk past the abyssal floor.
+            if !crate::sphere::is_ocean(pdir) || e01 <= crate::sphere::AQUATIC_FLOOR {
+                out.push((e.index().index(), e));
+                return;
+            }
+            // pack ice: cold polar ocean freezes over -> cull kelp below the sea-ice band (no kelp through ice).
+            if crate::sphere::base_temperature(pdir) < crate::config::SEA_ICE_TEMP {
+                out.push((e.index().index(), e));
+                return;
+            }
+            // grow toward maturity: light fades with depth (deeper = dimmer) -> shallow kelp grows fastest.
+            let depth = ((crate::sphere::SEA_LEVEL - e01) / crate::sphere::SEA_LEVEL).clamp(0.0, 1.0);
+            let light = crate::sphere::daylight_at(pdir, tick) * (1.0 - 0.6 * depth);
+            let lf = 0.4 + 0.6 * light.clamp(0.0, 1.0);
+            st.mass = (st.mass + g.growth_rate() * lf * DT).min(g.maturity);
+            st.age += 1;
+        },
+    );
+    // APPLY (serial): despawn culled fronds (sorted by index = deterministic order), then refill the carpet.
+    let mut dead: Vec<(u32, Entity)> = Vec::new();
+    deaths.drain_into(&mut dead);
+    dead.sort_unstable_by_key(|d| d.0);
+    for (_, e) in &dead {
+        commands.entity(*e).despawn();
     }
     // refill toward target carpet density across the submerged band.
+    let alive = count.saturating_sub(dead.len());
     let mut spawned = 0;
-    while count + spawned < SEAWEED_CAP {
+    while alive + spawned < SEAWEED_CAP {
         spawn_seaweed(&mut commands, PlantGenome::seaweed(&mut rng), SEAWEED_START_MASS, seaweed_pos(&mut rng));
         spawned += 1;
     }
