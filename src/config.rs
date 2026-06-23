@@ -39,9 +39,17 @@ pub const BIRTH_ENERGY: f32 = 28.0; // offspring start energy: buffer so newborn
 pub const P_REPRO_CREATURE: f32 = 0.025; // per-tick repro chance while eligible (x density taper)
 pub const REPRO_MIN_AGE: u32 = 180; // min ticks of life before breeding (newborns establish first; paces waves)
 pub const CREATURE_CAP: usize = 130; // pop ceiling (below grazing pressure that crashes plants)
-pub const CREATURE_MIN: usize = 12; // reseed floor (safety net): below this, survivors' offspring spawned so continuous world can't fully go extinct (mirrors PLANT_MIN). Well below ~60 equilibrium -> fires only in crash.
 pub const WARMUP_GENS: u32 = 12; // generational warm-up before continuous birth/death kicks in
 pub const CONT_LOG_TICKS: u32 = 600; // continuous-mode stats log interval (fine enough to watch a crash unfold)
+
+// Per-niche rescue (niche.rs): floors + hall-of-fame banks keep each habitat alive (aquatic/aerial/highland/
+// cold/warm/land). Replaces the global CREATURE_MIN floor for continuous mode. DAY_TICKS=2400, GEN_TICKS=4800.
+pub const NICHE_FLOOR: usize = 6;          // per-niche min pop; below -> rescue from bank
+pub const NICHE_BANK_CAP: usize = 8;       // hall-of-fame size per niche (best genomes kept for revival)
+pub const NICHE_BANK_TICKS: u32 = 1200;    // rebuild banks every half-day from fittest living per niche
+pub const NICHE_RESCUE_COOLDOWN: u32 = 600; // min ticks between rescues of the SAME niche (ease in, not burst)
+pub const NICHE_RESCUE_BATCH: u32 = 4;     // max seeded per rescue event per niche
+pub const NICHE_SUSTAIN_WINDOW: u32 = 4800; // no rescue for this long (2 days) -> ecosystem self-sustaining
 
 // --- three energy stores (metabolic currencies, see components::Energy) ---
 // fast: tiny cap, burned first, LEAKS even at rest -> can't bank (volatile quick power, "fermented fruit").

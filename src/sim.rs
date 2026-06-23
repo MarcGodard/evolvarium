@@ -37,6 +37,7 @@ pub struct GenState {
     pub mating: bool,         // --mating: offspring = crossover of 2 nearby similar parents (assortative -> speciation); else single-parent budding
     pub garden: bool,         // --garden: botanical SHOWCASE grid at homeland (one of every species + sample trees) vs random world. Flora inspection.
     pub plant_lib: Option<String>, // tuned plant seed-bank path. Present -> seed planet biome-matched FROM it. None = --no-plant-lib (archetype seeding).
+    pub until_sustain: bool,   // --until-sustain: headless run stops when all niches self-sustain (no rescue for NICHE_SUSTAIN_WINDOW), not at --gens. Saves best snapshot.
 }
 
 impl GenState {
@@ -548,7 +549,7 @@ fn diverse_creature(mut g: Genome, i: usize, rng: &mut Rng) -> (Genome, Vec3) {
 // Spawn pos for a LOADED (already-evolved) creature: scatter planet-wide into a spot MATCHING its OWN genome
 // (saved pop repopulates the whole globe, not just homeland), WITHOUT overwriting genes (unlike diverse_creature).
 // Lat from temp_pref (warm -> equator, cold -> poles); swimmers -> shallow water; alpine -> highland.
-fn loaded_creature_pos(g: &Genome, rng: &mut Rng) -> Vec3 {
+pub(crate) fn loaded_creature_pos(g: &Genome, rng: &mut Rng) -> Vec3 {
     let lat = ((1.0 - g.temp_pref) * 1.3).clamp(0.0, 1.45); // warm pref -> low |lat|, cold -> high |lat|
     if g.swim > 0.6 {
         niche_water_pos(rng, lat, CREATURE_Y)
@@ -2202,7 +2203,6 @@ pub fn live_step(
     mut soil: ResMut<Soil>,
     fire: Res<Fire>,
     fq: Query<(Entity, &Transform, &PlantState, &PlantGenome, Option<&Rot>, Option<&Tree>, Option<&Ferment>, Option<&Seed>), (With<Food>, Without<Creature>)>,
-    scen: Option<Res<crate::scenario::ScenarioStats>>, // present => scenario mode: disable global reseed floor
     caves: Option<Res<CavePositions>>, // cave shelter (heat relief via shade); absent in scenario mode
 ) {
     let dt = DT;
@@ -2222,7 +2222,6 @@ pub fn live_step(
         })
         .collect();
     let mut eaten: HashSet<Entity> = HashSet::new();
-    let mut sample_genome: Option<Genome> = None; // a living genome, for near-extinction reseed floor
     // creature snapshot for social/kin need + threat sense: (entity, pos, signature, combat, body_radius).
     // combat = bite + size, so a creature senses a bigger-combat neighbor as predator (flee).
     let cre_snap: Vec<(Entity, Vec3, [f32; 10], f32, f32)> = cq
@@ -2250,9 +2249,6 @@ pub fn live_step(
     for (entity, mut ct, mut energy, mut fit, mut head, mut alive, genome, mut brain, mut diet, mut loco) in &mut cq {
         if !alive.0 {
             continue;
-        }
-        if sample_genome.is_none() {
-            sample_genome = Some(genome.clone());
         }
         let pos = ct.translation;
         let fat_max = fat_cap(genome); // adiposity + size set this creature's fat-store ceiling
@@ -2914,21 +2910,10 @@ pub fn live_step(
             }
         }
     }
-    // Creature reseed floor (safety net, mirrors plant PLANT_MIN floor): continuous pop crashing toward extinction
-    // -> spawn mutated offspring of a survivor so the world can't fully die. Fires only near-extinction (pop <
-    // CREATURE_MIN); self-sustaining pops never touch it. Needs a survivor (pop>0). scenario mode (ScenarioStats
-    // present): NO reseed floor -> isolated cohort stays the only creatures (rand_pos reseed would scatter
-    // strangers planet-wide + break cohort isolation).
-    if scen.is_none() && live_continuous && pop > 0 && pop < CREATURE_MIN {
-        if let Some(g) = sample_genome {
-            for _ in 0..(CREATURE_MIN - pop) {
-                let mut child = g.clone();
-                child.mutate(&mut rng, MUT_RATE, MUT_STD);
-                let p = rand_pos(&mut rng, CREATURE_Y);
-                spawn_creature(&mut commands, child, p, &mut rng, BIRTH_ENERGY); // reseed: baseline provisioning
-            }
-        }
-    }
+    // Reseed floor now PER-NICHE (niche::niche_step, runs after this): each habitat (aquatic/aerial/highland/
+    // cold/warm/land) has its own floor + hall-of-fame bank, so a collapsing niche revives from ITS OWN evolved
+    // genomes instead of being refilled by whatever survivor dominates (old global floor let specialist niches
+    // go quietly extinct). Banks persist -> even total extinction recovers. Scenario mode disables it there.
     // eaten plants despawned above; population replenished by plant_step (reproduction).
 }
 
@@ -2992,6 +2977,7 @@ pub fn generation_step(
     fire: Res<Fire>,
     weather: Res<Weather>,
     mut exit: MessageWriter<AppExit>,
+    niche: Res<crate::niche::NicheTracker>, // --until-sustain stop: all niches quiet for a full window
     // Best healthy snapshot seen this run (score, snapshot). --save writes THIS, not the final-tick population:
     // continuous pop oscillates (~13..72), so an arbitrary end-tick can capture a trough -> near-empty seed that
     // limps back up. Saving the peak gives a full balanced living world.
@@ -3003,7 +2989,13 @@ pub fn generation_step(
     // at max_gens*GEN_TICKS or on extinction. Selection emergent (live_step).
     if gen.continuous && gen.generation >= WARMUP_GENS {
         let pop = cq.iter().count();
-        let done = gen.headless && (gen.tick >= gen.max_gens * GEN_TICKS || pop == 0);
+        // --until-sustain: stop early once all niches hold themselves up (no rescue for a full window). Else stop
+        // at --gens or extinction. max_gens still caps --until-sustain (safety: if a niche never self-sustains).
+        let sustained = gen.until_sustain && niche.self_sustaining(gen.tick);
+        let done = gen.headless && (gen.tick >= gen.max_gens * GEN_TICKS || pop == 0 || sustained);
+        if sustained {
+            info!("SELF-SUSTAINING at tick {} (pop {}): no niche rescue for {} ticks | total rescues/niche {:?}", gen.tick, pop, NICHE_SUSTAIN_WINDOW, niche.total_rescues);
+        }
         if gen.tick.is_multiple_of(CONT_LOG_TICKS) || done {
             let n = pop.max(1) as f32;
             let mut e = 0.0;

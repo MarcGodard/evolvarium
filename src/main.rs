@@ -14,6 +14,7 @@ mod camera;
 mod components;
 mod config;
 mod genome;
+mod niche;
 mod persist;
 mod capture;
 mod plant;
@@ -165,7 +166,12 @@ fn main() {
         // Pair w/ --capture or `cargo run -- --garden` to walk garden.
         garden: args.iter().any(|a| a == "--garden"),
         plant_lib: plant_lib.clone(),
+        // --until-sustain: run continuous headless until every niche holds itself up (no rescue for a window),
+        // then save best snapshot + exit. Evolves a balanced, self-sustaining world to load in the visualizer.
+        until_sustain: args.iter().any(|a| a == "--until-sustain"),
     });
+    app.init_resource::<niche::NicheBanks>();
+    app.init_resource::<niche::NicheTracker>();
 
     app.insert_resource(snapshot::ShotCfg { enabled: shots, at_tick: shot_tick, prefix: shot_prefix });
 
@@ -199,6 +205,7 @@ fn main() {
             mating: false,
             garden: false,
             plant_lib: None,
+            until_sustain: false,
         });
         app.insert_resource(scenario::ScenarioCfg { scenario: scn, out: out_path });
         app.init_resource::<scenario::ScenarioStats>();
@@ -223,7 +230,7 @@ fn main() {
             .add_systems(Startup, sim::spawn_world_headless)
             .add_systems(
                 Update,
-                (snapshot::snapshot_capture, sim::weather_step, sim::fire_step, sim::live_step, sim::predation_step, sim::grass_step, sim::seaweed_step, sim::plant_step, sim::rot_step, sim::generation_step).chain(),
+                (snapshot::snapshot_capture, sim::weather_step, sim::fire_step, sim::live_step, sim::predation_step, sim::grass_step, sim::seaweed_step, sim::plant_step, sim::rot_step, niche::niche_step, sim::generation_step).chain(),
             );
     } else {
         // Real-time visuals: step in FixedUpdate at sim rate so sim-time = wall-time.
@@ -234,7 +241,7 @@ fn main() {
             .add_systems(Startup, (setup_scene, sim::spawn_world_render))
             .add_systems(
                 FixedUpdate,
-                (sim::weather_step, sim::fire_step, sim::live_step, sim::predation_step, sim::grass_step, sim::seaweed_step, sim::plant_step, sim::rot_step, sim::generation_step).chain(),
+                (sim::weather_step, sim::fire_step, sim::live_step, sim::predation_step, sim::grass_step, sim::seaweed_step, sim::plant_step, sim::rot_step, niche::niche_step, sim::generation_step).chain(),
             );
         if let Some(prefix) = capture {
             app.insert_resource(capture::CaptureCfg { prefix, when: cap_when, yaw: cap_yaw, off: cap_off, pitch: cap_pitch, orbit: cap_orbit, dist: cap_dist, underwater: cap_water, lat: cap_lat })
