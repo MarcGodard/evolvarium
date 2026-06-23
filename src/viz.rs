@@ -2024,7 +2024,7 @@ DASHBOARD (bottom-left)
               low = fast but costly).
   r/K         breeding style: low = many cheap young fast,
               high = few well-provisioned young.
-  habitat     aquatic = swimmers, land = land-dwellers.
+  habitat     aquatic = swimmers, flying = fliers, land = land-dwellers.
   specialists creatures locked to one food type.
 
 HOW CREATURES LOOK
@@ -2107,7 +2107,7 @@ fn update_world_stats(
 ) {
     let Ok(mut t) = text.single_mut() else { return };
     let (mut n, mut temp, mut lng, mut met, mut par) = (0u32, 0.0f32, 0.0f32, 0.0f32, 0.0f32);
-    let (mut cold, mut warm, mut aq, mut land, mut spec) = (0u32, 0u32, 0u32, 0u32, 0u32);
+    let (mut cold, mut warm, mut aq, mut fly, mut land, mut spec) = (0u32, 0u32, 0u32, 0u32, 0u32, 0u32);
     for (g, alive) in &creatures {
         if !alive.0 {
             continue;
@@ -2118,7 +2118,8 @@ fn update_world_stats(
         met += g.metab;
         par += g.parental;
         if g.temp_pref < 0.4 { cold += 1; } else if g.temp_pref > 0.6 { warm += 1; }
-        if g.swim > 0.6 { aq += 1; } else if g.swim < 0.3 { land += 1; }
+        // mutually exclusive, niche-priority order (mirror niche::niche_of): aquatic, then aerial, then land
+        if g.swim > 0.6 { aq += 1; } else if g.flight >= crate::sim::FLIGHT_KNEE { fly += 1; } else if g.swim < 0.3 { land += 1; }
         if g.rigidity > 0.6 { spec += 1; }
     }
     let nf = n.max(1) as f32;
@@ -2138,7 +2139,7 @@ fn update_world_stats(
         format!("{:.2}x", vtime.relative_speed())
     };
     t.0 = format!(
-        "WORLD\nspeed      {speed}\npop        {n}\nday        {day}\ntrend      {trend}\ntemp avg   {:.2}  (cold {cold} / warm {warm})\nlongevity  {:.2}\nmetab      {:.2}\nr/K        {:.2}\nhabitat    aquatic {aq} / land {land}\nspecialists {spec}",
+        "WORLD\nspeed      {speed}\npop        {n}\nday        {day}\ntrend      {trend}\ntemp avg   {:.2}  (cold {cold} / warm {warm})\nlongevity  {:.2}\nmetab      {:.2}\nr/K        {:.2}\nhabitat    aquatic {aq} / flying {fly} / land {land}\nspecialists {spec}",
         temp / nf, lng / nf, met / nf, par / nf
     );
 }
