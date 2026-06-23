@@ -254,12 +254,13 @@ live in `config.rs`; the live conversion plan is `SPHERE-PLAN.md`.
       seed on the NEW world (50% ocean + mountains) so the showcase holds aquatic + alpine + land niches.
       Consider making --mating the default once seeds are re-evolved under it.
 - [ ] Visual polish: nicer creature meshes per niche, axial-tilt seasons, atmosphere rim/haze.
-- [ ] **Corner inspector minimap**: small second planet copy in a screen corner showing a chosen FIELD as a
-      color map -> heat/temperature, soil moisture (GroundWater + sphere::moisture), and toggle through more
-      (fertility/Soil, fire, rain/cloud cover, elevation/bathymetry, plant_habitability, creature density,
-      magnetic latitude). Reuse the existing field sampling (sphere::*, Soil/GroundWater/Fire resources);
-      render to an offscreen sphere or a UI texture, key/god-control to cycle the active field. Diagnostic
-      overlay (see WHY a region is barren/lush) without leaving the walk/orbit view.
+- [x] **Corner inspector minimap** (DONE): a real 3D globe in the top-right that ROTATES WITH the view (2nd
+      camera on RenderLayers 1, corner viewport, synced to OrbitCam), colored by a chosen FIELD. 'M' cycles
+      biome / heat / moisture / elevation. (UI fixed to the main camera via IsDefaultUiCamera so the HUD doesn't
+      duplicate into the minimap viewport.) terrain::build_globe_colored + viz::minimap_*.
+  - [ ] Follow-ups: the 4 shipped fields are STATIC (sampled once per switch). Add DYNAMIC overlays that
+        rebuild each frame from live resources -> soil fertility (Soil), groundwater/rain (GroundWater), fire
+        (Fire), creature density. Also: walk-mode could aim the minimap at the walker instead of OrbitCam.
 - [ ] **Land wear / soil compaction**: creatures walking compacts the ground -> where animals tread most,
       plants grow less. A per-cell wear field (like Soil/GroundWater, SOIL_RES grid) that creatures ADD to as
       they move (accumulate along the path in live_step), decays slowly, and REDUCES plant/grass growth +

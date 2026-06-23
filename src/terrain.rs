@@ -9,6 +9,12 @@ pub const HEIGHT_MAX: f32 = 12.0; // peak terrain elev above sea sphere (world u
 // UV sphere displaced by terrain elevation, vertex-colored by biome (oceans blue, land green/sand/rock,
 // polar ice). `res` = latitude bands. longitude uses 2*res.
 pub fn build_globe(res: usize) -> Mesh {
+    build_globe_colored(res, |d| crate::sphere::biome_color(d))
+}
+
+// As build_globe but vertex colors come from `color` (any field -> rgb) -> reused for the inspector minimap's
+// field overlays (heat/moisture/elevation) on a small synced globe. `color` gets a UNIT surface dir.
+pub fn build_globe_colored(res: usize, color: impl Fn(Vec3) -> [f32; 3]) -> Mesh {
     use crate::sphere;
     let (rows, cols) = (res, res * 2);
     let mut positions = Vec::with_capacity((rows + 1) * (cols + 1));
@@ -22,7 +28,7 @@ pub fn build_globe(res: usize) -> Mesh {
             let pos = d * (sphere::PLANET_R + sphere::elevation(d));
             positions.push([pos.x, pos.y, pos.z]);
             normals.push([d.x, d.y, d.z]); // radial normal, not geometric. smooth shading, ignores elev slope
-            let c = sphere::biome_color(d);
+            let c = color(d);
             colors.push([c[0], c[1], c[2], 1.0]);
         }
     }

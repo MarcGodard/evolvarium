@@ -95,6 +95,9 @@ fn spawn_camera(mut commands: Commands) {
         WalkCam { dir: hl.normalize_or_zero(), yaw: 0.0, pitch: 0.0, eye_alt: WALK_EYE },
         // shadow softness: swapped per mode in update_shadow_mode (orbit = soft Gaussian, walk = crisp)
         bevy::light::ShadowFilteringMethod::Hardware2x2,
+        // all HUD/UI renders to THIS camera only -> the minimap's 2nd camera (viz.rs) shows just its globe,
+        // not a duplicated HUD crammed into its viewport.
+        bevy::ui::IsDefaultUiCamera,
     ));
 }
 

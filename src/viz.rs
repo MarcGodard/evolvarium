@@ -88,7 +88,7 @@ impl Plugin for VizPlugin {
             .init_resource::<SunOffset>()
             .init_resource::<Underwater>()
             .insert_resource(ShowShadows(true)) // shadows on by default (O toggles)
-            .add_systems(Startup, (log_viz_help, spawn_stats_ui, spawn_world_stats_ui, spawn_legend_ui, spawn_daycycle_ui, spawn_underwater_tint, spawn_clouds, set_initial_speed))
+            .add_systems(Startup, (log_viz_help, spawn_stats_ui, spawn_world_stats_ui, spawn_legend_ui, spawn_daycycle_ui, spawn_underwater_tint, spawn_clouds, set_initial_speed, spawn_minimap))
             .add_systems(
                 Update,
                 (
@@ -110,8 +110,147 @@ impl Plugin for VizPlugin {
                     toggle_legend,
                     god_disturbances,
                     draw_selection,
+                    (minimap_sync_cam, minimap_input, minimap_rebuild),
                 ),
             );
+    }
+}
+
+// --- Corner inspector minimap: a real 3D globe in the bottom-right that ROTATES WITH the main view, colored
+// by a chosen FIELD overlay ('M' cycles biome/heat/moisture/elevation). A 2nd camera renders a field-colored
+// globe (on RenderLayers 1, so the MAIN camera never sees it) into a corner viewport; its orbit is synced to
+// OrbitCam each frame so the minimap shows the same face you're looking at. Render-only; never touches sim.
+const MM_FIELDS: [&str; 4] = ["biome", "heat", "moisture", "elevation"];
+const MM_RES: usize = 64; // globe lat bands (small: minimap is tiny)
+const MM_SIZE: f32 = 200.0; // viewport square, logical px
+const MM_MARGIN: f32 = 10.0;
+const MM_DIST: f32 = 215.0; // minimap cam distance from globe center (PLANET_R=80 -> whole globe framed)
+
+#[derive(Resource)]
+struct Minimap {
+    field: usize,
+    dirty: bool,
+    mesh: Handle<Mesh>,
+}
+
+#[derive(Component)]
+struct MinimapCam;
+#[derive(Component)]
+struct MinimapLabel;
+
+// field value at a UNIT surface dir -> linear RGB. Ramps chosen for legibility (cold=blue/hot=red, dry=tan/wet=blue).
+fn minimap_color(field: usize, d: Vec3) -> [f32; 3] {
+    match field {
+        0 => crate::sphere::biome_color(d),
+        1 => {
+            let t = crate::sphere::base_temperature(d).clamp(0.0, 1.0); // heat: cold blue -> warm red
+            [t, 0.15 + 0.4 * (1.0 - (t - 0.5).abs() * 2.0).max(0.0), 1.0 - t]
+        }
+        2 => {
+            let m = crate::sphere::moisture(d).clamp(0.0, 1.0); // moisture: dry tan -> wet blue
+            [0.75 * (1.0 - m) + 0.1, 0.45 * (1.0 - m) + 0.35 * m + 0.2, 0.2 + 0.8 * m]
+        }
+        _ => {
+            let e = crate::sphere::elevation01(d); // elevation: ocean depth -> land green -> peak white
+            let sl = crate::sphere::SEA_LEVEL;
+            if e < sl {
+                let depth = (e / sl).clamp(0.0, 1.0);
+                [0.0, 0.1 + 0.35 * depth, 0.4 + 0.5 * depth]
+            } else {
+                let h = ((e - sl) / (1.0 - sl)).clamp(0.0, 1.0);
+                [0.3 + 0.7 * h, 0.5 + 0.5 * h, 0.3 + 0.7 * h]
+            }
+        }
+    }
+}
+
+fn spawn_minimap(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    use bevy::camera::visibility::RenderLayers;
+    let mesh = meshes.add(crate::terrain::build_globe_colored(MM_RES, |d| minimap_color(0, d)));
+    // unlit -> vertex field colors show flat + vivid (no day/night shading on the inspector globe)
+    let mat = materials.add(StandardMaterial { base_color: Color::WHITE, unlit: true, ..default() });
+    // field globe at origin, ONLY on layer 1 (the main camera renders layer 0, so it never sees this copy)
+    commands.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(mat), Transform::default(), RenderLayers::layer(1)));
+    // 2nd camera: renders layer 1 into a corner viewport, drawn AFTER the main camera (order 1). Viewport rect
+    // set each frame from the window size in minimap_sync_cam (handles resize).
+    commands.spawn((
+        Camera3d::default(),
+        Camera {
+            order: 1,
+            clear_color: ClearColorConfig::Custom(Color::srgb(0.02, 0.02, 0.06)),
+            ..default()
+        },
+        Projection::from(PerspectiveProjection { far: 2000.0, ..default() }),
+        Transform::from_xyz(0.0, 0.0, MM_DIST).looking_at(Vec3::ZERO, Vec3::Y),
+        RenderLayers::layer(1),
+        MinimapCam,
+    ));
+    commands.insert_resource(Minimap { field: 0, dirty: false, mesh });
+    commands
+        .spawn(Node {
+            position_type: PositionType::Absolute,
+            top: Val::Px(MM_SIZE + MM_MARGIN + 4.0), // label just under the top-right globe
+            right: Val::Px(MM_MARGIN),
+            ..default()
+        })
+        .with_child((
+            Text::new("map: biome  [M]"),
+            TextFont { font_size: 12.0, ..default() },
+            TextColor(Color::srgb(0.85, 0.9, 1.0)),
+            MinimapLabel,
+        ));
+}
+
+// Sync the minimap globe to the main view: orbit the inspector camera around the field-globe using OrbitCam's
+// yaw/pitch (same dir formula as the main orbit cam) -> minimap shows the same face. Also keep the corner
+// viewport sized to the window.
+fn minimap_sync_cam(
+    orbit: Query<&crate::camera::OrbitCam>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    mut cam: Query<(&mut Transform, &mut Camera), With<MinimapCam>>,
+) {
+    let Ok(o) = orbit.single() else { return };
+    let Ok((mut tf, mut camera)) = cam.single_mut() else { return };
+    let dir = Vec3::new(o.pitch.cos() * o.yaw.cos(), o.pitch.sin(), o.pitch.cos() * o.yaw.sin());
+    *tf = Transform::from_translation(dir * MM_DIST).looking_at(Vec3::ZERO, Vec3::Y);
+    if let Ok(w) = windows.single() {
+        let sf = w.scale_factor();
+        let (pw, ph) = (w.physical_width(), w.physical_height());
+        let s = (MM_SIZE * sf) as u32;
+        let m = (MM_MARGIN * sf) as u32;
+        if pw > s + m && ph > s + m {
+            camera.viewport = Some(bevy::camera::Viewport {
+                physical_position: UVec2::new(pw - s - m, m), // top-right (clear of the left-anchored HUD)
+                physical_size: UVec2::new(s, s),
+                ..default()
+            });
+        }
+    }
+}
+
+fn minimap_input(keys: Res<ButtonInput<KeyCode>>, mut mm: ResMut<Minimap>) {
+    if keys.just_pressed(KeyCode::KeyM) {
+        mm.field = (mm.field + 1) % MM_FIELDS.len();
+        mm.dirty = true;
+    }
+}
+
+// On field-switch, rebuild the globe's vertex colors for the new field + update the label.
+fn minimap_rebuild(mut mm: ResMut<Minimap>, mut meshes: ResMut<Assets<Mesh>>, mut q_label: Query<&mut Text, With<MinimapLabel>>) {
+    if !mm.dirty {
+        return;
+    }
+    mm.dirty = false;
+    let field = mm.field;
+    if let Some(m) = meshes.get_mut(&mm.mesh) {
+        *m = crate::terrain::build_globe_colored(MM_RES, |d| minimap_color(field, d));
+    }
+    if let Ok(mut t) = q_label.single_mut() {
+        t.0 = format!("map: {}  [M]", MM_FIELDS[field]);
     }
 }
 
