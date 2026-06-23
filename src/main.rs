@@ -169,6 +169,8 @@ fn main() {
         // --until-sustain: run continuous headless until every niche holds itself up (no rescue for a window),
         // then save best snapshot + exit. Evolves a balanced, self-sustaining world to load in the visualizer.
         until_sustain: args.iter().any(|a| a == "--until-sustain"),
+        // --metrics=PATH: write niche balance result JSON at run end (the balance harness scores config tweaks from it)
+        metrics: args.iter().find_map(|a| a.strip_prefix("--metrics=").map(String::from)),
     });
     app.init_resource::<niche::NicheBanks>();
     app.init_resource::<niche::NicheTracker>();
@@ -206,6 +208,7 @@ fn main() {
             garden: false,
             plant_lib: None,
             until_sustain: false,
+            metrics: None,
         });
         app.insert_resource(scenario::ScenarioCfg { scenario: scn, out: out_path });
         app.init_resource::<scenario::ScenarioStats>();

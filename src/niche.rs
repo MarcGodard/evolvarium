@@ -15,6 +15,7 @@ use crate::config::*;
 use crate::genome::Genome;
 use crate::rng::Rng;
 use bevy::prelude::*;
+use serde::Serialize;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Niche {
@@ -104,6 +105,52 @@ impl NicheTracker {
     // Self-sustaining = continuous run going, armed, and no rescue fired for a full window.
     pub fn self_sustaining(&self, tick: u32) -> bool {
         self.started && tick.saturating_sub(self.last_rescue_tick) >= NICHE_SUSTAIN_WINDOW
+    }
+}
+
+// Machine-readable run result for the balance harness (--metrics=PATH). Subagents read this to score a config
+// tweak: sustained=true means every niche held itself up; else per-niche total_rescues names the broken ones
+// and counts shows the final standing pop per niche (low/zero = that habitat can't live under current balance).
+#[derive(Serialize)]
+struct NicheMetric {
+    name: String,
+    count: u32,
+    total_rescues: u32,
+}
+#[derive(Serialize)]
+struct RunMetrics {
+    sustained: bool,
+    tick: u32,
+    pop: usize,
+    avg_energy: f32,
+    rescues_total: u32,    // sum across niches; lower = closer to balanced
+    niches_extinct: u32,   // niches with final count 0 (hard-broken habitats)
+    niches: Vec<NicheMetric>,
+}
+
+// Write end-of-run balance metrics JSON for the harness. Called from generation_step on done.
+pub fn write_metrics(path: &str, sustained: bool, tick: u32, pop: usize, avg_energy: f32, tr: &NicheTracker) {
+    let niches: Vec<NicheMetric> = (0..NICHE_COUNT)
+        .map(|i| NicheMetric { name: NICHE_NAMES[i].to_string(), count: tr.counts[i], total_rescues: tr.total_rescues[i] })
+        .collect();
+    let m = RunMetrics {
+        sustained,
+        tick,
+        pop,
+        avg_energy,
+        rescues_total: tr.total_rescues.iter().sum(),
+        niches_extinct: tr.counts.iter().filter(|&&c| c == 0).count() as u32,
+        niches,
+    };
+    match serde_json::to_string_pretty(&m) {
+        Ok(s) => {
+            if let Err(e) = std::fs::write(path, s) {
+                error!("metrics write failed {}: {}", path, e);
+            } else {
+                info!("metrics written: {}", path);
+            }
+        }
+        Err(e) => error!("metrics serialize failed: {}", e),
     }
 }
 

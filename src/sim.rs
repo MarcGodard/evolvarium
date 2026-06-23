@@ -38,6 +38,7 @@ pub struct GenState {
     pub garden: bool,         // --garden: botanical SHOWCASE grid at homeland (one of every species + sample trees) vs random world. Flora inspection.
     pub plant_lib: Option<String>, // tuned plant seed-bank path. Present -> seed planet biome-matched FROM it. None = --no-plant-lib (archetype seeding).
     pub until_sustain: bool,   // --until-sustain: headless run stops when all niches self-sustain (no rescue for NICHE_SUSTAIN_WINDOW), not at --gens. Saves best snapshot.
+    pub metrics: Option<String>, // --metrics=PATH: on headless run end, write niche balance result JSON (harness reads it to score config tweaks)
 }
 
 impl GenState {
@@ -3098,6 +3099,10 @@ pub fn generation_step(
                         },
                     );
                 }
+            }
+            if let Some(mpath) = &gen.metrics {
+                let avg_e = if pop > 0 { cq.iter().map(|(_, en, ..)| en.total()).sum::<f32>() / pop as f32 } else { 0.0 };
+                crate::niche::write_metrics(mpath, sustained, gen.tick, pop, avg_e, &niche);
             }
             info!("continuous headless done at tick {} (pop {})", gen.tick, pop);
             exit.write(AppExit::Success);
