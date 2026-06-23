@@ -102,6 +102,24 @@ pub const WATER_PRESSURE_COST: f32 = 6.0; // energy/sec penalty at full depth fo
 pub const SWIM_DROWN_MIN: f32 = 0.5;   // min swim gene to survive open water; below = drown
 pub const DROWN_DEPTH: f32 = 0.25;     // min submersion (0 coast .. 1 abyss) before drown kill applies
 
+// Flight (aerial): VERTICAL mirror of swim. `flight` gene + per-creature altitude (surface-offset units
+// above CREATURE_Y). Brain out[6] = climb intent. Airborne = fast + skips ground collision/drowning, but
+// holding altitude burns energy and big wings are clumsy on the ground (mirror SWIM_LAND_COST). Conservative
+// costs in this visuals-first pass: flight must NOT become a free escape valve (balance-phase follow-up).
+pub const FLIGHT_KNEE: f32 = 0.35;      // min flight gene to leave the ground (below = grounded walker)
+pub const MAX_FLIGHT_ALT: f32 = 6.0;    // altitude ceiling (surface-offset units above CREATURE_Y)
+pub const FLIGHT_SPEED: f32 = 1.2;      // top-speed bonus fraction at full flight when fully airborne (fast flier)
+pub const FLIGHT_CLIMB_RATE: f32 = 4.0; // altitude units/sec gained/lost at full climb/descend intent
+pub const FLIGHT_BUOYANCY: f32 = 1.2;   // passive relax/sec toward cruise altitude (neutral buoyancy: fliers
+                                        // hover aloft, fish hover mid-water, even with a neutral brain). Brain
+                                        // out[6] climbs/descends around it; landing to eat = sustained descend.
+pub const FLIGHT_CRUISE: f32 = 0.55;    // resting altitude as fraction of medium ceiling (where buoyancy settles)
+pub const FLIGHT_ALT_COST: f32 = 2.5;   // energy/sec to hold full altitude (flapping upkeep)
+pub const FLIGHT_GROUND_COST: f32 = 3.0;// energy/sec penalty for full flight gene while grounded (clumsy wings)
+pub const GROUND_EPS: f32 = 0.4;        // altitude below this = "on the ground" (can drown). Eating/predation/
+                                        // collision need no vertical gate: all key off 3D translation, so an
+                                        // airborne flier is auto > EAT_RADIUS/ATTACK_RADIUS from ground stuff.
+
 // --- eating / arms race / predation (see 13, M5) ---
 pub const BITE_K: f32 = 8.0; // eat/combat decisiveness = sigmoid(BITE_K*(bite - defense))
 pub const BITE_COST: f32 = 0.7; // energy/sec maintenance cost of bite strength (linear)

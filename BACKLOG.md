@@ -54,6 +54,32 @@ live in `config.rs`; the live conversion plan is `SPHERE-PLAN.md`.
       before; unit-tested. Verified: scenario w/ predator cohort is stable (no cannibalism crash) + carnivory
       drifts up (predation emerging). Retune via `tools/retune-combat.workflow.js` (predator pressure per niche).
 
+### Flight + depth: vertical DOF (birds + diving fish) (2026-06-22)
+- [x] **Unified vertical axis** (`Locomotion.alt`): one signed-free offset above terrain serves BOTH media.
+      `surface_pos` rides terrain + alt; since `elevation()` is signed bathymetry (waterline at PLANET_R),
+      a swimmer sits above the SEAFLOOR, so depth = rising off the seafloor through the water column is the
+      SAME positive axis as a flier rising into the sky. Ceiling by medium: fliers `MAX_FLIGHT_ALT*flight`,
+      swimmers the local water column `-elevation`.
+- [x] **`flight` gene** (`#[serde(default)]`, ~15% of founders are true fliers so the niche is visible gen 0).
+      Above `FLIGHT_KNEE` the creature leaves the ground; mirror of swim (fast aloft, clumsy grounded).
+- [x] **7th brain output** `[...,climb]`: out[6] = rise/sink intent. `OUTPUT_MIGRATE_BIAS` extended (climb
+      biased negative) so old saved nets migrate grounded. New brain INPUT `altitude` (GLOBAL_INPUTS 11->12,
+      appended last so `pad_ih_inputs` aligns old nets). Both migrations unit-tested.
+- [x] **Neutral buoyancy** (`FLIGHT_BUOYANCY`/`FLIGHT_CRUISE`): fliers hover aloft + fish hover mid-water even
+      with a neutral brain (visible birds/fish); brain climbs/descends around cruise, landing-to-eat = sustained
+      descend. Costs: `FLIGHT_ALT_COST` (hold altitude) + `FLIGHT_GROUND_COST` (clumsy wings grounded).
+- [x] **No vertical gates needed**: eating/predation/collision all key off 3D translation, so an airborne flier
+      is auto > EAT_RADIUS/ATTACK_RADIUS from ground stuff (flight = real escape valve, fruit reach from above).
+      Only drowning (distance-independent hard kill) gated by altitude (fliers cross open ocean unharmed).
+- [x] **Render** (`viz.rs`): bird body-plan branch (`flight>0.5`) = swept flat wings + tucked legs; altitude
+      renders for free (sim writes Transform.translation). Verified `--capture` (wings + birds aloft + fish).
+      Pop stable: fresh fliered world `--gens=3` and migrated saved snapshot both hold ~70-90.
+- [ ] **Showcase seed predates flight**: default `cargo run` loads `evolved-continuous.json` (flight=0) -> no
+      birds until evolution. `cargo run -- --no-load` shows birds now. FOLLOW-UP: evolve+save a new showcase
+      seed with fliers so the default world opens with birds.
+- [ ] **Balance-phase follow-ups** (visuals-first now): dive-hunting tuning, flier predator niche, flock/school
+      cohesion at altitude, HUD flier count, wing-flap animation.
+
 ### Magnetic field + magnetoreception (2026-06-22)
 - [x] **Tilted geomagnetic dipole** (`sphere.rs`): `MAG_TILT` + `mag_pole_dir` (magnetic north ~11.5 deg off
       the spin axis); `mag_field` / `mag_latitude` (inclination "map" cue) / `mag_north_bearing` (compass,

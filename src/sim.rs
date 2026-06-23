@@ -643,7 +643,7 @@ pub(crate) fn spawn_creature(commands: &mut Commands, g: Genome, pos: Vec3, rng:
         Fitness(0.0),
         Heading(h),
         Alive(true),
-        Locomotion { start: pos, path: 0.0 },
+        Locomotion { start: pos, path: 0.0, alt: 0.0 },
         Transform::from_translation(pos),
     ));
 }
@@ -1189,7 +1189,7 @@ pub fn spawn_world_headless(mut commands: Commands, mut rng: ResMut<Rng>, mut ge
             Fitness(0.0),
             Heading(h),
             Alive(true),
-            Locomotion { start: p, path: 0.0 },
+            Locomotion { start: p, path: 0.0, alt: 0.0 },
             Transform::from_translation(p),
         ));
     }
@@ -1515,7 +1515,7 @@ pub fn spawn_world_render(
             Fitness(0.0),
             Heading(h),
             Alive(true),
-            Locomotion { start: p, path: 0.0 },
+            Locomotion { start: p, path: 0.0, alt: 0.0 },
             Transform::from_translation(p),
         ));
     }
@@ -2319,6 +2319,9 @@ pub fn live_step(
         // faster here (fins) + pay on dry land (see metabolism); also a brain input.
         let h0 = crate::sphere::elevation(pdir);
         let wet_here = ((SWIM_WET_LEVEL - h0) / SWIM_WET_LEVEL).clamp(0.0, 1.0);
+        // aerial factor: how high aloft (0 grounded .. 1 ceiling) from last tick's altitude. Drives flier speed
+        // bonus + altitude-hold cost + a brain input. Swimmers (low flight gene) zero out via flight-gated terms.
+        let air_here = (loco.alt / MAX_FLIGHT_ALT).clamp(0.0, 1.0);
         // shade: how shaded by overhead canopy (near a tree). Relieves open-sun heat + brain input to seek it.
         let tree_shade = if nearest_tree_d2.is_finite() {
             (1.0 - nearest_tree_d2.sqrt() / SHADE_RADIUS).clamp(0.0, 1.0)
@@ -2381,6 +2384,7 @@ pub fn live_step(
         // magneto globals (last, matching ensure_net_shape padding order). ~0 when sense off:
         input.push(crate::sphere::mag_latitude(pdir) * mexpr); // magnetic latitude "map" (-1 .. +1)
         input.push(wrap_angle(crate::sphere::mag_north_bearing(pdir) - head.0) / std::f32::consts::PI * mexpr); // compass: rel bearing to magnetic north
+        input.push(air_here); // own altitude fraction (LAST global, see GLOBAL_INPUTS): flier/diver manages climb/descend
 
         // think (per-life learned brain, dynamic topology matching this genome's sensor count)
         let (h, out) = forward(&brain.net, &input);
@@ -2402,6 +2406,7 @@ pub fn live_step(
         let metab_f = genome.metab - 0.5; // -0.5 fast .. +0.5 frugal
         let speed = MOVE_SPEED
             * (1.0 + SWIM_SPEED * genome.swim * wet_here) // swimmers fast in water
+            * (1.0 + FLIGHT_SPEED * genome.flight * air_here) // fliers fast aloft (gene x altitude)
             * (1.0 + LIMB_TRACTION * genome.limbs * (1.0 - wet_here)) // more legs = land traction (ground speed)
             * (1.0 - 0.5 * metab_f)
             * (1.0 + SPRINT_BOOST * sprint); // sprint: burst speed for chase/flee
@@ -2410,9 +2415,28 @@ pub fn live_step(
         head.0 = wrap_angle(head.0 + turn * TURN_SPEED * dt);
         let (nd, nh) = crate::sphere::step(pos, head.0, move_thrust * speed * dt);
         head.0 = nh; // heading parallel-transported into the new tangent frame
-        let np = crate::sphere::surface_pos(nd, CREATURE_Y); // ride terrain surface
-        // pay for elevation change (P3): uphill costs, downhill partially refunds
         let h1 = crate::sphere::elevation(nd);
+        // vertical DOF (out[6] rise intent): fliers climb into the sky, swimmers rise off the seafloor through the
+        // water column toward the waterline. Ceiling set by medium; gravity sinks fliers, swimmers ~neutral
+        // buoyancy (hover, gentler vertical). Land creatures: ceiling 0 -> pinned to surface (no behavior change).
+        let rise = (out[6] - 0.5) * 2.0; // -1 sink/dive .. +1 climb
+        let (climb_rate, ceil) = if genome.flight >= FLIGHT_KNEE {
+            (FLIGHT_CLIMB_RATE, MAX_FLIGHT_ALT * genome.flight) // sky: higher flight gene -> higher ceiling
+        } else if genome.swim >= SWIM_DROWN_MIN {
+            // ocean only (-h1 = water column above seafloor, >0 in sea). Rise toward waterline, stay submerged
+            // (CREATURE_Y base + 0.4 margin below surface). Dry land: -h1<0 -> ceil 0.
+            (FLIGHT_CLIMB_RATE * 0.6, ((-h1 - CREATURE_Y - 0.4) * genome.swim).max(0.0))
+        } else {
+            (0.0, 0.0) // grounded walker: pinned to surface (no behavior change)
+        };
+        // brain climbs/descends, then neutral buoyancy relaxes toward cruise -> a neutral brain hovers aloft /
+        // mid-water (visible birds + fish); landing to eat = a sustained descend that overcomes buoyancy.
+        let cruise = FLIGHT_CRUISE * ceil;
+        loco.alt += rise * climb_rate * dt;
+        loco.alt += (cruise - loco.alt) * FLIGHT_BUOYANCY * dt;
+        loco.alt = loco.alt.clamp(0.0, ceil);
+        let np = crate::sphere::surface_pos(nd, CREATURE_Y + loco.alt); // ride terrain + vertical offset (sky / water column)
+        // pay for elevation change (P3): uphill costs, downhill partially refunds
         let dh = h1 - h0;
         let climb = if dh > 0.0 { CLIMB_COST * dh } else { DESCEND_REFUND * dh };
         if climb > 0.0 {
@@ -2454,7 +2478,7 @@ pub fn live_step(
             let tangential = push - up * push.dot(up);
             if tangential.length_squared() > 1e-9 {
                 let shoved = (np + tangential * SEPARATION_STRENGTH).normalize_or_zero();
-                ct.translation = crate::sphere::surface_pos(shoved, CREATURE_Y);
+                ct.translation = crate::sphere::surface_pos(shoved, CREATURE_Y + loco.alt); // keep altitude through shove
             }
             // jostle hurts: crowd-tolerant (social) herder barely feels it, a loner gets drained
             energy.burn(COLLIDE_COST * overlap_sum * (1.0 - genome.social) * dt);
@@ -2464,7 +2488,8 @@ pub fn live_step(
         // drowns outright. Shallow/coastal water stays crossable (gradual WATER_PRESSURE_COST handles wading);
         // only submersion past DROWN_DEPTH lethal, so only real swimmers live at sea. Leaves no carrion (corpse
         // sinks to abyss, unforageable).
-        if genome.swim < SWIM_DROWN_MIN {
+        if genome.swim < SWIM_DROWN_MIN && loco.alt < GROUND_EPS {
+            // grounded only: a flier crossing above open ocean (alt >= GROUND_EPS) doesn't drown
             let sub = ((crate::sphere::SEA_LEVEL - crate::sphere::elevation01(nd)) / crate::sphere::SEA_LEVEL).clamp(0.0, 1.0);
             if sub > DROWN_DEPTH {
                 alive.0 = false;
@@ -2506,6 +2531,8 @@ pub fn live_step(
             + MAG_COST * mexpr // magnetoreception organ + neural processing (no free lunch)
             + LONGEVITY_COST * (lifespan_mult - 1.0).max(0.0) // a long-lived body costs more to maintain
             + SWIM_LAND_COST * genome.swim * (1.0 - wet_here) // fins are a liability on dry land
+            + FLIGHT_ALT_COST * genome.flight * air_here // flapping to hold altitude burns fuel (gene x height)
+            + FLIGHT_GROUND_COST * genome.flight * (1.0 - air_here) // big wings clumsy when grounded (mirror SWIM_LAND_COST)
             + WATER_PRESSURE_COST * (1.0 - genome.swim) * (-h1 / crate::sphere::SEA_FLOOR_MAX).clamp(0.0, 1.0) // non-swimmers struggle in deep water (depth pressure)
             + FAT_UPKEEP * genome.adiposity * fat_frac // carrying fat costs upkeep (no free lunch)
             + SPRINT_COST * sprint // burst effort burns extra fuel

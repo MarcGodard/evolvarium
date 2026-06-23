@@ -229,10 +229,29 @@ fn add_creature_visuals(
         //   very elongate (snake/eel)  -> legless: body + tail carry it, no limbs at all.
         let n_legs = (LIMB_MIN + LIMB_SPAN * g.limbs).round().clamp(2.0, 8.0) as usize;
         let swimmer = g.swim > 0.45;
+        let flyer = g.flight > 0.5; // bird silhouette wins over swim/land fork
         let legless = g.elongate > 0.75; // serpent: limbs vanish
         let leg_mat = materials.add(srgb(color, 0.55));
         let fin_mat = materials.add(srgb(color, 0.85));
-        if legless {
+        if flyer {
+            // BIRD: one pair of broad flat wings swept back from the upper sides; wider at higher flight gene.
+            let span = (0.8 + 0.7 * g.flight) * body; // wingspan reach out from body
+            for side in [1.0f32, -1.0] {
+                let wx = side * (0.5 * scale.x + 0.5 * span);
+                let wing = commands
+                    .spawn((Mesh3d(parts.seg.clone()), MeshMaterial3d(fin_mat.clone()), part_tf(Vec3::new(wx, 0.2 * scale.y, -0.05 * scale.z), Vec3::new(span, 0.05 * body, 0.6 * body))))
+                    .id();
+                commands.entity(e).add_child(wing);
+            }
+            // small pair of tucked legs under the body (perch/landing read)
+            let leg_len = 0.3 * body;
+            for side in [1.0f32, -1.0] {
+                let leg = commands
+                    .spawn((Mesh3d(parts.leg.clone()), MeshMaterial3d(leg_mat.clone()), part_tf(Vec3::new(side * 0.2 * scale.x, -0.35 * scale.y - 0.5 * leg_len, 0.0), Vec3::new(0.08 * body, leg_len, 0.08 * body))))
+                    .id();
+                commands.entity(e).add_child(leg);
+            }
+        } else if legless {
             // no limbs
         } else if swimmer && n_legs >= 6 {
             // OCTOPUS: tentacles ring the front-lower body, hang down + slightly splayed, long + thin.

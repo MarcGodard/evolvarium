@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 pub const MIN_HIDDEN: usize = 2; // floor
 pub const MAX_HIDDEN: usize = 16; // ceiling (bounds per-neuron upkeep cost)
-pub const OUTPUTS: usize = 6; // [thrust 0..1, turn -1..1, attack, defend, eat, sprint]; last 4 = 0..1 intents
+pub const OUTPUTS: usize = 7; // [thrust 0..1, turn -1..1, attack, defend, eat, sprint, climb]; idx>=2 = 0..1 intents (climb: 0=descend, 1=climb)
 pub const NFOOD: usize = 4; // plant FAMILY count (hue + kind label only; NOT metabolic axis)
 pub const NUTRIENTS: usize = 10; // distinct nutrients = metabolic axis (regulatory uptake genome, see 14/05)
 
@@ -16,12 +16,13 @@ pub const MIN_SENSORS: usize = 1;
 pub const MAX_SENSORS: usize = 8;
 pub const SIG_PER_SENSOR: usize = 2; // each sensor reports [inv-dist, food type/readiness]
 // Global (non-sensor) brain inputs, appended after per-sensor signals. Column order:
-// [energy, daylight, fatigue, bias, toxic_load, shade, threat_dist, threat_bearing, wet, mag_lat, compass]
+// [energy, daylight, fatigue, bias, toxic_load, shade, threat_dist, threat_bearing, wet, mag_lat, compass, altitude]
 // energy+daylight+fatigue -> diurnal/nocturnal rest; toxic_load -> avoid poison; shade -> seek canopy in heat;
 // threat_dist/bearing -> flee bigger predator; wet -> in water; mag_lat+compass -> magnetic nav (gated by
-// `magneto` gene). GOTCHA: M4 widened 4 -> 9; magneto added 2 -> 11. Old saved nets zero-padded for new
-// columns on load, see Genome::ensure_net_shape.
-pub const GLOBAL_INPUTS: usize = 11;
+// `magneto` gene); altitude -> own height aloft (fliers manage climb/descend). GOTCHA: M4 widened 4 -> 9;
+// magneto added 2 -> 11; flight added 1 -> 12. altitude is LAST so pad_ih_inputs (inserts before bias)
+// aligns old saved nets correctly. Old saved nets zero-padded for new columns on load, see ensure_net_shape.
+pub const GLOBAL_INPUTS: usize = 12;
 pub const CONE_HALF: f32 = 0.7; // sensor FOV half-angle (rad)
 const RANGE_MIN: f32 = 4.0;
 const RANGE_MAX: f32 = 48.0; // long-range vision possible (big world); energy cost = trade-off (see sim SENSE_COST)
@@ -112,6 +113,10 @@ pub struct Genome {
     pub magneto: f32,        // 0..1 magnetoreception switch: above soft knee, feeds 2 brain inputs (mag_lat
                              // "map" + compass heading) for nav; costs MAG_COST upkeep (magnetite organ +
                              // neural processing). Default 0 = sense off (old saves unchanged).
+    #[serde(default = "zero")]
+    pub flight: f32,         // 0..1 aerial: above FLIGHT_KNEE creature can climb (brain out[6]) -> fast aloft +
+                             // skips ground collision/drowning; holding altitude burns energy + big wings clumsy
+                             // grounded (mirror of swim). Default 0 = grounded (old saves unchanged). Drives bird niche.
 }
 
 // serde defaults for traits absent in old saves
@@ -189,8 +194,9 @@ fn pad_ih_inputs(net: &mut Net, want_in: usize, fill: f32) {
 // new outputs existed: combat+effort OFF (strong negative bias -> sigmoid ~0, no unearned ATTACK_COST /
 // SPRINT_COST / brace-drag), EAT ON (positive bias -> sigmoid ~1, still feeds on contact like pre-eat-gate
 // code). Fresh founders use random_net instead (varied combat outputs) so emergence works. Indices:
-// [thrust, turn, attack, defend, eat, sprint]; 0/1 never padded (always present).
-const OUTPUT_MIGRATE_BIAS: [f32; OUTPUTS] = [0.0, 0.0, -4.0, -4.0, 4.0, -4.0];
+// [thrust, turn, attack, defend, eat, sprint, climb]; 0/1 never padded (always present). climb biased
+// negative -> migrated net sinks to ground (no unearned flight), matching pre-flight grounded behavior.
+const OUTPUT_MIGRATE_BIAS: [f32; OUTPUTS] = [0.0, 0.0, -4.0, -4.0, 4.0, -4.0, -4.0];
 
 // Grow NET ho layer to want_rows (migrate seed saved when OUTPUTS smaller, e.g. pre-combat 2-output nets).
 // New output row = hidden+1 long (matches live hidden count): zero hidden->output weights + per-output
@@ -279,6 +285,9 @@ impl Genome {
             tail: rng.f32(),          // span tailless..long-tailed
             fin: rng.f32() * rng.f32(), // skew finless; few prominent dorsal fins
             magneto: rng.f32() * 0.3, // mostly sense-off, few magnetoreceptive -> selection can switch on
+            // skew grounded, but ~15% of founders are TRUE fliers (>FLIGHT_KNEE/wing threshold) so the bird niche
+            // is visible from gen 0 (not waiting many gens for mutation to cross 0.5). Rest stay low (ground-biased).
+            flight: if rng.f32() < 0.15 { rng.range(0.55, 1.0) } else { rng.f32() * rng.f32() * 0.4 },
         }
     }
 
@@ -376,6 +385,7 @@ impl Genome {
         c.tail = pick(rng, a.tail, b.tail);
         c.fin = pick(rng, a.fin, b.fin);
         c.magneto = pick(rng, a.magneto, b.magneto);
+        c.flight = pick(rng, a.flight, b.flight);
         for i in 0..NUTRIENTS {
             c.uptake[i] = pick(rng, a.uptake[i], b.uptake[i]);
         }
@@ -500,6 +510,9 @@ impl Genome {
         }
         if rng.f32() < rate {
             self.magneto = (self.magneto + rng.normal() * 0.12).clamp(0.0, 1.0);
+        }
+        if rng.f32() < rate {
+            self.flight = (self.flight + rng.normal() * 0.12).clamp(0.0, 1.0);
         }
         // structural: add/remove sensor (+ matching input-weight columns), p=0.06 each
         if rng.f32() < 0.06 && self.sensors.len() < MAX_SENSORS {
@@ -673,12 +686,13 @@ mod tests {
 
     #[test]
     fn ensure_net_shape_pads_old_narrow_nets() {
-        // simulate OLD save (pre-M4 + pre-magneto: 7 fewer global inputs) by stripping columns, then migrate.
-        // 5 M4 globals: toxic_load/shade/threat_dist/threat_bear/wet; 2 magneto: lat/compass.
+        // simulate OLD save (pre-M4 + pre-magneto + pre-flight: 8 fewer global inputs) by stripping columns,
+        // then migrate. 5 M4 globals: toxic_load/shade/threat_dist/threat_bear/wet; 2 magneto: lat/compass;
+        // 1 flight: altitude.
         let mut rng = Rng::seed(7);
         let mut g = Genome::random(&mut rng);
         let want = n_inputs(g.n_sensors());
-        let strip = 7; // 5 M4 globals + 2 magneto globals
+        let strip = 8; // 5 M4 globals + 2 magneto globals + 1 flight global
         for row in g.net.ih.iter_mut().chain(g.plast.ih.iter_mut()) {
             let at = row.len() - 1 - strip; // before trailing bias
             row.drain(at..at + strip);

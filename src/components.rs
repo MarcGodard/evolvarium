@@ -167,6 +167,8 @@ pub struct Brain {
 pub struct Locomotion {
     pub start: Vec3,
     pub path: f32,
+    pub alt: f32, // vertical offset above terrain (surface-offset units, >=0). Fliers: height in sky.
+                  // Swimmers: rise off seafloor through water column toward waterline. Unified axis (out[6]).
 }
 
 // Per-life diet state. reserves[i] = pool of nutrient i (topped by eating x uptake, depleted each tick).
