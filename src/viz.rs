@@ -31,6 +31,18 @@ pub struct Underwater(pub bool);
 #[derive(Component)]
 pub struct Ocean;
 
+// A flapping bird wing (child of a flier). flap_wings rotates it about its root (the shoulder) on the
+// forward (Z) axis. `side` (+1 right / -1 left) mirrors lift so both tips rise together; `freq` set from
+// body size (small bird = fast flutter, big bird = slow beats); `rest` = base transform (rotation reapplied
+// each frame so the wing returns to neutral between beats).
+#[derive(Component)]
+pub struct Wing {
+    pub side: f32,
+    pub freq: f32,
+    pub amp: f32,
+    pub rest: Transform,
+}
+
 // Planet globe entity. Casts shadow in BOTH camera modes (camera::update_planet_caster) -> planet
 // shadows own night side (no sun through planet) in orbit, and in walk terrain past local horizon
 // falls into planet shadow at dawn/dusk. Walk self-shadow acne held off by per-mode shadow_normal_bias
@@ -84,7 +96,7 @@ impl Plugin for VizPlugin {
                     add_creature_visuals,
                     toggle_sensors,
                     draw_sensors,
-                    (add_plant_visuals, size_plants, add_grass_visuals, add_seaweed_visuals, size_creatures),
+                    (add_plant_visuals, size_plants, add_grass_visuals, add_seaweed_visuals, size_creatures, flap_wings),
                     (day_night_lighting, time_of_day, toggle_shadows, walk_ambient, update_daycycle, track_underwater, update_sky, toggle_underwater_tint, animate_ocean, update_globe_climate, update_aurora_curtains),
                     rain_visuals,
                     fire_visuals,
@@ -128,6 +140,7 @@ pub struct CreatureParts {
     pub leg: Handle<Mesh>,
     pub fin: Handle<Mesh>, // Y-axis cone: caudal tail fan + dorsal ridge (scaled flat per use)
     pub seg: Handle<Mesh>, // unit cuboid: rod/bushy tails + flat pectoral side-fins (axis-aligned, no rotation)
+    pub wing: Handle<Mesh>, // flat swept tapered bird wing, root at x=0 extends +X (mirror via scale.x). Flaps about root.
 }
 
 // Skin color + body-plan scale from genome (M4). Shared by add_creature_visuals + restyle_creatures ->
@@ -159,6 +172,19 @@ fn size_creatures(mut q: Query<(&DietState, &Genome, &mut Transform), With<Creat
     for (diet, g, mut tf) in &mut q {
         let grow = (CREATURE_BORN_SCALE + (1.0 - CREATURE_BORN_SCALE) * diet.age as f32 / CREATURE_MATURE_TICKS).min(1.0);
         tf.scale = creature_look(g).1 * grow;
+    }
+}
+
+// Flap bird wings each frame: rotate every Wing about the forward (Z) axis = its shoulder root. `side` mirrors
+// the angle so both tips rise together. Reapplies the rest transform first so flap is relative to neutral
+// (translation/scale constant; rotation oscillates). Real-time (Time), independent of sim speed/pause.
+fn flap_wings(time: Res<Time>, mut q: Query<(&Wing, &mut Transform)>) {
+    let t = time.elapsed_secs();
+    for (w, mut tf) in &mut q {
+        let a = (t * w.freq).sin() * w.amp;
+        tf.translation = w.rest.translation;
+        tf.scale = w.rest.scale;
+        tf.rotation = Quat::from_rotation_z(w.side * a) * w.rest.rotation;
     }
 }
 
@@ -221,6 +247,21 @@ fn add_creature_visuals(
             commands.entity(e).add_child(eye);
         }
 
+        // BEAK/SNOUT: forward cone off the head front, length from g.beak. Reads as a beak on birds, a snout on
+        // others. Cone apex is +Y, so rotate +Y -> +Z (from_rotation_x(PI/2)) to point it forward.
+        if g.beak > 0.3 {
+            let beak_len = (0.35 + 0.75 * g.beak) * head_d;
+            let beak_r = 0.22 * head_d;
+            let beak = commands
+                .spawn((Mesh3d(parts.fin.clone()), MeshMaterial3d(materials.add(srgb(color, 0.7))), Transform {
+                    translation: (Vec3::new(0.0, head_y + 0.02 * head_d, head_z + 0.5 * head_d + 0.45 * beak_len)) * inv,
+                    rotation: Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
+                    scale: (Vec3::new(beak_r, beak_len, beak_r)) * inv,
+                }))
+                .id();
+            commands.entity(e).add_child(beak);
+        }
+
         // LIMBS: body local axes -> +Y up, +Z forward (facing), creature stands vertical on surface. Limb FORM
         // forks on body plan so aquatics stop looking like land animals:
         //   land     -> 2..8 legs poking down (current).
@@ -234,12 +275,22 @@ fn add_creature_visuals(
         let leg_mat = materials.add(srgb(color, 0.55));
         let fin_mat = materials.add(srgb(color, 0.85));
         if flyer {
-            // BIRD: one pair of broad flat wings swept back from the upper sides; wider at higher flight gene.
-            let span = (0.8 + 0.7 * g.flight) * body; // wingspan reach out from body
+            // BIRD: a pair of swept tapered wings that FLAP (flap_wings rotates them about the shoulder root).
+            // Wing root sits at x=0 in the mesh and extends outward; placing the entity at the shoulder + scaling
+            // by span makes rotation pivot at the shoulder. scale.x sign mirrors the mesh for the left wing.
+            // Wider span at higher flight gene; flap FREQ from size -> hummingbird (small) flutters, hawk (big) beats.
+            let span = (1.0 + 0.9 * g.flight) * body; // wing reach (each side)
+            let flap_freq = 6.0 + 16.0 * (1.0 - g.size.clamp(0.0, 1.0)); // small = fast flutter, big = slow beats
+            let wing_mat = materials.add(StandardMaterial { base_color: srgb(color, 0.9), double_sided: true, cull_mode: None, perceptual_roughness: 0.95, ..default() });
             for side in [1.0f32, -1.0] {
-                let wx = side * (0.5 * scale.x + 0.5 * span);
+                let shoulder = Vec3::new(side * 0.35 * scale.x, 0.22 * scale.y, -0.05 * scale.z);
+                let rest = Transform {
+                    translation: shoulder * inv,
+                    rotation: Quat::IDENTITY,
+                    scale: Vec3::new(side * span, 0.04 * body, 0.85 * span) * inv, // thin Y, span out X, chord Z
+                };
                 let wing = commands
-                    .spawn((Mesh3d(parts.seg.clone()), MeshMaterial3d(fin_mat.clone()), part_tf(Vec3::new(wx, 0.2 * scale.y, -0.05 * scale.z), Vec3::new(span, 0.05 * body, 0.6 * body))))
+                    .spawn((Mesh3d(parts.wing.clone()), MeshMaterial3d(wing_mat.clone()), rest, Wing { side, freq: flap_freq, amp: 0.6, rest }))
                     .id();
                 commands.entity(e).add_child(wing);
             }
@@ -251,6 +302,12 @@ fn add_creature_visuals(
                     .id();
                 commands.entity(e).add_child(leg);
             }
+            // tail fan at the rear: flat horizontal plate, spread wide in X, extends back in Z (steering fan).
+            let tl = (0.4 + 0.7 * g.tail) * body;
+            let tail = commands
+                .spawn((Mesh3d(parts.seg.clone()), MeshMaterial3d(wing_mat.clone()), part_tf(Vec3::new(0.0, 0.05 * scale.y, -(0.45 * scale.z + 0.5 * tl)), Vec3::new(1.0 * tl, 0.04 * body, tl))))
+                .id();
+            commands.entity(e).add_child(tail);
         } else if legless {
             // no limbs
         } else if swimmer && n_legs >= 6 {
@@ -298,7 +355,8 @@ fn add_creature_visuals(
 
         // TAIL: at rear (-Z), size from g.tail. Form by body plan: swimmer -> vertical caudal fan (cone);
         // furry land -> bushy upswept tail (box, lighter); else -> thin rod tail (box). Lizard/rat/squirrel/fish.
-        if g.tail > 0.12 {
+        // Fliers handled above (tail fan) -> skip here so no double tail.
+        if g.tail > 0.12 && !flyer {
             let tl = (0.3 + 0.9 * g.tail) * body; // tail length
             if swimmer {
                 // caudal fin: vertical fan, thin in X, tall in Y, short Z, at the very back
@@ -328,7 +386,8 @@ fn add_creature_visuals(
         }
 
         // DORSAL FIN: triangular ridge along the spine (top +Y, mid body), thin in X, swept in Z. Sailfin/shark.
-        if g.fin > 0.45 {
+        // Skip on fliers (a spine sail on a bird reads wrong).
+        if g.fin > 0.45 && !flyer {
             let df = (0.3 + 0.7 * g.fin) * body;
             let dorsal = commands
                 .spawn((Mesh3d(parts.fin.clone()), MeshMaterial3d(fin_mat.clone()), part_tf(Vec3::new(0.0, 0.45 * scale.y + 0.4 * df, 0.0), Vec3::new(0.07 * body, df, 0.9 * df))))
@@ -903,6 +962,27 @@ pub fn blob_cluster_mesh(blobs: &[(Vec3, f32, f32)]) -> Mesh {
         push_sphere(&mut b, &mut idx, c, r, 5, 7, v);
     }
     b.finish(idx)
+}
+
+// Bird wing: flat swept tapered planform in the X-Z plane (y~0), ROOT at x=0 extending to a pointed tip at
+// x=1 (swept back, -Z). Drawn double-sided (material cull None) so the underside lights. Root at origin so a
+// flap = rotation about the wing entity's origin (the shoulder). Unit span; viz scales per genome.
+pub fn wing_mesh() -> Mesh {
+    let mut b = MeshBuf::new();
+    // outline, root(0) fanning out to the tip(2); leading edge sweeps back, trailing edge tapers in.
+    let pts = [
+        Vec3::new(0.0, 0.0, 0.18),   // 0 root leading
+        Vec3::new(0.55, 0.0, 0.02),  // 1 mid leading (swept)
+        Vec3::new(1.0, 0.0, -0.42),  // 2 pointed tip
+        Vec3::new(0.5, 0.0, -0.52),  // 3 mid trailing
+        Vec3::new(0.0, 0.0, -0.40),  // 4 root trailing
+    ];
+    for p in pts {
+        b.pos.push([p.x, p.y, p.z]);
+        b.nor.push([0.0, 1.0, 0.0]);
+        b.col.push([1.0, 1.0, 1.0, 1.0]);
+    }
+    b.finish(vec![0, 1, 2, 0, 2, 3, 0, 3, 4]) // fan from root
 }
 
 // Petalled flower: shallow CUP of petals around raised center button. Petals tilt up-and-out (tips raised)

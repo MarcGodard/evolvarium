@@ -77,8 +77,12 @@ live in `config.rs`; the live conversion plan is `SPHERE-PLAN.md`.
 - [ ] **Showcase seed predates flight**: default `cargo run` loads `evolved-continuous.json` (flight=0) -> no
       birds until evolution. `cargo run -- --no-load` shows birds now. FOLLOW-UP: evolve+save a new showcase
       seed with fliers so the default world opens with birds.
+- [x] **Bird looks (2026-06-22)**: flapping wings (`Wing` comp + `flap_wings` rotates each about the shoulder
+      root on the forward axis; freq from body `size` -> hummingbird flutter vs hawk beats), dedicated swept
+      tapered wing mesh (`wing_mesh`, double-sided), bird tail fan, new cosmetic `beak` gene (forward cone =
+      beak on birds / snout on others, backfilled by `ensure_cosmetic`). Wingspan scales with flight gene + size.
 - [ ] **Balance-phase follow-ups** (visuals-first now): dive-hunting tuning, flier predator niche, flock/school
-      cohesion at altitude, HUD flier count, wing-flap animation.
+      cohesion at altitude, HUD flier count.
 
 ### Magnetic field + magnetoreception (2026-06-22)
 - [x] **Tilted geomagnetic dipole** (`sphere.rs`): `MAG_TILT` + `mag_pole_dir` (magnetic north ~11.5 deg off

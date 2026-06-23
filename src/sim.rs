@@ -1290,6 +1290,7 @@ pub fn spawn_world_render(
         leg: meshes.add(Cylinder::new(0.5, 1.0)), // radius 0.5, height 1 -> thin legs after scaling
         fin: meshes.add(Cone { radius: 0.5, height: 1.0 }), // apex +Y, base -Y; scaled flat -> fish fins
         seg: meshes.add(Cuboid::new(1.0, 1.0, 1.0)), // unit box; scaled per tail/side-fin use
+        wing: meshes.add(crate::viz::wing_mesh()), // bird wing planform (root at origin, flaps about root)
     });
     // per-form plant mesh library: one silhouette per plant::form (viz::add_plant_visuals picks by genome).
     // Round forms = icospheres; tall/leafy = procedural frond clumps; lily pad = flat disc.

@@ -117,6 +117,9 @@ pub struct Genome {
     pub flight: f32,         // 0..1 aerial: above FLIGHT_KNEE creature can climb (brain out[6]) -> fast aloft +
                              // skips ground collision/drowning; holding altitude burns energy + big wings clumsy
                              // grounded (mirror of swim). Default 0 = grounded (old saves unchanged). Drives bird niche.
+    #[serde(default = "zero")]
+    pub beak: f32,           // 0..1 snout/beak length (render only, NO sim effect): birds get a forward beak, other
+                             // body plans a snout. Cosmetic, backfilled by ensure_cosmetic on old saves.
 }
 
 // serde defaults for traits absent in old saves
@@ -288,6 +291,7 @@ impl Genome {
             // skew grounded, but ~15% of founders are TRUE fliers (>FLIGHT_KNEE/wing threshold) so the bird niche
             // is visible from gen 0 (not waiting many gens for mutation to cross 0.5). Rest stay low (ground-biased).
             flight: if rng.f32() < 0.15 { rng.range(0.55, 1.0) } else { rng.f32() * rng.f32() * 0.4 },
+            beak: rng.f32() * rng.f32(), // skew short snouts; few long beaks/snouts
         }
     }
 
@@ -347,6 +351,8 @@ impl Genome {
         self.tail = u(8);
         let f = u(16);
         self.fin = f * f; // skew finless, few prominent
+        let bk = u(24);
+        self.beak = bk * bk; // skew short snouts, few long beaks
     }
 
     // Two-parent recombination (--mating mode). Body STRUCTURE (sensors + brain net/plast) from parent `a`
@@ -386,6 +392,7 @@ impl Genome {
         c.fin = pick(rng, a.fin, b.fin);
         c.magneto = pick(rng, a.magneto, b.magneto);
         c.flight = pick(rng, a.flight, b.flight);
+        c.beak = pick(rng, a.beak, b.beak);
         for i in 0..NUTRIENTS {
             c.uptake[i] = pick(rng, a.uptake[i], b.uptake[i]);
         }
@@ -513,6 +520,9 @@ impl Genome {
         }
         if rng.f32() < rate {
             self.flight = (self.flight + rng.normal() * 0.12).clamp(0.0, 1.0);
+        }
+        if rng.f32() < rate {
+            self.beak = (self.beak + rng.normal() * 0.12).clamp(0.0, 1.0);
         }
         // structural: add/remove sensor (+ matching input-weight columns), p=0.06 each
         if rng.f32() < 0.06 && self.sensors.len() < MAX_SENSORS {
