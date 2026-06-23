@@ -122,6 +122,15 @@ pub fn grid_cell_surface(c: usize) -> Vec3 {
     crate::sphere::surface_pos(cell_center(c).normalize_or_zero(), 0.0)
 }
 
+// Map unit surface dir (or any sphere pos) -> SOIL_RES grid cell. Lets render sample live grids
+// (Soil/GroundWater/Fire/creature density) by direction for the inspector minimap dynamic overlays.
+pub fn grid_cell(pos: Vec3) -> usize {
+    let (u, v) = grid_uv(pos);
+    let to_cell =
+        |w: f32| (((w + WORLD_HALF) / (2.0 * WORLD_HALF)) * SOIL_RES as f32).clamp(0.0, (SOIL_RES - 1) as f32) as usize;
+    to_cell(v) * SOIL_RES + to_cell(u)
+}
+
 // Food spatial grid (perf): bin foods into FGRID^2 cells -> creature scans nearby cells, not all ~1900 foods.
 // NEAR_QUERY = min query radius so global-nearest always found (plants dense -> nearest within a few units).
 const FGRID: usize = 20;

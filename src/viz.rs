@@ -110,21 +110,26 @@ impl Plugin for VizPlugin {
                     toggle_legend,
                     god_disturbances,
                     draw_selection,
-                    (minimap_sync_cam, minimap_input, minimap_rebuild),
+                    (minimap_sync_cam, minimap_input, minimap_rebuild, minimap_dynamic),
                 ),
             );
     }
 }
 
 // --- Corner inspector minimap: a real 3D globe in the bottom-right that ROTATES WITH the main view, colored
-// by a chosen FIELD overlay ('M' cycles biome/heat/moisture/elevation). A 2nd camera renders a field-colored
+// by a chosen FIELD overlay ('M' cycles static biome/heat/moisture/elevation + live soil/water/fire/life). A 2nd camera renders a field-colored
 // globe (on RenderLayers 1, so the MAIN camera never sees it) into a corner viewport; its orbit is synced to
 // OrbitCam each frame so the minimap shows the same face you're looking at. Render-only; never touches sim.
-const MM_FIELDS: [&str; 4] = ["biome", "heat", "moisture", "elevation"];
+// Fields 0..MM_STATIC are STATIC (position-only -> sampled once per switch). Fields >= MM_STATIC are
+// DYNAMIC live overlays (soil fertility / groundwater / fire / creature density) -> rebuilt each frame from
+// sim resources so the minimap shows the world changing in real time.
+const MM_FIELDS: [&str; 8] = ["biome", "heat", "moisture", "elevation", "soil", "water", "fire", "life"];
+const MM_STATIC: usize = 4; // first dynamic field index
 const MM_RES: usize = 64; // globe lat bands (small: minimap is tiny)
 const MM_SIZE: f32 = 200.0; // viewport square, logical px
 const MM_MARGIN: f32 = 10.0;
 const MM_DIST: f32 = 215.0; // minimap cam distance from globe center (PLANET_R=80 -> whole globe framed)
+const MM_DENSITY_FULL: f32 = 5.0; // creatures-per-cell that reads as full "life" brightness
 
 #[derive(Resource)]
 struct Minimap {
@@ -164,6 +169,21 @@ fn minimap_color(field: usize, d: Vec3) -> [f32; 3] {
     }
 }
 
+// Dynamic overlay color: dim biome base (keeps continents legible) blended toward a hot color by the live
+// per-cell value `v` (0..1). field index is the MM_FIELDS slot (>= MM_STATIC). d = unit surface dir.
+fn minimap_dynamic_color(field: usize, d: Vec3, v: f32) -> [f32; 3] {
+    let base = crate::sphere::biome_color(d);
+    let dim = [base[0] * 0.3, base[1] * 0.3, base[2] * 0.3];
+    let hot = match field {
+        4 => [0.25, 0.95, 0.25], // soil fertility: barren -> lush green
+        5 => [0.15, 0.45, 1.0],  // groundwater: dry -> blue
+        6 => [1.0, 0.55, 0.1],   // fire: dark -> burning orange
+        _ => [1.0, 0.95, 0.3],   // life (creature density): empty -> bright yellow
+    };
+    let t = v.clamp(0.0, 1.0);
+    [dim[0] + (hot[0] - dim[0]) * t, dim[1] + (hot[1] - dim[1]) * t, dim[2] + (hot[2] - dim[2]) * t]
+}
+
 fn spawn_minimap(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -189,7 +209,7 @@ fn spawn_minimap(
         RenderLayers::layer(1),
         MinimapCam,
     ));
-    commands.insert_resource(Minimap { field: 0, dirty: false, mesh });
+    commands.insert_resource(Minimap { field: 0, dirty: true, mesh }); // dirty -> frame 1 syncs label to field
     commands
         .spawn(Node {
             position_type: PositionType::Absolute,
@@ -239,18 +259,55 @@ fn minimap_input(keys: Res<ButtonInput<KeyCode>>, mut mm: ResMut<Minimap>) {
     }
 }
 
-// On field-switch, rebuild the globe's vertex colors for the new field + update the label.
+// On field-switch: update the label (all fields) + rebuild the globe ONCE for STATIC fields. Dynamic fields
+// are rebuilt every frame by minimap_dynamic instead, so skip them here.
 fn minimap_rebuild(mut mm: ResMut<Minimap>, mut meshes: ResMut<Assets<Mesh>>, mut q_label: Query<&mut Text, With<MinimapLabel>>) {
     if !mm.dirty {
         return;
     }
     mm.dirty = false;
     let field = mm.field;
-    if let Some(m) = meshes.get_mut(&mm.mesh) {
-        *m = crate::terrain::build_globe_colored(MM_RES, |d| minimap_color(field, d));
+    if field < MM_STATIC {
+        if let Some(m) = meshes.get_mut(&mm.mesh) {
+            *m = crate::terrain::build_globe_colored(MM_RES, |d| minimap_color(field, d));
+        }
     }
     if let Ok(mut t) = q_label.single_mut() {
         t.0 = format!("map: {}  [M]", MM_FIELDS[field]);
+    }
+}
+
+// Live overlays: when a DYNAMIC field is active, rebuild the globe each frame from sim resources. Builds a
+// normalized 0..1 per-cell value grid (SOIL_RES^2), then recolors the globe by sampling it per vertex dir.
+fn minimap_dynamic(
+    mm: Res<Minimap>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    soil: Res<crate::sim::Soil>,
+    gw: Res<crate::sim::GroundWater>,
+    fire: Res<crate::sim::Fire>,
+    creatures: Query<&Transform, With<Creature>>,
+) {
+    let field = mm.field;
+    if field < MM_STATIC {
+        return;
+    }
+    let n = crate::config::SOIL_RES * crate::config::SOIL_RES;
+    let vals: Vec<f32> = match field {
+        4 => soil.cell.iter().map(|&f| (f / crate::config::FERT_CAP).clamp(0.0, 1.0)).collect(), // fertility 0..FERT_CAP
+        5 => gw.cell.iter().map(|&w| w.clamp(0.0, 1.0)).collect(),                                // groundwater already 0..1
+        6 => fire.cell.iter().map(|&f| f.clamp(0.0, 1.0)).collect(),                              // fire already 0..1
+        _ => {
+            let mut d = vec![0.0f32; n]; // creature density: count per cell / MM_DENSITY_FULL
+            for t in creatures.iter() {
+                d[crate::sim::grid_cell(t.translation)] += 1.0;
+            }
+            d.iter().map(|&c| (c / MM_DENSITY_FULL).min(1.0)).collect()
+        }
+    };
+    if let Some(m) = meshes.get_mut(&mm.mesh) {
+        *m = crate::terrain::build_globe_colored(MM_RES, |dir| {
+            minimap_dynamic_color(field, dir, vals[crate::sim::grid_cell(dir)])
+        });
     }
 }
 
