@@ -2420,6 +2420,7 @@ pub fn live_step(
                 * genome.flight * air_here
                 * (1.0 - GLIDE_RELIEF * genome.flight * move_thrust.abs()).max(0.25) // glide: fast forward flight soars cheap (airspeed lift)
             + FLIGHT_GROUND_COST * genome.flight * (1.0 - air_here) // big wings clumsy when grounded (mirror SWIM_LAND_COST)
+            + FLIGHT_SWIM_CONFLICT * genome.flight * genome.swim // wings + fins antagonistic: can't be BOTH flier AND swimmer -> high-flight forced low-swim (drowns in water), high-swim forced low-flight (can't fly). Keeps fliers out of water + swimmers out of air.
             + WATER_PRESSURE_COST * (1.0 - genome.swim) * (-h1 / crate::sphere::SEA_FLOOR_MAX).clamp(0.0, 1.0) // non-swimmers struggle in deep water (depth pressure)
             + FAT_UPKEEP * genome.adiposity * fat_frac // carrying fat costs upkeep (no free lunch)
             + SPRINT_COST * sprint // burst effort burns extra fuel

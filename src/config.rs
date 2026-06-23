@@ -138,6 +138,11 @@ pub const FLIGHT_SIZE_LIFT: f32 = 3.0;
 // flier pays full. Max discount = this * flight * move_thrust (capped so cost stays positive).
 pub const GLIDE_RELIEF: f32 = 0.7;
 pub const FLIGHT_GROUND_COST: f32 = 2.0;// energy/sec penalty for full flight gene while grounded (clumsy wings). Lowered 3.0->2.0 so landing to feed on ground food isn't brutal (birds still feed grounded until aerial food exists).
+// Wings + fins are mutually antagonistic body plans: paying for BOTH (high flight AND high swim) drains hard, so
+// evolution forces a creature to specialize -> a flier has low swim (drowns in deep water, can't reside there), a
+// swimmer has low flight (< FLIGHT_KNEE -> grounded, can't reside in air). Closes the amphibious loophole that
+// let one creature live in every medium. energy/sec at full flight x full swim; pure specialists pay 0.
+pub const FLIGHT_SWIM_CONFLICT: f32 = 3.0;
 pub const GROUND_EPS: f32 = 0.4;        // altitude below this = "on the ground" (can drown). Eating/predation/
                                         // collision need no vertical gate: all key off 3D translation, so an
                                         // airborne flier is auto > EAT_RADIUS/ATTACK_RADIUS from ground stuff.
