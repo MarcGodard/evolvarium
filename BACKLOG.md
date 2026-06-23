@@ -262,9 +262,16 @@ live in `config.rs`; the live conversion plan is `SPHERE-PLAN.md`.
       Parallelized grass/plant/seaweed (snapshot->par decide->serial apply, per-entity deterministic RNG) +
       weather (grid chunked over ComputeTaskPool, byte-identical). Whole tick ~16.5->3.48 ms = **4.7x** on 16
       cores (61->~290 ticks/s). Deterministic; equivalent (flora <3% + traits within +-10% pooled; seaweed +
-      weather byte-identical). `--profile` flag + `Rng::for_entity` infra added. Deferred: live_step (~16%,
-      selection-critical, do when creature pop scales up); system unchaining (unsafe: systems share Soil/gw/fire
-      within a tick). Helps headless runs + fast-forward viz only; normal viz/campaign unchanged by design.
+      weather byte-identical). `--profile` flag + `Rng::for_entity` infra added. System unchaining still
+      deferred (unsafe: systems share Soil/gw/fire within a tick). Helps headless runs + fast-forward viz only;
+      normal viz/campaign unchanged by design.
+- [x] live_step parallelized + ~1000-creature world (Phase 6 DONE 2026-06-23, report in `PARALLELIZATION.md`).
+      Creature pop grown ~60->1100 (CREATURE_CAP 130->1100, NICHE_CAP ~7x; food caps untouched, web already
+      carried it). live_step got the same snapshot->par decide->serial apply pattern (LiveBatch intents:
+      eat-despawn dedup, tree-bite/soil/birth/carrion, running caps in apply). At pop 1100: live_step **5.0x**
+      (11.3->2.3 ms), whole tick **2.6x** (15.3->5.8 ms = 66->173 ticks/s) -- the gain grows with pop since
+      live is O(n^2) in the social/threat/collision scans. Deterministic (same-seed byte-identical); equivalent
+      (pop/energy/plants within ~1% pooled over 4 seeds); stable (pop holds 1100 to 48k ticks, no boom-bust).
 - [ ] Solar system: real Tychos orbital model drives the sky (sun/moon + wandering planets) — spec
       `clients/evolvarium/15-solar-system-tychos.md`. Literal Tychos geometry (TSN deferent/epicycle data),
       drives existing sky, real orbital proportions. New `orrery.rs`; `sun_dir`/`moon_pos` delegate.

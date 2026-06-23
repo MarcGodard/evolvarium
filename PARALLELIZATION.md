@@ -243,3 +243,38 @@ sorted by entity index (caps, shared-resource writes, Commands spawn/despawn).
 
 If creature pop scales up an order of magnitude, do live_step next (same intent pattern; hardest because
 eat-dedup + repro are selection-critical -> needs the multi-seed equivalence fan-out).
+
+## Phase 6: live_step parallelized + ~1000-creature world (2026-06-23)
+
+The deferred trigger fired: creature pop grown ~60 -> 1100 (CREATURE_CAP 130->1100, NICHE_CAP ~7x; food
+caps untouched -> Phase-0 probe showed the food web already carries 1600+ with flora stable ~5800).
+
+live_step got the same pattern (snapshot -> par_iter_mut decide w/ per-entity `for_entity` RNG -> serial
+apply sorted by entity index). Shared-world writes deferred via `Parallel<LiveBatch>`: food despawns
+(dedup -> one despawn per food even if two creatures claimed it), tree-bite accumulation, soil deposits,
+endozoochory plant spawns, creature births (running global+niche cap re-enforced in apply), carrion +
+self-despawn on death. eat-dedup `eaten` set + pop/niche_pop taper now read the start-of-tick snapshot.
+
+Profile at pop ~1100 (16-core), serial live_step vs parallel (flora already parallel in both):
+
+| system  | serial-live us/tick | parallel-live us/tick |
+|---------|--------------------:|----------------------:|
+| live    | 11267 (73.8%)       | 2272 (39.3%)          |
+| grass   |  2104               | 1814                  |
+| plant   |  1143               | 1020                  |
+| seaweed |   245               |  216                  |
+| weather |   124               |  110                  |
+| **tick**| **15260 (66 t/s)**  | **5785 (173 t/s)**    |
+
+**live_step 5.0x; whole tick 2.6x** at 1000+ creatures (gain grows with pop: live is O(n^2) in the
+social/threat/collision scans, so it dominates the tick at scale -> parallelizing it is what keeps a
+1000-creature world fast). At pop 1100, live is now the top system even parallelized (39%), grass next.
+
+Determinism: two same-seed runs byte-identical. Equivalence vs serial baseline (8ed22cd), 4 seeds pooled:
+pop/energy/plants/nutrient-sufficiency within ~1% (inside seed-to-seed chaos floor); no energy inflation
+from the double-eat approximation. Stability: pop holds at 1100 across 3 seeds, one run to 48000 ticks, no
+extinction/boom-bust; flora settles to a decelerating asymptote far above the reseed floor.
+
+Remaining serial (intentional): system unchaining (unsafe: systems share Soil/gw/fire within a tick).
+Next biggest single system is now grass (~1800 us, a fixed 8000-blade floor independent of creature pop);
+cut it by lowering GRASS_CAP, cheapening per-tuft noise sampling, or stepping grass every N ticks.
