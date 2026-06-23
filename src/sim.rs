@@ -552,21 +552,25 @@ pub(crate) fn niche_water_pos(rng: &mut Rng, target_lat: f32, offset: f32) -> Ve
     rand_pos(rng, offset)
 }
 
-// Override `g` trait genes for niche `i%5`, return matching spawn pos. Keeps g's brain/sensors.
+// Override `g` trait genes for niche `i%6`, return matching spawn pos. Keeps g's brain/sensors.
 fn diverse_creature(mut g: Genome, i: usize, rng: &mut Rng) -> (Genome, Vec3) {
-    // niches 0,1 = swimmers -> seed IN shallow water (on aquatic flora); rest are land niches.
-    match i % 5 {
+    // niches 0,1 = swimmers -> seed IN shallow water (on aquatic flora); 2-4 land; 5 = aerial flier.
+    match i % 6 {
         0 => {
-            g.swim = 0.9; g.temp_pref = 0.85; g.height = 0.3; // warm-sea swimmer ("fish")
+            g.swim = 0.9; g.flight = 0.0; g.temp_pref = 0.85; g.height = 0.3; // warm-sea swimmer ("fish")
             (g, niche_water_pos(rng, 0.15, CREATURE_Y))
         }
         1 => {
-            g.swim = 0.9; g.temp_pref = 0.25; g.height = 0.3; // cool-sea swimmer
+            g.swim = 0.9; g.flight = 0.0; g.temp_pref = 0.25; g.height = 0.3; // cool-sea swimmer
             (g, niche_water_pos(rng, 0.8, CREATURE_Y))
         }
-        2 => { g.swim = 0.1; g.temp_pref = 0.85; g.height = 0.25; (g, niche_pos(rng, true, 0.15, CREATURE_Y)) } // warm land grazer
-        3 => { g.swim = 0.1; g.temp_pref = 0.15; g.height = 0.25; (g, niche_pos(rng, false, 1.05, CREATURE_Y)) } // cold highland
-        _ => { g.swim = 0.1; g.temp_pref = 0.5; g.height = 0.9; (g, niche_pos(rng, false, 0.5, CREATURE_Y)) }    // tall browser
+        2 => { g.swim = 0.1; g.flight = 0.0; g.temp_pref = 0.85; g.height = 0.25; (g, niche_pos(rng, true, 0.15, CREATURE_Y)) } // warm land grazer
+        3 => { g.swim = 0.1; g.flight = 0.0; g.temp_pref = 0.15; g.height = 0.25; (g, niche_pos(rng, false, 1.05, CREATURE_Y)) } // cold highland
+        4 => { g.swim = 0.1; g.flight = 0.0; g.temp_pref = 0.5; g.height = 0.9; (g, niche_pos(rng, false, 0.5, CREATURE_Y)) }    // tall browser
+        // AERIAL flier ("bird"): high flight + low swim (wings/fins antagonism), SMALL body (cheap to lift via
+        // FLIGHT_SIZE_LIFT), keen-eyed. Seeded on temperate land -> hovers near ground food (FLIGHT_CRUISE low)
+        // + zips aloft to travel. Competent base brain forages; lifetime learning tunes the climb output.
+        _ => { g.swim = 0.05; g.flight = 0.85; g.size = 0.25; g.eyes = 0.8; g.temp_pref = 0.5; g.height = 0.3; (g, niche_pos(rng, false, 0.5, CREATURE_Y)) }
     }
 }
 

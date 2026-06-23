@@ -127,7 +127,7 @@ pub const FLIGHT_CLIMB_RATE: f32 = 4.0; // altitude units/sec gained/lost at ful
 pub const FLIGHT_BUOYANCY: f32 = 1.2;   // passive relax/sec toward cruise altitude (neutral buoyancy: fliers
                                         // hover aloft, fish hover mid-water, even with a neutral brain). Brain
                                         // out[6] climbs/descends around it; landing to eat = sustained descend.
-pub const FLIGHT_CRUISE: f32 = 0.15;    // resting altitude as fraction of medium ceiling (where buoyancy settles). Low so fliers FORAGE near ground (within EAT_RADIUS 1.1 of ground food) + pop up to travel/escape. At 0.55 a flier hovered ~2.3 alt >> eat range -> untrained birds starved before learning to dive (bootstrap death).
+pub const FLIGHT_CRUISE: f32 = 0.25;    // resting altitude as fraction of medium ceiling (where buoyancy settles). Raised 0.15->0.25 so birds visibly FLY (clearly aloft, not hugging ground) yet stay close enough to dive-feed (keen FLIGHT_VISION + FLIGHT_SPEED let them spot + reach ground food). At 0.55 untrained birds hovered ~2.3 alt >> EAT_RADIUS 1.1 and starved; 0.25 keeps them fed while looking like birds. Verify aerial niche persists if changed.
 pub const FLIGHT_ALT_COST: f32 = 0.8;   // energy/sec BASE to hold full altitude (small-bird flapping upkeep). Lowered 1.5->0.8: birds must be SMALL + CHEAP aloft (wing-loading via FLIGHT_SIZE_LIFT adds the body-mass cost on top). Cheap base lets a small flier self-sustain on the wing.
 // Wing loading: big body costs MUCH more to hold aloft (mass to lift). Adds to FLIGHT_ALT_COST per unit
 // size, so flight selects SMALL birds (a heavy flier can't pay its altitude). Small (size 0.15) flier ~free;
