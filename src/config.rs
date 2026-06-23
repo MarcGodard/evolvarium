@@ -122,7 +122,7 @@ pub const DROWN_DEPTH: f32 = 0.25;     // min submersion (0 coast .. 1 abyss) be
 // costs in this visuals-first pass: flight must NOT become a free escape valve (balance-phase follow-up).
 pub const FLIGHT_KNEE: f32 = 0.35;      // min flight gene to leave the ground (below = grounded walker)
 pub const MAX_FLIGHT_ALT: f32 = 6.0;    // altitude ceiling (surface-offset units above CREATURE_Y)
-pub const FLIGHT_SPEED: f32 = 1.2;      // top-speed bonus fraction at full flight when fully airborne (fast flier)
+pub const FLIGHT_SPEED: f32 = 3.0;      // top-speed bonus fraction at full flight when fully airborne. High (>SWIM_SPEED): birds are the FASTEST movers, zipping aloft (air = less drag than water/ground). At full flight x airborne -> ~4x a walker's speed. Tunable in balance phase.
 pub const FLIGHT_CLIMB_RATE: f32 = 4.0; // altitude units/sec gained/lost at full climb/descend intent
 pub const FLIGHT_BUOYANCY: f32 = 1.2;   // passive relax/sec toward cruise altitude (neutral buoyancy: fliers
                                         // hover aloft, fish hover mid-water, even with a neutral brain). Brain
@@ -478,6 +478,7 @@ pub const CLIMB_FLAT_COST: f32 = 0.6; // energy/sec at full climb on flat non-ro
 pub const EYE_MIN: f32 = 1.0;         // eyes at gene 0
 pub const EYE_SPAN: f32 = 5.0;        // eyes added across gene range (-> 6 eyes at gene 1)
 pub const EYE_SENSE_BONUS: f32 = 0.3; // effective sensor-range mult add at full eyes (+30%)
+pub const FLIGHT_VISION: f32 = 1.0;   // effective sensor-range mult add at full flight (birds = keen-eyed: full flier sees ~2x as far). Perk of the costly flight build (no extra SENSE_COST), stacks on the eyes gene.
 pub const EYE_COST: f32 = 0.3;        // energy/sec basal at full eyes (eyes metabolically pricey)
 // head: bigger head houses brain more efficiently (cuts per-neuron BRAIN_COST) but adds basal mass.
 pub const HEAD_BRAIN_RELIEF: f32 = 0.5; // fraction of BRAIN_COST removed at full head (roomy braincase)

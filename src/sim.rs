@@ -2144,7 +2144,9 @@ pub fn live_step(
         // big speedup at scale.
         let n_s = genome.sensors.len();
         // eyes gene: more eyes = small effective-range boost (sharper sight) on every sensor.
-        let eye_mult = 1.0 + EYE_SENSE_BONUS * genome.eyes;
+        // keen bird eyes: flight gene boosts effective sensor range (raptors spot prey/food from afar). A perk of
+        // the costly flight investment (like SWIM_SPEED rewards swim); stacks on the eyes gene.
+        let eye_mult = (1.0 + EYE_SENSE_BONUS * genome.eyes) * (1.0 + FLIGHT_VISION * genome.flight);
         let max_range = genome.sensors.iter().map(|s| s.range).fold(0.0f32, f32::max) * eye_mult;
         let mut best: Option<(usize, f32)> = None;
         let mut sd = vec![f32::INFINITY; n_s]; // nearest dist per sensor
@@ -2372,9 +2374,11 @@ pub fn live_step(
         // drowning (hard kill): NON-aquatic creature (swim below SWIM_DROWN_MIN) in genuinely deep OPEN ocean
         // drowns outright. Shallow/coastal water stays crossable (gradual WATER_PRESSURE_COST handles wading);
         // only submersion past DROWN_DEPTH lethal, so only real swimmers live at sea. Leaves no carrion (corpse
-        // sinks to abyss, unforageable).
-        if genome.swim < SWIM_DROWN_MIN && loco.alt < GROUND_EPS {
-            // grounded only: a flier crossing above open ocean (alt >= GROUND_EPS) doesn't drown
+        // sinks to abyss, unforageable). FLIERS exempt: a winged creature (flight >= FLIGHT_KNEE) FLOATS on the
+        // surface like a duck + can take off again (also lets a raptor dive to snatch a surface fish without
+        // drowning). It still can't FORAGE submerged (needs swim), so water is no home -> doesn't reside there.
+        if genome.swim < SWIM_DROWN_MIN && genome.flight < FLIGHT_KNEE && loco.alt < GROUND_EPS {
+            // grounded NON-flier only: a flier crossing/floating over open ocean doesn't drown
             let sub = ((crate::sphere::SEA_LEVEL - crate::sphere::elevation01(nd)) / crate::sphere::SEA_LEVEL).clamp(0.0, 1.0);
             if sub > DROWN_DEPTH {
                 alive.0 = false;
