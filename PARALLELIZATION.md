@@ -175,9 +175,11 @@ section updated as the source of truth.
 ## Status
 
 - [x] Phase 0 - profile + retarget (2026-06-23)
-- [ ] Phase 1 - infra (per-entity RNG, stable index, intent scaffolding)
-- [ ] Phase 2 - grass_step (62.8%, top hot system)
-- [ ] Phase 3 - plant_step (24.4%)
+- [x] Phase 1 - infra: Rng::for_entity (per-entity deterministic stream) + GenState.seed. entity.index() is
+      the stable id (deterministic spawn order), no extra component needed. (2026-06-23)
+- [x] Phase 2 - grass_step parallel (snapshot->par decide->serial apply). 10333->1972 us/tick = 5.2x.
+      Overall tick 16.5->8.2 ms. Deterministic; equivalent (plants/trees <1.5%, traits within seed noise). (2026-06-23)
+- [ ] Phase 3 - plant_step (now 48% of tick, top hotspot)
 - [ ] Phase 4 - seaweed_step (7.1%)
 - [ ] Phase 5 - weather/climate grids (3.3%, if not already Amdahl-capped)
 - [ ] (deferred) live_step / predation - only 2.1% / ~0%; do only if creature pop scales up

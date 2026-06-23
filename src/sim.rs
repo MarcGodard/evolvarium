@@ -1487,6 +1487,21 @@ pub fn seaweed_step(
     }
 }
 
+// plant_step intents: produced per-entity in the parallel decide phase, drained + applied serially after
+// (despawn, soil, spawns). Every entry carries the parent's entity.index() as a stable sort key so the
+// serial apply (caps, soil-sum, and especially SPAWN ORDER -> new entity-index assignment) is
+// scheduling-independent and reproduces run-to-run. PARALLELIZATION.md.
+#[derive(Default)]
+struct PlantBatch {
+    despawns: Vec<(u32, Entity, bool, Option<&'static str>)>, // idx, entity, is_plant(non-tree), scenario death cause
+    soil_adds: Vec<(u32, Vec3, f32)>,                          // ash / death-fert / nfix (deferred ResMut<Soil> write)
+    detritus: Vec<(u32, PlantGenome, f32, Vec3)>,
+    fruit_drops: Vec<(u32, PlantGenome, Vec3)>,
+    births: Vec<(u32, PlantGenome, Vec3)>,
+    tree_births: Vec<(u32, Vec3, bool, PlantGenome)>,
+    bank: Vec<(u32, PlantGenome, Vec3, u32)>, // this tick's NEW dormant seeds (idx, genome, pos, wait)
+}
+
 // plants: grow, reproduce (disperse mutated offspring), reseed if the web nearly collapses (spec 13).
 pub fn plant_step(
     mut commands: Commands,
@@ -1516,6 +1531,13 @@ pub fn plant_step(
     let season = (gen.tick as f32 / GEN_TICKS as f32 * SEASON_FREQ).sin(); // -1 dry .. +1 wet
     let mut plant_count = q.iter().filter(|(.., t)| t.is_none()).count();
     let tree_count = q.iter().filter(|(.., t)| t.is_some()).count();
+    // coarse start-of-tick repro gates. Serial gated each birth by `count + births.len() < cap` (and
+    // short-circuited the rng + mass cost when full). Parallel decide can't see other entities' births, so we
+    // gate on the start-of-tick count -> blocks seeding (and its mass cost) when already AT cap, matching serial
+    // in the common at-cap case; the precise cap is re-enforced at spawn in apply. Divergence only in the narrow
+    // band where count < cap but count+births > cap (a few parents pay mass with no surviving seed). PARALLELIZATION.md.
+    let seeding_open = plant_count < pcap;
+    let tree_open = tree_count < tcap;
     let tree_positions: Vec<Vec3> = q.iter().filter_map(|(_, _, _, tf, t)| t.map(|_| tf.translation)).collect();
     // mating mode (--mating, shared with creatures): pool of (entity, pos, is_tree, genome) so a seeding
     // plant/tree finds a nearby genetically-similar MATE to cross. Built only when --mating (cloning every plant
@@ -1525,307 +1547,280 @@ pub fn plant_step(
     } else {
         Vec::new()
     };
-    let mut births: Vec<(PlantGenome, Vec3)> = Vec::new();
-    let mut tree_births: Vec<(Vec3, bool, PlantGenome)> = Vec::new(); // (pos, edible, child genome)
-    let mut detritus: Vec<(PlantGenome, f32, Vec3)> = Vec::new(); // moisture-killed plants -> poison
-    let mut fruit_drops: Vec<(PlantGenome, Vec3)> = Vec::new(); // mature fruit trees -> fallen fruit (fast energy)
-    for (e, mut st, g, tf, tree) in &mut q {
-        let ppos = tf.translation;
-        let pdir = ppos.normalize_or_zero();
-        // wildfire: a plant/tree in a strongly-burning cell burns up (despawn). On BURN-UP own biomass becomes
-        // ash -> extra soil nutrients (x mass; trees ~3x, bigger biomass). Burned ground regrows richer.
-        if fire.get(ppos) > FIRE_KILL {
-            let biomass = if tree.is_some() { 3.0 } else { 1.0 };
-            soil.add(ppos, FIRE_BURN_ASH * st.mass * biomass);
-            // serotiny: fire-adapted plant releases a seed AS it burns (post-fire recruitment onto fresh ash
-            // where competition just cleared) -> fire spreads its lineage, not just kills it.
-            if tree.is_none() && rng.f32() < g.fire_seed {
-                let child = mate_or_self(&mate_pool, e, ppos, g, false, &mut rng);
-                births.push((child, disperse_pos(&mut rng, ppos, g.spread, FOOD_Y)));
-            }
-            if let Some(s) = stats.as_deref_mut() {
-                s.death("fire");
-            }
-            commands.entity(e).despawn();
-            if tree.is_none() {
-                plant_count = plant_count.saturating_sub(1);
-            }
-            continue;
-        }
-        // hard freeze: polar ice core frozen solid -> any plant/tree here dies outright (no forageable flora on
-        // ice cap). Absolute temp kill, independent of temp_pref, so even cold-adapted species freeze; the
-        // tundra/frost-edge band above FREEZE_TEMP keeps its cold flora.
-        if crate::sphere::base_temperature(pdir) < FREEZE_TEMP {
-            if let Some(s) = stats.as_deref_mut() {
-                s.death("frozen");
-            }
-            commands.entity(e).despawn();
-            if tree.is_none() {
-                plant_count = plant_count.saturating_sub(1);
-            }
-            continue;
-        }
-        let light = crate::sphere::daylight_at(pdir, gen.tick); // positional day/night at this plant
-        let fert = soil.get(ppos);
-        let water = gw.get(ppos); // dynamic rain-fed ground water here
-        // fertility AND rain-watered ground both speed growth (rain visibly greens the land)
-        let boost = (1.0 + FERT_GROWTH * (fert / FERT_CAP).min(1.0)) * (1.0 + WET_GROWTH * water);
-        // light factor: growth peaks when daylight matches light_pref (sun vs shade species). Clouds visual-only:
-        // folding their dimming into growth cut average food enough to tip marginal populations, so light niches
-        // come from the predictable+stable day/night cycle only.
-        let lf = 0.35 + 0.65 * (1.0 - (light - g.light_pref).abs());
-        if let Some(tree) = tree {
-            // trees land-only: a tree in water drowns fast (no kelp/mangrove forests). Clears coastal seeds that
-            // landed in sea + any tree left underwater by rising sea level.
-            if crate::sphere::is_ocean(pdir) && rng.f32() < DROWN_TREE {
-                if let Some(s) = stats.as_deref_mut() {
-                    s.death("drown");
+    let seed = gen.seed;
+    let tick = gen.tick;
+    // read-only snapshots for the parallel decide (soil/tree_bites not mutated until the serial apply below)
+    let soil_r: &Soil = &soil;
+    let gw_r: &GroundWater = &gw;
+    let climate_r: &Climate = &climate;
+    let fire_r: &Fire = &fire;
+    let bites_r: &TreeBites = &tree_bites;
+    let tpos_r: &[Vec3] = &tree_positions;
+    let pool_r: &[(Entity, Vec3, bool, PlantGenome)] = &mate_pool;
+    // DECIDE (parallel): each plant/tree updates its OWN mass/age in place; every side effect (despawn, soil
+    // deposit, detritus, fruit drop, birth, tree birth, dormant seed) is pushed as an intent carrying the
+    // parent's entity index. RNG is per-entity (for_entity) -> order-independent. Caps + scenario stats +
+    // spawns are resolved in the serial apply, sorted by index. PARALLELIZATION.md.
+    let mut batch: bevy::utils::Parallel<PlantBatch> = bevy::utils::Parallel::default();
+    q.par_iter_mut().for_each_init(
+        || batch.borrow_local_mut(),
+        |out, (e, mut st, g, tf, tree)| {
+            let idx = e.index().index();
+            let mut prng = crate::rng::Rng::for_entity(seed, idx, tick);
+            let ppos = tf.translation;
+            let pdir = ppos.normalize_or_zero();
+            // wildfire burn-up: biomass -> ash (trees ~3x). Burned ground regrows richer. Serotiny: fire-adapted
+            // plant releases a seed AS it burns (post-fire recruitment onto fresh ash).
+            if fire_r.get(ppos) > FIRE_KILL {
+                let biomass = if tree.is_some() { 3.0 } else { 1.0 };
+                out.soil_adds.push((idx, ppos, FIRE_BURN_ASH * st.mass * biomass));
+                if tree.is_none() && prng.f32() < g.fire_seed {
+                    let child = mate_or_self(pool_r, e, ppos, g, false, &mut prng);
+                    out.births.push((idx, child, disperse_pos(&mut prng, ppos, g.spread, FOOD_Y)));
                 }
-                commands.entity(e).despawn();
-                continue;
+                out.despawns.push((idx, e, tree.is_none(), Some("fire")));
+                return;
             }
-            // fed-on this tick? (key present even for harmless branch-feeders who do 0 mass damage). Apply
-            // recorded mass damage; a fruit tree grazed below TREE_MIN_MASS is over-eaten -> dies.
-            let grazed = tree_bites.0.contains_key(&e);
-            if grazed {
-                st.mass = (st.mass - tree_bites.0[&e]).max(0.0);
-                if st.mass < TREE_MIN_MASS {
-                    if let Some(s) = stats.as_deref_mut() {
-                        s.death("eaten");
+            // hard freeze: polar ice core -> any plant/tree dies outright (absolute kill, temp_pref-independent).
+            if crate::sphere::base_temperature(pdir) < FREEZE_TEMP {
+                out.despawns.push((idx, e, tree.is_none(), Some("frozen")));
+                return;
+            }
+            let light = crate::sphere::daylight_at(pdir, tick);
+            let fert = soil_r.get(ppos);
+            let water = gw_r.get(ppos);
+            let boost = (1.0 + FERT_GROWTH * (fert / FERT_CAP).min(1.0)) * (1.0 + WET_GROWTH * water);
+            let lf = 0.35 + 0.65 * (1.0 - (light - g.light_pref).abs());
+            if let Some(tree) = tree {
+                // trees land-only: a tree in water drowns fast (no kelp/mangrove forests).
+                if crate::sphere::is_ocean(pdir) && prng.f32() < DROWN_TREE {
+                    out.despawns.push((idx, e, false, Some("drown")));
+                    return;
+                }
+                // grazed this tick? apply recorded mass damage; over-eaten below TREE_MIN_MASS -> dies.
+                let grazed = bites_r.0.contains_key(&e);
+                if grazed {
+                    st.mass = (st.mass - bites_r.0[&e]).max(0.0);
+                    if st.mass < TREE_MIN_MASS {
+                        out.despawns.push((idx, e, false, Some("eaten")));
+                        return;
                     }
-                    commands.entity(e).despawn();
-                    continue;
+                }
+                // tree climate niche: moisture-immune (deep roots) but feels temperature. Far off thermal band -> dies.
+                let tmiss = (crate::sphere::base_temperature(pdir) - g.temp_pref).abs();
+                if prng.f32() < TREE_TEMP_KILL * (tmiss - TREE_TEMP_TOL).max(0.0) {
+                    out.despawns.push((idx, e, false, Some("temp")));
+                    return;
+                }
+                let temp_grow = TEMP_FLOOR + (1.0 - TEMP_FLOOR) * (1.0 - tmiss);
+                // soil response shapes growth speed + final SIZE (survival stays moisture-immune): rich + ideally
+                // moist ground grows bigger trees. Still MATURES at g.maturity so food/spread unchanged.
+                let clim = crate::sphere::moisture(pdir) * (1.0 - CLIMATE_VEG) + climate_r.get(ppos) * CLIMATE_VEG;
+                let m = (clim + 0.2 * season + WET_GAIN * water).clamp(0.0, 1.0);
+                let moist_q = (1.0 - (m - TREE_WET_OPT).abs() / TREE_WET_TOL).clamp(0.0, 1.0);
+                let fert_q = (fert / FERT_CAP).min(1.0);
+                let soil_q = moist_q * (0.4 + 0.6 * fert_q);
+                let grow_mult = (1.0 + FERT_GROWTH * fert_q) * (TREE_WET_FLOOR + (1.0 - TREE_WET_FLOOR) * moist_q);
+                let full_size = g.maturity * (1.0 + TREE_SOIL_SIZE * soil_q);
+                st.mass = (st.mass + g.growth_rate() * grow_mult * lf * temp_grow * TREE_GROWTH_SCALE * DT).min(full_size);
+                st.age += 1;
+                let r2 = TREE_DENSITY_R * TREE_DENSITY_R;
+                let local = tpos_r.iter().filter(|p| p.distance_squared(ppos) < r2).count();
+                let fert_boost = 0.3 + 2.2 * fert_q;
+                let mature = st.mass >= g.maturity;
+                if mature && tree.edible && prng.f32() < P_FRUIT_DROP * (0.5 + g.nutrient) {
+                    let fpos = disperse_pos(&mut prng, ppos, 3.0, FOOD_Y); // within crown footprint
+                    out.fruit_drops.push((idx, g.clone(), fpos));
+                }
+                let ambient = mature && local <= TREE_MAX_LOCAL && prng.f32() < P_TREE_REPRO * fert_boost;
+                let disperse = mature && tree.edible && grazed && prng.f32() < P_TREE_EAT_DISPERSE; // seed carried off
+                // tree_open = start-of-tick tcap gate (precise cap re-enforced at spawn). rng above always drawn (matches serial order).
+                if (ambient || disperse) && tree_open {
+                    let base = eff_spread(g);
+                    let spread = if disperse { base * TREE_EAT_SPREAD_MULT } else { base };
+                    let pos = disperse_pos(&mut prng, ppos, spread, FOOD_Y);
+                    if !crate::sphere::is_ocean(pos.normalize_or_zero()) {
+                        let child = mate_or_self(pool_r, e, ppos, g, true, &mut prng);
+                        out.tree_births.push((idx, pos, tree.edible, child));
+                    }
+                    st.mass *= PLANT_REPRO_FRAC; // budding a seed costs parent mass either way
+                }
+                return;
+            }
+            // --- regular plant ---
+            // grazing from live_step: eaten below PLANT_MIN_MASS = consumed -> gone; high-regrow bush survives.
+            if let Some(&bite) = bites_r.0.get(&e) {
+                st.mass = (st.mass - bite).max(0.0);
+                if st.mass < PLANT_MIN_MASS {
+                    out.soil_adds.push((idx, ppos, DEATH_FERT * 0.3));
+                    out.despawns.push((idx, e, true, Some("eaten")));
+                    return;
                 }
             }
-            // tree climate niche: trees moisture-immune (deep roots) but DO feel temperature. tmiss = local temp
-            // vs temp_pref. Far off its (wide) thermal band -> dies back (no forests on frozen pole or desert
-            // heat); near its band -> spared.
-            let tmiss = (crate::sphere::base_temperature(pdir) - g.temp_pref).abs();
-            if rng.f32() < TREE_TEMP_KILL * (tmiss - TREE_TEMP_TOL).max(0.0) {
-                if let Some(s) = stats.as_deref_mut() {
-                    s.death("temp");
-                }
-                commands.entity(e).despawn();
-                continue;
-            }
-            // off-niche grows slower too (shared floor: never zero) -> trees fastest in their band.
+            // mortality from moisture mismatch / poor site / drown / desiccate / temp. Effective moisture = slow
+            // CLIMATE moisture (drifts -> deserts/rainforests) + season + rain-fed ground water.
+            let clim = crate::sphere::moisture(pdir) * (1.0 - CLIMATE_VEG) + climate_r.get(ppos) * CLIMATE_VEG;
+            let m = (clim + 0.2 * season + WET_GAIN * water).clamp(0.0, 1.0);
+            // succulence buffers DROUGHT only (water-storers survive drier than their `wet`); soggy side unbuffered.
+            let dry_deficit = (g.wet - m).max(0.0);
+            let stress = ((m - g.wet).abs() - SUCC_BUFFER * g.succulence * dry_deficit).max(0.0);
+            let hab = crate::sphere::plant_habitability_with_moisture(pdir, clim);
+            let e01 = crate::sphere::elevation01(pdir);
+            let submersion = ((crate::sphere::SEA_LEVEL - e01) / crate::sphere::SEA_LEVEL).clamp(0.0, 1.0);
+            let drown = DROWN_KILL * submersion * (1.0 - g.wet.max(g.submerged)); // F22/F27
+            // desiccation (mirror of drown): aquatic plant stranded on dry land dries out.
+            let aquatic = ((g.wet - 0.85) / 0.15).clamp(0.0, 1.0);
+            let desiccate = DESICCATE_KILL * aquatic * (1.0 - submersion) * (1.0 - (m / 0.6).min(1.0));
+            let temp = crate::sphere::base_temperature(pdir);
+            let tmiss = (temp - g.temp_pref).abs();
             let temp_grow = TEMP_FLOOR + (1.0 - TEMP_FLOOR) * (1.0 - tmiss);
-            // SOIL response (survival stays moisture-immune; this only shapes growth speed + final SIZE): tree
-            // grows faster AND BIGGER on good ground = fertile soil AND moisture SWEET SPOT (wet, not waterlogged).
-            // Bone-dry, swampy, or poor soil -> slower + smaller.
-            let clim = crate::sphere::moisture(pdir) * (1.0 - CLIMATE_VEG) + climate.get(ppos) * CLIMATE_VEG;
-            let m = (clim + 0.2 * season + WET_GAIN * water).clamp(0.0, 1.0); // effective local moisture
-            let moist_q = (1.0 - (m - TREE_WET_OPT).abs() / TREE_WET_TOL).clamp(0.0, 1.0); // hump: 1 at sweet spot
-            let fert_q = (fert / FERT_CAP).min(1.0);
-            let soil_q = moist_q * (0.4 + 0.6 * fert_q); // 0 (bad ground) .. 1 (rich + ideally moist)
-            let grow_mult = (1.0 + FERT_GROWTH * fert_q) * (TREE_WET_FLOOR + (1.0 - TREE_WET_FLOOR) * moist_q);
-            // good soil grows a tree to BIGGER final size (cap), but it still MATURES (fruits+reproduces) at
-            // g.maturity so food supply + tree spread unchanged. It just keeps growing past maturity toward
-            // full_size (fruit drop mass-free; only seeding buds cost mass) -> rich ideally-moist ground = larger.
-            let full_size = g.maturity * (1.0 + TREE_SOIL_SIZE * soil_q);
-            st.mass = (st.mass + g.growth_rate() * grow_mult * lf * temp_grow * TREE_GROWTH_SCALE * DT).min(full_size);
+            let m_moist = MOISTURE_KILL * (stress - MOISTURE_TOLERANCE).max(0.0);
+            // aquatic plants spared the LAND-habitat penalty in their ocean home (scaled by at-home-in-water).
+            let aq_home = ((g.wet.max(g.submerged) - 0.85) / 0.15).clamp(0.0, 1.0) * submersion;
+            let m_hab = HABITAT_KILL * (0.3 - hab).max(0.0) * (1.0 - aq_home);
+            let m_temp = TEMP_KILL * (tmiss - TEMP_TOL).max(0.0);
+            let p_mort = m_moist + m_hab + drown + desiccate + m_temp;
+            if prng.f32() < p_mort {
+                // scenario tuning: attribute death to the dominant cause.
+                let cause = {
+                    let causes = [("moisture", m_moist), ("habitat", m_hab), ("drown", drown), ("desiccate", desiccate), ("temp", m_temp)];
+                    causes.iter().max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)).map(|c| c.0).unwrap_or("moisture")
+                };
+                // allelopathic litter: chemical-warfare plant leaves extra-toxic detritus suppressing competitors.
+                let mut litter = g.clone();
+                litter.toxicity = litter.toxicity.max(g.allelopathy);
+                out.detritus.push((idx, litter, st.mass, ppos));
+                out.soil_adds.push((idx, ppos, DEATH_FERT * 0.3));
+                out.despawns.push((idx, e, true, Some(cause)));
+                return;
+            }
+            // underwater the column dims light with depth -> deep plants need shade tolerance; vine climbs toward light.
+            let light_uw = light * (1.0 - WATER_LIGHT_ATTEN * submersion);
+            let lf = (0.35 + 0.65 * (1.0 - (light_uw - g.light_pref).abs()) + CLIMB_LIGHT * g.climb).min(1.0);
+            // nitrogen-fixer (legume): root nodules enrich local soil each tick.
+            if g.nitrogen_fix > 0.0 {
+                out.soil_adds.push((idx, ppos, NFIX_RATE * g.nitrogen_fix * DT));
+            }
+            st.mass += g.growth_rate() * boost * hab * lf * temp_grow * DT;
             st.age += 1;
-            let r2 = TREE_DENSITY_R * TREE_DENSITY_R;
-            let local = tree_positions.iter().filter(|p| p.distance_squared(tf.translation) < r2).count();
-            let fert_boost = 0.3 + 2.2 * fert_q; // richer ground -> more new trees (groves thicken on good soil)
             let mature = st.mass >= g.maturity;
-            // mature fruit trees drop fruit nearby (forageable fast-energy). Rate scales with nutrient richness
-            // -> richer tree fruits more (growth already paid for it).
-            if mature && tree.edible && rng.f32() < P_FRUIT_DROP * (0.5 + g.nutrient) {
-                let fpos = disperse_pos(&mut rng, ppos, 3.0, FOOD_Y); // within crown footprint
-                fruit_drops.push((g.clone(), fpos));
+            // fruiting non-tree (berry bush, nightshade) drops fallen fruit -> fast-energy + ferment chain.
+            if mature && g.fruiting > 0.2 && prng.f32() < P_FRUIT_DROP * g.fruiting {
+                out.fruit_drops.push((idx, g.clone(), disperse_pos(&mut prng, ppos, 2.0, FOOD_Y)));
             }
-            let ambient = mature && local <= TREE_MAX_LOCAL && rng.f32() < P_TREE_REPRO * fert_boost;
-            let disperse = mature && tree.edible && grazed && rng.f32() < P_TREE_EAT_DISPERSE; // seed carried off
-            if (ambient || disperse) && tree_count + tree_births.len() < tcap {
-                let base = eff_spread(g); // wind/weight shape reach (samara flies, acorn drops); animal-carry adds more
-                let spread = if disperse { base * TREE_EAT_SPREAD_MULT } else { base };
-                let pos = disperse_pos(&mut rng, ppos, spread, FOOD_Y);
-                // trees land-only: drop seeds that landed in sea (no ocean forests)
-                if !crate::sphere::is_ocean(pos.normalize_or_zero()) {
-                    // child inherits parent tree genome: crossed with a nearby compatible tree in --mating (oak x
-                    // oak -> tree species), else selfed; then mutated (trees evolve like plants)
-                    let child = mate_or_self(&mate_pool, e, ppos, g, true, &mut rng);
-                    tree_births.push((pos, tree.edible, child));
+            // endozoochory: fruiting plant that survived grazing has a seed carried off + dropped far. Toxic fruit
+            // disperses less. pcap enforced in apply.
+            if mature
+                && g.fruiting > 0.2
+                && bites_r.0.contains_key(&e)
+                && seeding_open
+                && prng.f32() < P_PLANT_EAT_DISPERSE * g.fruiting * (1.0 - g.fruit_toxicity)
+            {
+                let child = mate_or_self(pool_r, e, ppos, g, false, &mut prng);
+                let pos = disperse_pos(&mut prng, ppos, eff_spread(g) * PLANT_EAT_SPREAD_MULT, FOOD_Y);
+                if !(g.wet > 0.85 && !crate::sphere::is_ocean(pos.normalize_or_zero())) {
+                    out.births.push((idx, child, pos));
                 }
-                st.mass *= PLANT_REPRO_FRAC; // budding a seed costs parent mass either way
             }
-            continue;
-        }
-        // --- regular plant ---
-        // apply grazing from live_step: eaten below PLANT_MIN_MASS = consumed (carrot) -> gone; berry-bush (high
-        // regrow) loses a small bite + survives to regrow.
-        if let Some(&bite) = tree_bites.0.get(&e) {
-            st.mass = (st.mass - bite).max(0.0);
-            if st.mass < PLANT_MIN_MASS {
-                if let Some(s) = stats.as_deref_mut() {
-                    s.death("eaten");
+            // clonal spread (rhizome/runner/sucker): short-range true clone beside parent (no mutate). pcap in apply.
+            if mature && g.clonal > 0.0 && seeding_open && prng.f32() < P_CLONAL * g.clonal {
+                let pos = disperse_pos(&mut prng, ppos, CLONAL_RADIUS, FOOD_Y);
+                if !(g.wet > 0.85 && !crate::sphere::is_ocean(pos.normalize_or_zero())) {
+                    out.births.push((idx, g.clone(), pos)); // identical ramet: fidelity over variation
+                    st.mass *= PLANT_REPRO_FRAC; // budding a ramet costs parent
                 }
-                commands.entity(e).despawn();
-                soil.add(ppos, DEATH_FERT * 0.3); // consumed plant returns some nutrients to ground
-                plant_count = plant_count.saturating_sub(1);
-                continue;
+            }
+            // cling (epizoochory): burr/sticky seed snagged by passing animal -> even inedible plants disperse.
+            if mature && g.cling > 0.0 && seeding_open && prng.f32() < P_CLING * g.cling {
+                let child = mate_or_self(pool_r, e, ppos, g, false, &mut prng);
+                let pos = disperse_pos(&mut prng, ppos, eff_spread(g) * CLING_SPREAD_MULT, FOOD_Y);
+                if !(g.wet > 0.85 && !crate::sphere::is_ocean(pos.normalize_or_zero())) {
+                    out.births.push((idx, child, pos));
+                }
+            }
+            // ordinary seeding (+ hydrochory long water reach + dormancy bank). pcap + bank cap enforced in apply.
+            if mature && seeding_open && prng.f32() < P_REPRO * (1.0 - DEF_REPRO_COST * g.defense) {
+                let child = mate_or_self(pool_r, e, ppos, g, false, &mut prng);
+                let near_water = ((crate::sphere::SEA_LEVEL + HYDRO_COAST_BAND - e01) / HYDRO_COAST_BAND).clamp(0.0, 1.0);
+                let hydro = 1.0 + HYDRO_RANGE * g.hydrochory * near_water;
+                let pos = disperse_pos(&mut prng, ppos, eff_spread(g) * hydro, FOOD_Y);
+                // aquatic plants (high wet) only seed into water; seed on dry ground dropped. Parent pays either way.
+                if !(g.wet > 0.85 && !crate::sphere::is_ocean(pos.normalize_or_zero())) {
+                    // dormancy: a fraction go DORMANT into the soil bank vs sprouting now (lineage survives a wipe).
+                    if prng.f32() < DORMANCY_FRAC * g.dormancy {
+                        let wait = DORMANT_TICKS_MIN + (prng.f32() * (DORMANT_TICKS_MAX - DORMANT_TICKS_MIN) as f32) as u32;
+                        out.bank.push((idx, child, pos, wait));
+                    } else {
+                        out.births.push((idx, child, pos));
+                    }
+                }
+                st.mass *= PLANT_REPRO_FRAC;
+            }
+        },
+    );
+    // APPLY (serial, deterministic): merge per-thread batches, sort every list by parent index (drain order is
+    // unspecified) so caps, soil-sum, and SPAWN order -> new entity-index assignment all reproduce run-to-run.
+    let mut despawns: Vec<(u32, Entity, bool, Option<&'static str>)> = Vec::new();
+    let mut soil_adds: Vec<(u32, Vec3, f32)> = Vec::new();
+    let mut detritus: Vec<(u32, PlantGenome, f32, Vec3)> = Vec::new();
+    let mut fruit_drops: Vec<(u32, PlantGenome, Vec3)> = Vec::new();
+    let mut births: Vec<(u32, PlantGenome, Vec3)> = Vec::new();
+    let mut tree_births: Vec<(u32, Vec3, bool, PlantGenome)> = Vec::new();
+    let mut new_bank: Vec<(u32, PlantGenome, Vec3, u32)> = Vec::new();
+    for b in batch.iter_mut() {
+        despawns.append(&mut b.despawns);
+        soil_adds.append(&mut b.soil_adds);
+        detritus.append(&mut b.detritus);
+        fruit_drops.append(&mut b.fruit_drops);
+        births.append(&mut b.births);
+        tree_births.append(&mut b.tree_births);
+        new_bank.append(&mut b.bank);
+    }
+    despawns.sort_by_key(|d| d.0);
+    soil_adds.sort_by_key(|d| d.0);
+    detritus.sort_by_key(|d| d.0);
+    fruit_drops.sort_by_key(|d| d.0);
+    births.sort_by_key(|d| d.0);
+    tree_births.sort_by_key(|d| d.0);
+    new_bank.sort_by_key(|d| d.0);
+    // despawns (+ scenario death tally + live plant-count tracking)
+    for (_, e, is_plant, cause) in &despawns {
+        if let Some(s) = stats.as_deref_mut() {
+            if let Some(c) = cause {
+                s.death(c);
             }
         }
-        // mortality from moisture mismatch OR poor site (deep water / desert). Effective moisture = slow CLIMATE
-        // moisture (long-term, drifts -> deserts/rainforests form) + season + rain-fed ground water -> wet-liking
-        // plants thrive after a downpour, stress in drought, AND whole regions desertify/reforest over years as
-        // climate drifts (temporal + geological selection).
-        let clim = crate::sphere::moisture(pdir) * (1.0 - CLIMATE_VEG) + climate.get(ppos) * CLIMATE_VEG;
-        let m = (clim + 0.2 * season + WET_GAIN * water).clamp(0.0, 1.0);
-        // succulence buffers DROUGHT: water-storers (cactus/aloe) tolerate sites drier than their `wet` -> survive
-        // desert where a thirsty plant dries out. Wet-side stress (too soggy) NOT buffered -> cactus still rots
-        // in a swamp.
-        let dry_deficit = (g.wet - m).max(0.0);
-        let stress = ((m - g.wet).abs() - SUCC_BUFFER * g.succulence * dry_deficit).max(0.0);
-        // habitability uses the SAME slow climate moisture -> drying region loses its plant base (desertifies),
-        // wetting region gains one (reforests). Ocean/thermal branches unaffected.
-        let hab = crate::sphere::plant_habitability_with_moisture(pdir, clim); // 0 in deep ocean/desert/cold, 1 on good land
-        // drowning: underwater a plant needs aquatic `wet` gene. submersion (depth below sea) x (1-wet) -> land
-        // flora (low wet) drowns, aquatic flora (high wet) thrives. Splits land vs aquatic.
-        let e01 = crate::sphere::elevation01(pdir);
-        let submersion = ((crate::sphere::SEA_LEVEL - e01) / crate::sphere::SEA_LEVEL).clamp(0.0, 1.0);
-        let drown = DROWN_KILL * submersion * (1.0 - g.wet.max(g.submerged)); // F22/F27: submerged = 2nd aquatic axis -> deep-water plants don't drown, softens the wet=1.0 wall
-        // desiccation (mirror of drown): aquatic plant (high wet) stranded on DRY land (not submerged AND low
-        // moisture) dries out + dies -> aquatic flora can't carpet land. Marsh/wet ground (high m) + shallow water
-        // spare it, so reeds at water's edge survive.
-        let aquatic = ((g.wet - 0.85) / 0.15).clamp(0.0, 1.0);
-        let desiccate = DESICCATE_KILL * aquatic * (1.0 - submersion) * (1.0 - (m / 0.6).min(1.0));
-        // climate niche: plant grows best where local temp matches temp_pref (alpine cushion cold, cactus heat);
-        // off-niche grows slow and, far off its band, dies back.
-        let temp = crate::sphere::base_temperature(pdir);
-        let tmiss = (temp - g.temp_pref).abs();
-        let temp_grow = TEMP_FLOOR + (1.0 - TEMP_FLOOR) * (1.0 - tmiss);
-        let m_moist = MOISTURE_KILL * (stress - MOISTURE_TOLERANCE).max(0.0);
-        // aquatic plants judged by LAND habitability (hab ~0 underwater) would be wrongly culled in their ocean
-        // home. Spare submerged flora (high wet/submerged): scale land-habitat penalty down by at-home-in-water
-        // -> Kelp/Waterlily/Eelgrass persist + reproduce in sea (seaweed layer = main carpet; these add variety).
-        let aq_home = ((g.wet.max(g.submerged) - 0.85) / 0.15).clamp(0.0, 1.0) * submersion;
-        let m_hab = HABITAT_KILL * (0.3 - hab).max(0.0) * (1.0 - aq_home);
-        let m_temp = TEMP_KILL * (tmiss - TEMP_TOL).max(0.0);
-        let p_mort = m_moist + m_hab + drown + desiccate + m_temp;
-        if rng.f32() < p_mort {
-            // scenario tuning: attribute death to dominant cause (agent sees WHY a cohort dies).
-            if let Some(s) = stats.as_deref_mut() {
-                let causes = [("moisture", m_moist), ("habitat", m_hab), ("drown", drown), ("desiccate", desiccate), ("temp", m_temp)];
-                let cause = causes.iter().max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)).map(|c| c.0).unwrap_or("moisture");
-                s.death(cause);
-            }
-            // allelopathic litter: chemical-warfare plant leaves extra-toxic detritus (juglone-style leaf litter)
-            // suppressing competitors germinating on the same ground. Litter toxicity >= allelopathy.
-            let mut litter = g.clone();
-            litter.toxicity = litter.toxicity.max(g.allelopathy);
-            commands.entity(e).despawn();
-            detritus.push((litter, st.mass, tf.translation));
-            soil.add(ppos, DEATH_FERT * 0.3); // dead plant enriches ground where it falls
+        commands.entity(*e).despawn();
+        if *is_plant {
             plant_count = plant_count.saturating_sub(1);
-            continue;
-        }
-        // underwater the water column dims sunlight with depth -> deep plants get little light, so only shade
-        // species (low light_pref, e.g. kelp) thrive deep; sun-lovers (lily) need shallows. Vine adds a light
-        // bonus (climbs toward canopy) without paying the height growth cost.
-        let light_uw = light * (1.0 - WATER_LIGHT_ATTEN * submersion);
-        let lf = (0.35 + 0.65 * (1.0 - (light_uw - g.light_pref).abs()) + CLIMB_LIGHT * g.climb).min(1.0);
-        // nitrogen-fixer (legume): root nodules enrich local soil fertility each tick (clover/beans).
-        if g.nitrogen_fix > 0.0 {
-            soil.add(ppos, NFIX_RATE * g.nitrogen_fix * DT);
-        }
-        // fertile soil speeds growth (M5); scales with habitability (P3), light match, climate niche
-        st.mass += g.growth_rate() * boost * hab * lf * temp_grow * DT;
-        st.age += 1;
-        let mature = st.mass >= g.maturity;
-        // fruiting non-tree (berry bush, nightshade) drops fallen fruit -> fast-energy + ferment chain, like a
-        // fruit tree. Rate scales with fruiting gene (growth already paid for it).
-        if mature && g.fruiting > 0.2 && rng.f32() < P_FRUIT_DROP * g.fruiting {
-            fruit_drops.push((g.clone(), disperse_pos(&mut rng, ppos, 2.0, FOOD_Y)));
-        }
-        // endozoochory: a fruiting plant that SURVIVED grazing this tick can have a seed carried off in the eater
-        // + dropped FAR (animal dispersal, like fruit trees). Toxic fruit eaten less -> chance scales DOWN with
-        // toxicity, so a toxic plant disperses little + offspring stay clustered around parent. Aquatic-only seeds
-        // still gated to water.
-        if mature
-            && g.fruiting > 0.2
-            && tree_bites.0.contains_key(&e)
-            && plant_count + births.len() < pcap
-            && rng.f32() < P_PLANT_EAT_DISPERSE * g.fruiting * (1.0 - g.fruit_toxicity)
-        {
-            let child = mate_or_self(&mate_pool, e, ppos, g, false, &mut rng);
-            let pos = disperse_pos(&mut rng, ppos, eff_spread(g) * PLANT_EAT_SPREAD_MULT, FOOD_Y);
-            if !(g.wet > 0.85 && !crate::sphere::is_ocean(pos.normalize_or_zero())) {
-                births.push((child, pos));
-            }
-        }
-        // clonal spread (rhizome / runner / sucker): separate SHORT-range pathway sprouting a true clone (no
-        // mutate, no gene shuffle) beside the parent -> dense local patch WITHOUT seeding (strawberry, aspen).
-        // Lets a plant dominate ground clonally; pays in growth (growth_rate cost) + parent mass.
-        if mature
-            && g.clonal > 0.0
-            && plant_count + births.len() < pcap
-            && rng.f32() < P_CLONAL * g.clonal
-        {
-            let pos = disperse_pos(&mut rng, ppos, CLONAL_RADIUS, FOOD_Y);
-            if !(g.wet > 0.85 && !crate::sphere::is_ocean(pos.normalize_or_zero())) {
-                births.push((g.clone(), pos)); // identical ramet: fidelity over variation
-                st.mass *= PLANT_REPRO_FRAC; // budding a ramet costs parent
-            }
-        }
-        // cling (epizoochory): a passing animal snags a burr/sticky seed + carries it FAR even though this plant
-        // is never eaten -> defended/toxic/inedible plants still animal-disperse (burdock, cleavers). Flat per-tick
-        // chance (abstracts animal traffic; no proximity scan). Independent of fruiting/toxicity.
-        if mature
-            && g.cling > 0.0
-            && plant_count + births.len() < pcap
-            && rng.f32() < P_CLING * g.cling
-        {
-            let child = mate_or_self(&mate_pool, e, ppos, g, false, &mut rng);
-            let pos = disperse_pos(&mut rng, ppos, eff_spread(g) * CLING_SPREAD_MULT, FOOD_Y);
-            if !(g.wet > 0.85 && !crate::sphere::is_ocean(pos.normalize_or_zero())) {
-                births.push((child, pos));
-            }
-        }
-        if mature
-            && plant_count + births.len() < pcap
-            && rng.f32() < P_REPRO * (1.0 - DEF_REPRO_COST * g.defense)
-        {
-            let child = mate_or_self(&mate_pool, e, ppos, g, false, &mut rng);
-            // hydrochory: seed from a plant AT/NEAR water floats + rides far. near_water = 1 at/below sea level,
-            // tapering to 0 a short band above -> only coastal/aquatic plants get the long water reach.
-            let near_water = ((crate::sphere::SEA_LEVEL + HYDRO_COAST_BAND - e01) / HYDRO_COAST_BAND).clamp(0.0, 1.0);
-            let hydro = 1.0 + HYDRO_RANGE * g.hydrochory * near_water;
-            // wind + seed weight set travel distance (dandelion flies, acorn drops near parent)
-            let pos = disperse_pos(&mut rng, ppos, eff_spread(g) * hydro, FOOD_Y);
-            // aquatic plants (high wet) only seed into water; a seed landing on dry ground is dropped (mirror of
-            // land-only trees). Parent still pays the budding cost either way.
-            if !(g.wet > 0.85 && !crate::sphere::is_ocean(pos.normalize_or_zero())) {
-                // dormancy: a fraction of seeds go DORMANT into the soil bank (germinate later) vs sprouting now
-                // -> lineage survives a surface wipe (fire/drought) + booms after. Rest sprout immediately. Bank
-                // capped; when full, dormant seeds are lost.
-                if rng.f32() < DORMANCY_FRAC * g.dormancy && bank.0.len() < SEED_BANK_CAP {
-                    let wait = DORMANT_TICKS_MIN + (rng.f32() * (DORMANT_TICKS_MAX - DORMANT_TICKS_MIN) as f32) as u32;
-                    bank.0.push((child, pos, wait));
-                } else {
-                    births.push((child, pos));
-                }
-            }
-            st.mass *= PLANT_REPRO_FRAC;
         }
     }
-    // seed bank germination: count every buried seed down; one reaching 0 sprouts this tick (subject to cap) +
-    // leaves the bank. A patch cleared by fire/drought re-greens from its bank later (dormancy).
+    // soil deposits in sorted order -> deterministic float accumulation
+    for (_, pos, amt) in &soil_adds {
+        soil.add(*pos, *amt);
+    }
+    // this tick's NEW dormant seeds enter the bank up to SEED_BANK_CAP; overflow sprouts now (serial's else arm)
+    for (idx, g, pos, wait) in new_bank {
+        if bank.0.len() < SEED_BANK_CAP {
+            bank.0.push((g, pos, wait));
+        } else {
+            births.push((idx, g, pos)); // re-sorted below
+        }
+    }
+    births.sort_by_key(|d| d.0);
+    // existing seed bank germination: tick down; one reaching 0 sprouts (cap permitting) + leaves the bank.
     let mut germinated: Vec<(PlantGenome, Vec3)> = Vec::new();
     bank.0.retain_mut(|(g, pos, ticks)| {
         *ticks = ticks.saturating_sub(1);
         if *ticks == 0 && plant_count + births.len() + germinated.len() < pcap {
             germinated.push((g.clone(), *pos));
-            false // sprouted -> remove from bank
+            false
         } else {
-            true // still dormant (or ready but cap full this tick: retry next tick)
+            true
         }
     });
-    births.extend(germinated);
-    // dead plants -> detritus that FERMENTS (completes rot chain, P3): poor food, ferments to a little toxic FAST
-    // energy, then gone. Ferment marker routes it to the plant-matter eat branch.
-    for (g, mass, pos) in detritus {
+    // dead plants -> fermenting detritus (poor food, ferments to a little toxic FAST energy, then gone).
+    for (_, g, mass, pos) in detritus {
         commands.spawn((
             Food,
             PlantState { mass: mass.min(CARRION_MASS), age: 0 },
@@ -1835,12 +1830,9 @@ pub fn plant_step(
             Transform::from_translation(pos),
         ));
     }
-    // fruit drops: a mature fruit tree drops fruit nearby. Fallen fruit = Food carrying tree genome (rich+sugary)
-    // + Rot clock + Ferment -> fresh = sugar, ferments to FAST energy, then gone.
-    for (g, pos) in fruit_drops {
-        // ferment/unripe toxicity = genetic fruit_toxicity (not a constant). Seed carries FULL parent genome so a
-        // ripe-eaten fruit plants a true offspring; Food genome stays height/defense-zeroed so fruit renders flat
-        // on ground + any creature can eat it.
+    // fruit drops: Food carrying full parent genome (Seed) + Rot + Ferment; Food genome height/defense-zeroed so
+    // fruit renders flat on ground + any creature can eat it.
+    for (_, g, pos) in fruit_drops {
         let ftox = g.fruit_toxicity;
         commands.spawn((
             Food,
@@ -1852,25 +1844,45 @@ pub fn plant_step(
             Transform::from_translation(pos),
         ));
     }
-    // reseed floor: keep a minimal seed bank so creatures can't drive food fully extinct (biome-matched).
-    // Disabled in scenario mode (reseed_floor=0) so a tuned cohort stays isolated.
-    while plant_count + births.len() < reseed_floor {
-        let pos = rand_pos(&mut rng, FOOD_Y);
-        births.push((plant_for_site(&mut rng, pos.normalize_or_zero()), pos));
-    }
-    // scenario tuning: count this tick's cohort offspring (reseed floor off in scenario, so births+tree_births
-    // are all real reproduction) -> drives R (births/deaths) reproductive-success metric.
+    // scenario tuning: count this tick's offspring (reseed off in scenario, so these are all real reproduction).
     if let Some(s) = stats.as_deref_mut() {
-        s.births += (births.len() + tree_births.len()) as u32;
+        s.births += (births.len() + germinated.len() + tree_births.len()) as u32;
     }
-    for (g, pos) in births {
-        // heavy (well-provisioned) seeds establish as BIGGER hardier seedlings (head start); light seeds start
-        // tiny -> seed-weight trade-off: far dispersal vs strong establishment.
-        let est = 0.6 + 0.8 * g.seed_weight; // 0.6x .. 1.4x establishment mass
-        spawn_plant(&mut commands, g, rng.range(0.5, 1.3) * PLANT_START_MASS * est, pos); // varied reseed mass (staggered maturity)
+    // spawn offspring, capping total plants at pcap via a running pop counter (serial enforced this per-birth in
+    // the loop; we enforce it once here, in deterministic sorted order so new entity indices reproduce).
+    let mut pop = plant_count;
+    for (_, g, pos) in births {
+        if pop >= pcap {
+            break;
+        }
+        let est = 0.6 + 0.8 * g.seed_weight; // heavy seed -> bigger hardier seedling (head start)
+        spawn_plant(&mut commands, g, rng.range(0.5, 1.3) * PLANT_START_MASS * est, pos);
+        pop += 1;
     }
-    for (pos, edible, g) in tree_births {
+    for (g, pos) in germinated {
+        if pop >= pcap {
+            break;
+        }
+        let est = 0.6 + 0.8 * g.seed_weight;
+        spawn_plant(&mut commands, g, rng.range(0.5, 1.3) * PLANT_START_MASS * est, pos);
+        pop += 1;
+    }
+    // reseed floor: keep a minimal biome-matched seed base so creatures can't drive food fully extinct.
+    // Disabled in scenario mode (reseed_floor=0).
+    while pop < reseed_floor {
+        let pos = rand_pos(&mut rng, FOOD_Y);
+        let g = plant_for_site(&mut rng, pos.normalize_or_zero());
+        let est = 0.6 + 0.8 * g.seed_weight;
+        spawn_plant(&mut commands, g, rng.range(0.5, 1.3) * PLANT_START_MASS * est, pos);
+        pop += 1;
+    }
+    let mut spawned_trees = 0usize;
+    for (_, pos, edible, g) in tree_births {
+        if tree_count + spawned_trees >= tcap {
+            break; // tcap (decide gated on start-of-tick count; precise cap re-enforced here, deterministic since sorted)
+        }
         spawn_tree(&mut commands, PLANT_START_MASS, pos, edible, g);
+        spawned_trees += 1;
     }
     tree_bites.0.clear(); // consumed this tick
 }
