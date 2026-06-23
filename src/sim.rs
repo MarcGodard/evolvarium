@@ -2231,6 +2231,14 @@ pub fn live_step(
         .filter(|(_, _, _, _, _, a, _, _, _, _)| a.0)
         .map(|(e, t, _, _, _, _, g, _, _, _)| (e, t.translation, signature(g), g.bite + SIZE_COMBAT * g.size, body_radius(g)))
         .collect();
+    // per-niche live counts: continuous repro tapers on the breeder's OWN niche fill (NICHE_CAP), not global
+    // pop -> each habitat self-limits independently so no niche grabs the shared cap (was winner-take-all).
+    let mut niche_pop = [0usize; crate::niche::NICHE_COUNT];
+    for (_, _, _, _, _, a, g, _, _, _) in cq.iter() {
+        if a.0 {
+            niche_pop[crate::niche::niche_of(g).idx()] += 1;
+        }
+    }
     // mating mode: pool of (entity, pos, signature, genome) so a breeding creature finds a nearby
     // genetically-similar MATE to cross. Built only when --mating (cloning genomes isn't free).
     let mate_pool: Vec<(Entity, Vec3, [f32; 10], Genome)> = if gen.mating {
@@ -2863,14 +2871,17 @@ pub fn live_step(
         let k = genome.parental;
         let repro_thr = REPRO_THRESHOLD * (0.8 + 0.4 * k);
         let repro_min_age = (REPRO_MIN_AGE as f32 * (0.6 + 0.8 * k)) as u32;
+        let ni = crate::niche::niche_of(genome).idx(); // breeder's niche -> its OWN carrying cap governs repro
+        let ncap = NICHE_CAP[ni].max(1) as f32;
         if live_continuous
             && alive.0
             && energy.total() > repro_thr
             && diet.age > repro_min_age // newborns must establish before breeding (paces birth waves)
-            && pop < CREATURE_CAP
-            // density-dependent: breeding rate tapers to 0 as pop approaches cap -> population asymptotes to
-            // carrying capacity vs slamming the cap + crashing (no boom-bust overshoot).
-            && rng.f32() < P_REPRO_CREATURE * (1.0 - pop as f32 / CREATURE_CAP as f32)
+            && pop < CREATURE_CAP // global hard ceiling (loose backstop)
+            && (niche_pop[ni] as f32) < ncap
+            // density-dependent on the breeder's OWN niche: rate tapers to 0 as that niche approaches ITS cap ->
+            // each habitat asymptotes independently (no winner-take-all, no boom-bust overshoot).
+            && rng.f32() < P_REPRO_CREATURE * (1.0 - niche_pop[ni] as f32 / ncap)
         {
             energy.burn(REPRO_COST * (0.7 + 0.6 * k)); // K-parents spend more per child
             // mating mode: cross with nearest genetically-similar mate (assortative -> reproductive
@@ -2896,6 +2907,7 @@ pub fn live_step(
             let birth_e = BIRTH_ENERGY * (0.7 + 0.6 * k); // K-young start better-provisioned (survive); r-young cheap + fragile
             spawn_creature(&mut commands, child, cp, &mut rng, birth_e);
             pop += 1;
+            niche_pop[ni] += 1; // child counts toward parent's niche (so within-tick births keep tapering)
         }
 
         // died this tick (loop skips already-dead at top) -> drop carrion here, rots into poison (rot_step).

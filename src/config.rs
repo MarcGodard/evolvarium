@@ -38,7 +38,13 @@ pub const REPRO_COST: f32 = 16.0; // energy parent spends per child (parent stay
 pub const BIRTH_ENERGY: f32 = 28.0; // offspring start energy: buffer so newborns establish before starving (raised: newborn die-off was R<1 driver pinning pop at floor)
 pub const P_REPRO_CREATURE: f32 = 0.025; // per-tick repro chance while eligible (x density taper)
 pub const REPRO_MIN_AGE: u32 = 180; // min ticks of life before breeding (newborns establish first; paces waves)
-pub const CREATURE_CAP: usize = 130; // pop ceiling (below grazing pressure that crashes plants)
+pub const CREATURE_CAP: usize = 130; // global pop ceiling (below grazing pressure that crashes plants). Loose backstop now; per-niche caps bind first.
+// Per-niche carrying capacity (repro tapers on the breeder's OWN niche fill, not global pop) -> each habitat
+// fills independently so no single niche soaks the shared cap (was winner-take-all: one niche -> ~83% planet,
+// which one is seed-stochastic). Order = Niche::idx [aquatic,aerial,highland,cold,warm,land]. Aquatic biggest
+// (ocean ~half planet) but ~30% not 83%. Sum (~152) > CREATURE_CAP on purpose: weak niches underfill so total
+// stays under the global ceiling; global cap only binds if many niches all max out.
+pub const NICHE_CAP: [usize; 6] = [45, 15, 16, 18, 22, 36];
 pub const WARMUP_GENS: u32 = 12; // generational warm-up before continuous birth/death kicks in
 pub const CONT_LOG_TICKS: u32 = 600; // continuous-mode stats log interval (fine enough to watch a crash unfold)
 
