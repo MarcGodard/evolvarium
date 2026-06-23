@@ -2038,6 +2038,20 @@ pub fn rot_step(
     }
 }
 
+// live_step parallel intents: each creature mutates its OWN components in the parallel decide; every SHARED-world
+// write (food despawn, tree-bite accumulation, soil deposit, plant/creature/carrion spawn, self-despawn) is
+// pushed here carrying the actor's stable entity index, then drained + sorted + applied serially. PARALLELIZATION.md.
+#[derive(Default)]
+struct LiveBatch {
+    food_despawns: Vec<(u32, Entity)>,        // idx, food eaten WHOLE (carrion/detritus/fruit) -> dedup despawn in apply
+    tree_bites: Vec<(u32, Entity, f32)>,      // idx, food grazed, mass damage -> summed into TreeBites (trees + living plants)
+    soil_adds: Vec<(u32, Vec3, f32)>,         // idx, pos, death-fert (deferred ResMut<Soil> write)
+    plant_births: Vec<(u32, PlantGenome, Vec3)>, // idx, endozoochory-dispersed offspring (already mutated+placed)
+    carrion: Vec<(u32, Vec3, f32, f32)>,      // idx, pos, mass, fattiness -> spawn_carrion
+    self_despawns: Vec<(u32, Entity)>,        // idx, dead creature entity (continuous mode -> becomes carrion, body gone)
+    births: Vec<(u32, Genome, Vec3, f32, usize)>, // idx, child, pos, birth_energy, parent niche (running-cap in apply)
+}
+
 // per-tick life: sense -> think -> move -> eat -> metabolism -> learn.
 pub fn live_step(
     gen: Res<GenState>,
@@ -2055,9 +2069,13 @@ pub fn live_step(
     let _g = crate::profile::scope("live");
     let dt = DT;
     let ntypes = gen.ntypes();
-    let mut pop = cq.iter().count(); // live population (continuous-mode reproduction cap)
+    let pop = cq.iter().count(); // live population (start-of-tick; reproduction/density reads this fixed count)
     // continuous birth/death active only AFTER generational warm-up (WARMUP_GENS)
     let live_continuous = gen.continuous && gen.generation >= WARMUP_GENS;
+    // per-entity RNG seed + global clock hoisted for the parallel closure header. gen (Res<GenState>, all-Sync
+    // scalar fields) is captured directly for mode flags (gen.diet/learn/mating) inside the body.
+    let seed = gen.seed;
+    let tick = gen.tick;
     // daylight is POSITIONAL: computed per-creature from location, see `light` in the loop.
     // snapshot: (entity, pos, genome, mass, rot_age, tree, ferment_toxic, seed). rot_age=Some+ferment=None ->
     // animal carrion (meat); rot_age=Some+ferment=Some -> fermenting plant matter (fruit/detritus);
@@ -2068,7 +2086,6 @@ pub fn live_step(
             (e, t.translation, pg.clone(), st.mass, rot.map(|r| r.age), tree.map(|t| t.edible), ferment.map(|f| f.toxic), seed.map(|s| s.0.clone()))
         })
         .collect();
-    let mut eaten: HashSet<Entity> = HashSet::new();
     // creature snapshot for social/kin need + threat sense: (entity, pos, signature, combat, body_radius).
     // combat = bite + size, so a creature senses a bigger-combat neighbor as predator (flee).
     let cre_snap: Vec<(Entity, Vec3, [f32; 10], f32, f32)> = cq
@@ -2100,11 +2117,23 @@ pub fn live_step(
         let (fu, fv) = fcell_uv(f.1);
         fgrid[fv * FGRID + fu].push(i as u32);
     }
-
-    for (entity, mut ct, mut energy, mut fit, mut head, mut alive, genome, mut brain, mut diet, mut loco) in &mut cq {
+    // start-of-tick population snapshots: parallel decide reads these fixed counts (social-density drain + repro
+    // taper); running caps re-enforced serially in apply. pop/niche_pop no longer mutate during the step.
+    let pop_start = pop;
+    let niche_pop_start = niche_pop;
+    let soil_r: &Soil = &soil; // read-only soil for decide (fertility lookups); &mut soil resumes in apply
+    let fire_r: &Fire = &fire;
+    // DECIDE (parallel): each creature senses/thinks/moves/eats/metabolizes/learns on its OWN components, drawing a
+    // per-entity deterministic RNG; every shared-world effect pushed as an intent. PARALLELIZATION.md.
+    let mut batch: bevy::utils::Parallel<LiveBatch> = bevy::utils::Parallel::default();
+    cq.par_iter_mut().for_each_init(
+        || batch.borrow_local_mut(),
+        |bat, (entity, mut ct, mut energy, mut fit, mut head, mut alive, genome, mut brain, mut diet, mut loco)| {
         if !alive.0 {
-            continue;
+            return;
         }
+        let idx = entity.index().index();
+        let mut prng = crate::rng::Rng::for_entity(seed, idx, tick);
         let pos = ct.translation;
         let fat_max = fat_cap(genome); // adiposity + size set this creature's fat-store ceiling
 
@@ -2137,9 +2166,8 @@ pub fn live_step(
                 for &fi in &fgrid[cv * FGRID + cu] {
                     let i = fi as usize;
                     let f = &foods[i];
-                    if eaten.contains(&f.0) {
-                        continue;
-                    }
+                    // parallel decide reads start-of-tick food snapshot (no within-tick eaten set); same-tick
+                    // double-claims on one food arbitrated in apply (despawn once). PARALLELIZATION.md.
                     let to = f.1 - pos;
                     let mut d2 = to.length_squared();
                     // fruit tree (f.5 = Some(true)): fruit is up in the CANOPY. A flier targets it by HORIZONTAL
@@ -2350,7 +2378,7 @@ pub fn live_step(
             let sub = ((crate::sphere::SEA_LEVEL - crate::sphere::elevation01(nd)) / crate::sphere::SEA_LEVEL).clamp(0.0, 1.0);
             if sub > DROWN_DEPTH {
                 alive.0 = false;
-                continue;
+                return;
             }
         }
 
@@ -2403,7 +2431,7 @@ pub fn live_step(
         // fatigue dynamics: exertion (thrust) accrues debt; idling (low thrust) sheds it. Clamped 0..1.
         diet.fatigue = (diet.fatigue + (FATIGUE_GAIN * thrust + SPRINT_FATIGUE * sprint - FATIGUE_REST * (1.0 - thrust)) * dt).clamp(0.0, 1.0);
         // wildfire: standing in fire burns energy fast (deadly to anything in a blaze)
-        let here_fire = fire.get(np);
+        let here_fire = fire_r.get(np);
         if here_fire > 0.05 {
             energy.burn(FIRE_DAMAGE * here_fire * dt);
         }
@@ -2413,7 +2441,7 @@ pub fn live_step(
         // death-spiral (constant loneliness drain on a spread-out pop feeds back to extinction; this self-limits).
         if genome.social > 0.0 {
             let kinf = kin_fraction(entity, np, &signature(genome), &cre_snap);
-            let density = (pop as f32 / CREATURE_CAP as f32).min(1.0);
+            let density = (pop_start as f32 / CREATURE_CAP as f32).min(1.0);
             energy.burn(SOCIAL_COST * genome.social * (1.0 - kinf) * density * dt);
         }
 
@@ -2451,14 +2479,14 @@ pub fn live_step(
                     // plant: creature must be tall enough to reach it (height defense) AND bite its defense
                     None => {
                         genome.height + 0.15 >= pg.height
-                            && rng.f32() < sigmoid(BITE_K * (genome.bite - pg.defense))
+                            && prng.f32() < sigmoid(BITE_K * (genome.bite - pg.defense))
                     }
                 };
                 if success {
                     // digestion efficiency = MASTER expression gene (reserves vs uptake demand). Gates energy
                     // from ALL food in diet mode; legacy --no-diet ungated (eff=1).
                     let eff = if gen.diet { master_expression(&genome.uptake, &diet.reserves, RESERVE_REQ, MASTER_FLOOR) } else { 1.0 };
-                    let fert = soil.get(np);
+                    let fert = soil_r.get(np);
                     let soil_f = 1.0 - SOIL_NUTRI + SOIL_NUTRI * (fert / FERT_CAP).min(1.0); // richer soil -> more nutrients delivered
                     if let Some(true) = tree {
                         // FRUIT TREE: persists + regrows; dies only if grazed below TREE_MIN_MASS. Mass dilutes
@@ -2477,7 +2505,7 @@ pub fn live_step(
                         }
                         let short = genome.height + TREE_REACH_MARGIN < pg.height; // only reached via branches
                         let damage = if short { 0.0 } else { bite_mass }; // branch-feeders don't harm the tree
-                        *tree_bites.0.entry(e).or_insert(0.0) += damage;
+                        bat.tree_bites.push((idx, e, damage));
                         eat_reward = R_EAT;
                     } else if let (Some(age), Some(toxic)) = (rot_age, ferment) {
                         // FERMENTING PLANT MATTER (fallen fruit / detritus): 3-stage clock over ROT_GONE.
@@ -2574,7 +2602,7 @@ pub fn live_step(
                         // bite, persists). Recorded as grazing; plant_step reduces mass / despawns.
                         let frac = (1.0 - 0.85 * pg.regrow).clamp(0.12, 1.0);
                         let bite_mass = mass * frac;
-                        *tree_bites.0.entry(e).or_insert(0.0) += bite_mass;
+                        bat.tree_bites.push((idx, e, bite_mass));
                         // quality scales extractable energy: factor 0.5..1.5, ~1.0 at quality 0.5 (balance-neutral)
                         let base = bite_mass * pg.nutrient * (0.5 + pg.quality);
                         let wasted = energy.add_sugar(EAT_GAIN * base * eff, SUGAR_CAP, fat_max); // plant -> sugar
@@ -2593,27 +2621,29 @@ pub fn live_step(
                     // (despawn). Plants + trees PERSIST: mass reduced by the grazing recorded above; plant_step
                     // despawns any grazed below its min mass.
                     if tree.is_none() {
-                        eaten.insert(e); // prevent same-tick re-eat
+                        // eaten WHOLE (fruit/carrion/detritus) -> despawn intent (apply dedups: one despawn even if
+                        // two creatures claimed the same food this tick). Living plants: graze recorded above, plant
+                        // persists. Endozoochory dispersal rolled with per-entity prng -> deterministic.
                         if let Some(seed_g) = seed {
                             // FALLEN FRUIT: eaten whole (despawn). RIPE (past RIPEN_FRAC) -> seed viable, passes
                             // through eater + planted nearby (endozoochory). UNRIPE -> seed undeveloped, nothing
                             // planted (eating early = no reproduction).
                             let f = rot_age.map(|a| a as f32 / ROT_GONE as f32).unwrap_or(0.0);
-                            if f >= RIPEN_FRAC && foods.len() < PLANT_CAP && rng.f32() < pg.quality * SEED_VIA_GUT {
+                            if f >= RIPEN_FRAC && foods.len() < PLANT_CAP && prng.f32() < pg.quality * SEED_VIA_GUT {
                                 let mut child = seed_g.clone();
-                                child.mutate(&mut rng);
-                                let sp = disperse_pos(&mut rng, np, seed_g.spread, FOOD_Y); // carried + dropped nearby
-                                spawn_plant(&mut commands, child, PLANT_START_MASS, sp);
+                                child.mutate(&mut prng);
+                                let sp = disperse_pos(&mut prng, np, seed_g.spread, FOOD_Y); // carried + dropped nearby
+                                bat.plant_births.push((idx, child, sp));
                             }
-                            commands.entity(e).despawn();
+                            bat.food_despawns.push((idx, e));
                         } else if rot_age.is_some() {
-                            commands.entity(e).despawn(); // carrion / detritus consumed whole
-                        } else if foods.len() < PLANT_CAP && rng.f32() < pg.quality * SEED_VIA_GUT {
+                            bat.food_despawns.push((idx, e)); // carrion / detritus consumed whole
+                        } else if foods.len() < PLANT_CAP && prng.f32() < pg.quality * SEED_VIA_GUT {
                             // endozoochory (spec 13): grazing a living plant may disperse a mutated offspring
                             let mut child = pg.clone();
-                            child.mutate(&mut rng);
-                            let sp = disperse_pos(&mut rng, np, pg.spread, FOOD_Y); // seed carried + dropped nearby
-                            spawn_plant(&mut commands, child, PLANT_START_MASS, sp);
+                            child.mutate(&mut prng);
+                            let sp = disperse_pos(&mut prng, np, pg.spread, FOOD_Y); // seed carried + dropped nearby
+                            bat.plant_births.push((idx, child, sp));
                         }
                     }
                 }
@@ -2695,7 +2725,7 @@ pub fn live_step(
             let age_frac = diet.age as f32 / (AGE_SCALE * lifespan_mult); // longevity gene stretches lifespan
             let aging = AGE_HAZARD * (age_frac / (age_frac + 1.0));
             let p_death = (aging + DISEASE_K * diet.g + TOX_LOAD_HAZARD * diet.toxic_load) * dt;
-            if rng.f32() < p_death {
+            if prng.f32() < p_death {
                 alive.0 = false; // old-age / disease / poisoning death
             }
         }
@@ -2743,13 +2773,14 @@ pub fn live_step(
             && alive.0
             && energy.total() > repro_thr
             && diet.age > repro_min_age // newborns must establish before breeding (paces birth waves)
-            && pop < CREATURE_CAP // global hard ceiling (loose backstop)
-            && (niche_pop[ni] as f32) < ncap
+            && pop_start < CREATURE_CAP // global hard ceiling (start-of-tick; hard cap re-enforced in apply)
+            && (niche_pop_start[ni] as f32) < ncap
             // density-dependent on the breeder's OWN niche: rate tapers to 0 as that niche approaches ITS cap ->
-            // each habitat asymptotes independently (no winner-take-all, no boom-bust overshoot).
-            && rng.f32() < P_REPRO_CREATURE * (1.0 - niche_pop[ni] as f32 / ncap)
+            // each habitat asymptotes independently. Taper reads start-of-tick fill (parallel decide); apply
+            // re-enforces the hard caps in sorted order so births reproduce run-to-run.
+            && prng.f32() < P_REPRO_CREATURE * (1.0 - niche_pop_start[ni] as f32 / ncap)
         {
-            energy.burn(REPRO_COST * (0.7 + 0.6 * k)); // K-parents spend more per child
+            energy.burn(REPRO_COST * (0.7 + 0.6 * k)); // K-parents spend more per child (parent's own energy, paid in decide)
             // mating mode: cross with nearest genetically-similar mate (assortative -> reproductive
             // isolation/speciation); else single-parent budding if no compatible mate nearby.
             let mut child = if gen.mating {
@@ -2762,33 +2793,102 @@ pub fn live_step(
                         ct.translation.distance_squared(a.1).partial_cmp(&ct.translation.distance_squared(b.1)).unwrap()
                     });
                 match mate {
-                    Some((_, _, _, mg)) => Genome::crossover(genome, mg, &mut rng),
+                    Some((_, _, _, mg)) => Genome::crossover(genome, mg, &mut prng),
                     None => genome.clone(),
                 }
             } else {
                 genome.clone()
             };
-            child.mutate(&mut rng, MUT_RATE, MUT_STD);
-            let cp = disperse_pos(&mut rng, ct.translation, 2.0, CREATURE_Y); // child appears beside the parent
+            child.mutate(&mut prng, MUT_RATE, MUT_STD);
+            let cp = disperse_pos(&mut prng, ct.translation, 2.0, CREATURE_Y); // child appears beside the parent
             let birth_e = BIRTH_ENERGY * (0.7 + 0.6 * k); // K-young start better-provisioned (survive); r-young cheap + fragile
-            spawn_creature(&mut commands, child, cp, &mut rng, birth_e);
-            pop += 1;
-            niche_pop[ni] += 1; // child counts toward parent's niche (so within-tick births keep tapering)
+            // birth intent -> spawned in apply (sorted by parent index, running cap, deterministic new entity index)
+            bat.births.push((idx, child, cp, birth_e, ni));
         }
 
         // died this tick (loop skips already-dead at top) -> drop carrion here, rots into poison (rot_step).
         // Closes part of the nutrient loop: death feeds the food web (P3).
         if !alive.0 {
             let fat = (energy.fat / fat_max.max(0.01)).clamp(0.0, 1.0); // fattiness at death
-            spawn_carrion(&mut commands, ct.translation, CARRION_MASS, fat);
-            soil.add(ct.translation, DEATH_FERT); // death enriches ground here
+            // carrion + death-fert + self-despawn deferred to apply (carrion spawn order -> deterministic new index;
+            // soil float-sum sorted; pop decremented serially). Drowning returned earlier -> leaves no carrion.
+            bat.carrion.push((idx, ct.translation, CARRION_MASS, fat));
+            bat.soil_adds.push((idx, ct.translation, DEATH_FERT)); // death enriches ground here
             // continuous (post-warmup): corpse entity gone (became carrion). Generational mode + warm-up keep it
             // (Alive=false) to recycle into next generation.
             if live_continuous {
-                commands.entity(entity).despawn();
-                pop = pop.saturating_sub(1);
+                bat.self_despawns.push((idx, entity));
             }
         }
+    },
+    );
+    // APPLY (serial, deterministic): drain every thread-local batch, sort each intent list by the actor's stable
+    // entity index, then do the shared-world writes in that fixed order so caps, soil float-sums, and SPAWN order
+    // (-> new entity-index assignment) all reproduce run-to-run regardless of thread scheduling. PARALLELIZATION.md.
+    let mut food_despawns: Vec<(u32, Entity)> = Vec::new();
+    let mut bites: Vec<(u32, Entity, f32)> = Vec::new();
+    let mut soil_adds: Vec<(u32, Vec3, f32)> = Vec::new();
+    let mut plant_births: Vec<(u32, PlantGenome, Vec3)> = Vec::new();
+    let mut carrion: Vec<(u32, Vec3, f32, f32)> = Vec::new();
+    let mut self_despawns: Vec<(u32, Entity)> = Vec::new();
+    let mut births: Vec<(u32, Genome, Vec3, f32, usize)> = Vec::new();
+    for b in batch.iter_mut() {
+        food_despawns.append(&mut b.food_despawns);
+        bites.append(&mut b.tree_bites);
+        soil_adds.append(&mut b.soil_adds);
+        plant_births.append(&mut b.plant_births);
+        carrion.append(&mut b.carrion);
+        self_despawns.append(&mut b.self_despawns);
+        births.append(&mut b.births);
+    }
+    food_despawns.sort_by_key(|d| d.0);
+    bites.sort_by_key(|d| d.0);
+    soil_adds.sort_by_key(|d| d.0);
+    plant_births.sort_by_key(|d| d.0);
+    carrion.sort_by_key(|d| d.0);
+    self_despawns.sort_by_key(|d| d.0);
+    births.sort_by_key(|d| d.0);
+    // tree-bite damage accumulates per food (trees + living plants; plant_step/tree mass read it next). Two
+    // creatures grazing one food this tick both record -> energy each extracted stays paired with mass removed.
+    for (_, e, dmg) in &bites {
+        *tree_bites.0.entry(*e).or_insert(0.0) += *dmg;
+    }
+    // foods eaten WHOLE: despawn ONCE even if multiple creatures claimed the same one (HashSet dedup; both already
+    // took the energy in decide -> the accepted snapshot-decide approximation, validated by pooled equivalence).
+    let mut whole_eaten: HashSet<Entity> = HashSet::new();
+    for (_, e) in &food_despawns {
+        if whole_eaten.insert(*e) {
+            commands.entity(*e).despawn();
+        }
+    }
+    // dead creatures (continuous): despawn (each unique, no dedup needed)
+    for (_, e) in &self_despawns {
+        commands.entity(*e).despawn();
+    }
+    // soil deposits in sorted order -> deterministic float accumulation
+    for (_, pos, amt) in &soil_adds {
+        soil.add(*pos, *amt);
+    }
+    // carrion from this tick's deaths (sorted -> deterministic new entity indices)
+    for (_, pos, mass, fat) in &carrion {
+        spawn_carrion(&mut commands, *pos, *mass, *fat);
+    }
+    // endozoochory-dispersed plants (coarse PLANT_CAP gate already applied in decide via start-of-tick foods.len())
+    for (_, g, pos) in plant_births {
+        spawn_plant(&mut commands, g, PLANT_START_MASS, pos);
+    }
+    // creature births: running pop + per-niche caps re-enforced in sorted order (serial gated each birth in the old
+    // loop; here once, deterministically). pop base nets this tick's deaths so the global cap reflects post-death
+    // headcount. spawn_creature draws the shared serial rng (sorted order) for the child's initial heading.
+    let mut run_pop = pop.saturating_sub(self_despawns.len());
+    let mut run_niche = niche_pop;
+    for (_, child, pos, birth_e, ni) in births {
+        if run_pop >= CREATURE_CAP || run_niche[ni] >= NICHE_CAP[ni] {
+            continue;
+        }
+        spawn_creature(&mut commands, child, pos, &mut rng, birth_e);
+        run_pop += 1;
+        run_niche[ni] += 1;
     }
     // Reseed floor now PER-NICHE (niche::niche_step, runs after this): each habitat (aquatic/aerial/highland/
     // cold/warm/land) has its own floor + hall-of-fame bank, so a collapsing niche revives from ITS OWN evolved
