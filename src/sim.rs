@@ -1393,6 +1393,13 @@ pub fn grass_step(
     if gen.garden {
         return; // --garden: no turf (would top up to GRASS_CAP + bury the specimens)
     }
+    // headless = no rendering, and the grass carpet is RENDER-ONLY: creatures graze a position FIELD
+    // (plant_habitability), not grass entities, and the food scan excludes grass. So skipping it headless costs
+    // the sim nothing real (only a minor grass-fire-ash soil input) and saves ~30% of the headless tick -> much
+    // faster evolution/tuning runs. Grass is regenerated on windowed load (never saved), so seeds are unaffected.
+    if gen.headless {
+        return;
+    }
     let season = (gen.tick as f32 / GEN_TICKS as f32 * SEASON_FREQ).sin();
     let count = q.iter().count();
     let tick = gen.tick;
@@ -1477,6 +1484,11 @@ pub fn seaweed_step(
     let _g = crate::profile::scope("seaweed");
     if gen.garden {
         return; // --garden: no ambient carpet
+    }
+    // render-only kelp carpet (like grass): skip headless. No sim coupling at all (despawn + render only), so
+    // this is a pure speedup for evolution/tuning runs. Regenerated on windowed load.
+    if gen.headless {
+        return;
     }
     let count = q.iter().count();
     let tick = gen.tick;
