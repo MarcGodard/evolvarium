@@ -238,29 +238,49 @@ pub fn weather_step(
     // Rain is LOCAL + cloud-driven: each cell wets only when a rain cloud drifts over it (sun dries otherwise).
     // No global storms. weather.rain = peak rain anywhere (lightning gating + logs); local rain per cell drives
     // ground water + viz.
-    let mut peak = 0.0f32;
-    for c in 0..gw.cell.len() {
-        let cpos = cell_center(c);
-        let d = cpos.normalize_or_zero();
-        let rain = crate::sphere::rain_at(d, tick);
-        let light = crate::sphere::daylight_at(d, tick);
-        let absorb = 1.0 - crate::sphere::rockiness(cpos); // rocky sheds runoff, grassy soaks it up
-        let w = gw.cell[c];
-        let add = rain * absorb * RAIN_RATE * dt;
-        let evap = EVAP * (0.2 + 0.8 * light) * w * dt; // sun dries ground; fastest at noon
-        gw.cell[c] = (w + add - evap).clamp(0.0, 1.0);
-        peak = peak.max(rain);
-    }
-    weather.rain = peak;
+    // Per-cell + independent (no neighbor coupling), only a max-rain reduction -> data-parallel over the grid.
+    // Cost is per-cell multi-octave sphere-noise sampling. Byte-identical to the serial loop: same per-cell math,
+    // float max is exact + order-independent. Chunk the grid across the compute pool. PARALLELIZATION.md.
+    let pool = bevy::tasks::ComputeTaskPool::get();
+    let nthreads = pool.thread_num().max(1);
+    let chunk = gw.cell.len().div_ceil(nthreads).max(1);
+    let peaks: Vec<f32> = pool.scope(|s| {
+        for (ci, cells) in gw.cell.chunks_mut(chunk).enumerate() {
+            let base = ci * chunk;
+            s.spawn(async move {
+                let mut peak = 0.0f32;
+                for (j, w) in cells.iter_mut().enumerate() {
+                    let cpos = cell_center(base + j);
+                    let d = cpos.normalize_or_zero();
+                    let rain = crate::sphere::rain_at(d, tick);
+                    let light = crate::sphere::daylight_at(d, tick);
+                    let absorb = 1.0 - crate::sphere::rockiness(cpos); // rocky sheds runoff, grassy soaks it up
+                    let add = rain * absorb * RAIN_RATE * dt;
+                    let evap = EVAP * (0.2 + 0.8 * light) * *w * dt; // sun dries ground; fastest at noon
+                    *w = (*w + add - evap).clamp(0.0, 1.0);
+                    peak = peak.max(rain);
+                }
+                peak
+            });
+        }
+    });
+    weather.rain = peaks.into_iter().fold(0.0f32, f32::max);
     // slow climate memory: relax each cell toward its drifting long-run target on a months time constant.
     // CLIMATE_RATE * dt tiny per tick -> grid integrates rain-propensity over many days, so regions desertify /
-    // reforest gradually + wet belt migrates as target anomaly rotates.
-    for c in 0..climate.cell.len() {
-        let d = cell_center(c).normalize_or_zero();
-        let target = crate::sphere::climate_target(d, tick);
-        let cur = climate.cell[c];
-        climate.cell[c] = (cur + (target - cur) * CLIMATE_RATE * dt).clamp(0.0, 1.0);
-    }
+    // reforest gradually + wet belt migrates as target anomaly rotates. Same per-cell independence -> parallel.
+    let cchunk = climate.cell.len().div_ceil(nthreads).max(1);
+    pool.scope(|s| {
+        for (ci, cells) in climate.cell.chunks_mut(cchunk).enumerate() {
+            let base = ci * cchunk;
+            s.spawn(async move {
+                for (j, cur) in cells.iter_mut().enumerate() {
+                    let d = cell_center(base + j).normalize_or_zero();
+                    let target = crate::sphere::climate_target(d, tick);
+                    *cur = (*cur + (target - *cur) * CLIMATE_RATE * dt).clamp(0.0, 1.0);
+                }
+            });
+        }
+    });
 }
 
 // Fire grid (lightning wildfires): per-cell burn intensity 0..1. Shares soil/ground-water grid res + indexing.
