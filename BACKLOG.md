@@ -294,6 +294,32 @@ live in `config.rs`; the live conversion plan is `SPHERE-PLAN.md`.
       nets grew ~2x -> bird seed is 12MB); a soft brain-size cost/cap could trim both perf + seed size, but it's
       balance-sensitive (changes what evolves) -> needs the multi-seed equivalence fan-out before committing.
 
+### M7+ enrichment (reconciled from spec 08-roadmap.md M7+ + 09-open-questions.md, 2026-06-23)
+Spec-folder ideas that were NOT line-itemed here. Pulled in so BACKLOG is the single task list. "Done"
+items from M0-M6 stay in the specs (status notes inline there); only the still-OPEN enrichment lands here.
+- [ ] **More environment fields** (M7+): water CURRENTS (drift vector that pushes swimmers + disperses
+      seeds/plankton) + standing TOXINS (volcanic/anoxic patches that poison on contact). Each = a `sphere.rs`
+      pure field + a sim hook + (ideally) a minimap overlay; low-risk UNLESS wired as a new brain INPUT
+      (then gate, see below). NOTE already covered, do NOT re-add: temperature, moisture, magnetic field,
+      and LIGHT (positional daylight + water-depth attenuation `×(1-0.6·depth)` + canopy-shade brain input).
+- [ ] **Essential / trace nutrients** (M7+): make a few of the 10 nutrients ESSENTIAL (deficiency becomes
+      lethal, not just the current soft growth-load via `DEFICIT_G`). Deepens the diet model; balance-
+      sensitive -> tune via the harness. NOTE carrion-TIMING already done (Rot{age} + Ferment chain: fresh ->
+      sugar -> toxic fast -> gone), so a fresh kill is already richer than an old one; don't re-add that.
+- [ ] **Lineage / phylogeny view** (M7 data + open-q #7): tag + follow lineages, a species/phylogeny tree,
+      trait-distribution-over-time charts. Basic stats overlay is DONE; this is the "fancy charts" tail.
+      Pairs with the god-panel UI item below (shared charting surface). Render/UI-side, not balance-sensitive.
+- [ ] **Recurrent / memory brains** (M7+, ARCHITECTURE -> confirm first): add recurrent connections or a
+      memory unit so creatures carry state across ticks (path memory, hysteresis). Changes the NN eval +
+      invalidates saved brains -> gate + migrate + regenerate seeds. See "Not automated here".
+- [ ] **CPPN / HyperNEAT alternative encoding** (M7+, ARCHITECTURE -> confirm first): indirect genome->body/
+      brain encoding as an opt-in mode alongside the current direct encoding. Large; design with the human.
+- [ ] **GPU for brains/fields** (M7+ perf, opt-in): offload brain forward()/learn() or field sampling to the
+      GPU. Only worth it at much higher pop than today (live_step is already parallel + fast at 1100); revisit
+      with a profile that shows CPU brains dominating at ~10k+. See PARALLELIZATION.md perf notes.
+- [ ] **Articulated bodies** (open-q #1, M7+ opt-in): jointed bodies + a motor/joint solver as an opt-in mode
+      (v0 is non-articulated blobs by decision). Big; population-budget-sensitive -> design with the human.
+
 ### Bigger
 - [x] Multi-core sim tick (Phases 0-5 DONE 2026-06-23, full plan + report in `PARALLELIZATION.md`).
       Parallelized grass/plant/seaweed (snapshot->par decide->serial apply, per-entity deterministic RNG) +
