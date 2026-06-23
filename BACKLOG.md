@@ -263,9 +263,16 @@ live in `config.rs`; the live conversion plan is `SPHERE-PLAN.md`.
 - [ ] **Land wear / soil compaction**: creatures walking compacts the ground -> where animals tread most,
       plants grow less. A per-cell wear field (like Soil/GroundWater, SOIL_RES grid) that creatures ADD to as
       they move (accumulate along the path in live_step), decays slowly, and REDUCES plant/grass growth +
-      habitability where high. Emergent trails/paths + grazing-pressure feedback (overused ground degrades ->
-      herds must roam). Pairs with the minimap (a "wear" overlay). Balance-phase: tune wear gain/decay so it
-      shapes movement without desertifying popular niches.
+      habitability where high. HIGH wear also CULLS existing grass tufts (grass_step kills tufts on heavily
+      trodden cells), so busy paths go visibly BARE -> emergent dirt trails, not just slower regrowth. Plus
+      grazing-pressure feedback (overused ground degrades -> herds must roam). Pairs with the minimap (a "wear"
+      overlay). Balance-phase: tune wear gain/decay so it shapes movement without desertifying popular niches.
+- [ ] **Dead-tree logs + hideouts**: when a tree dies it drops a fallen TRUNK/LOG on the ground (a new
+      ground-prop entity, not standing), with a VERY long rot time (logs persist for ages vs normal carrion/
+      detritus). Small creatures (size below a threshold) can HIDE in/behind a log -> predation cover (a hidden
+      small creature is harder for predators to sense/reach; ties into the threat/flee + predation systems).
+      Big creatures can't use them. Slow-rotting logs return nutrients to soil over a long tail. Adds terrain
+      texture + a size-gated survival niche (small + sneaky beats big + strong near cover).
 - [ ] Scale-up toward thousands of creatures (original spec headline) via density-invariant rebalance —
       big, do cautiously in validated steps. (Carrying cap now ~1100 w/ parallel live_step; see PARALLELIZATION.md Phase 6.)
 
