@@ -30,6 +30,7 @@ pub struct GenState {
     pub diet: bool,      // epigenetic diet model (NFOOD types, expression, growth-load, disease)
     pub continuous: bool, // --continuous reproduction vs discrete generational GA (default)
     pub tick: u32,       // global tick clock. Drives season + continuous logging/stop.
+    pub seed: u64,       // run seed (mirrors Rng seed). Parallel decide phases derive per-entity RNG from (seed, entity.index, tick) -> order-independent determinism. PARALLELIZATION.md.
     pub max_gens: u32,   // --gens=N run length. Continuous uses N*GEN_TICKS.
     pub save: Option<String>, // --save=PATH: write survivors at headless run end
     pub load: Option<String>, // --load=PATH: resume saved population vs random
@@ -1346,6 +1347,15 @@ pub fn spawn_world_render(
 // grass: render-only ground cover (no Food; edibility modeled by position in live_step). Own lifecycle + cap
 // (off PLANT_CAP): killed by fire/drown/poor-soil so it stays on plant-capable land, grows/regrows, refills
 // toward GRASS_CAP each tick -> whole-planet turf.
+// grass_step death intent: produced in the parallel decide phase, drained + applied serially after
+// (despawn + optional soil-ash). index = entity.index() = stable sort key for deterministic apply order.
+struct GrassDeath {
+    index: u32,
+    entity: Entity,
+    ash: f32, // soil deposit on fire death; 0 = freeze/mortality (no detritus)
+    pos: Vec3,
+}
+
 pub fn grass_step(
     mut commands: Commands,
     mut rng: ResMut<Rng>,
@@ -1360,54 +1370,72 @@ pub fn grass_step(
         return; // --garden: no turf (would top up to GRASS_CAP + bury the specimens)
     }
     let season = (gen.tick as f32 / GEN_TICKS as f32 * SEASON_FREQ).sin();
-    let mut count = q.iter().count();
-    for (e, mut st, g, tf) in &mut q {
-        let ppos = tf.translation;
-        let pdir = ppos.normalize_or_zero();
-        // wildfire burns the tuft up: small biomass becomes ash on top of cell per-tick ash -> burned turf
-        // regrows richer. Low factor since grass is a lesser plant.
-        if fire.get(ppos) > FIRE_KILL {
-            soil.add(ppos, FIRE_BURN_ASH * st.mass * 0.5);
-            commands.entity(e).despawn();
-            count = count.saturating_sub(1);
-            continue;
+    let count = q.iter().count();
+    let tick = gen.tick;
+    let seed = gen.seed;
+    // read-only snapshots for parallel decide (soil/gw/fire not mutated until the serial apply below)
+    let soil_r: &Soil = &soil;
+    let gw_r: &GroundWater = &gw;
+    let fire_r: &Fire = &fire;
+    // DECIDE (parallel): each tuft updates its OWN mass/age in place; dying tufts push a death intent into a
+    // per-thread queue. Mortality roll draws a per-entity deterministic RNG -> order-independent. PARALLELIZATION.md.
+    let mut deaths: bevy::utils::Parallel<Vec<GrassDeath>> = bevy::utils::Parallel::default();
+    q.par_iter_mut().for_each_init(
+        || deaths.borrow_local_mut(),
+        |out, (e, mut st, g, tf)| {
+            let ppos = tf.translation;
+            let pdir = ppos.normalize_or_zero();
+            // wildfire burns the tuft up: small biomass -> ash (deposited in apply). burned turf regrows richer.
+            if fire_r.get(ppos) > FIRE_KILL {
+                out.push(GrassDeath { index: e.index().index(), entity: e, ash: FIRE_BURN_ASH * st.mass * 0.5, pos: ppos });
+                return;
+            }
+            // hard freeze: grass on the frozen ice cap dies outright (mirrors plant_step). grass_hab cold-fade
+            // already thins tufts toward the edge; this culls any that landed on the rendered white cap.
+            if crate::sphere::base_temperature(pdir) < FREEZE_TEMP {
+                out.push(GrassDeath { index: e.index().index(), entity: e, ash: 0.0, pos: ppos });
+                return;
+            }
+            // mortality off plant-capable soil: dry/wet mismatch, poor site (rock/desert/cold), or submerged.
+            let water = gw_r.get(ppos);
+            let m = (crate::sphere::moisture(pdir) + 0.2 * season + WET_GAIN * water).clamp(0.0, 1.0);
+            let stress = (m - g.wet).abs();
+            let mut hab = grass_hab(pdir, Some(gw_r)); // rain-lifted: desert turf lives while wet, dies as it dries
+            if crate::sphere::rockiness(pdir) > 0.12 {
+                hab = hab.max(ROCK_GRASS_HAB); // thin grass clings between rocks: don't cull as "poor site"
+            }
+            let e01 = crate::sphere::elevation01(pdir);
+            let submersion = ((crate::sphere::SEA_LEVEL - e01) / crate::sphere::SEA_LEVEL).clamp(0.0, 1.0);
+            let drown = DROWN_KILL * submersion * (1.0 - g.wet.max(g.submerged)); // F22/F27: submerged = 2nd aquatic axis -> deep-water plants don't drown
+            let p_mort = MOISTURE_KILL * (stress - MOISTURE_TOLERANCE).max(0.0) + HABITAT_KILL * (0.3 - hab).max(0.0) + drown;
+            if crate::rng::Rng::for_entity(seed, e.index().index(), tick).f32() < p_mort {
+                out.push(GrassDeath { index: e.index().index(), entity: e, ash: 0.0, pos: ppos });
+                return;
+            }
+            // grow/regrow: soil fertility + rain + light match, capped at maturity.
+            let light = crate::sphere::daylight_at(pdir, tick);
+            let fert = soil_r.get(ppos);
+            let boost = (1.0 + FERT_GROWTH * (fert / FERT_CAP).min(1.0)) * (1.0 + WET_GROWTH * water);
+            let lf = 0.35 + 0.65 * (1.0 - (light - g.light_pref).abs());
+            st.mass = (st.mass + g.growth_rate() * boost * hab * lf * DT).min(g.maturity);
+            st.age += 1;
+        },
+    );
+    // APPLY (serial, deterministic): sort deaths by stable entity index so soil-ash accumulation + despawn are
+    // scheduling-independent (same seed reproduces). Parallel drain order is unspecified, hence the sort.
+    let mut dead: Vec<GrassDeath> = Vec::new();
+    deaths.drain_into(&mut dead);
+    dead.sort_unstable_by_key(|d| d.index);
+    for d in &dead {
+        if d.ash > 0.0 {
+            soil.add(d.pos, d.ash);
         }
-        // hard freeze: grass on the frozen ice cap dies outright (mirrors plant_step). grass_hab cold-fade
-        // already thins tufts toward the edge; this culls any that landed on the rendered white cap.
-        if crate::sphere::base_temperature(pdir) < FREEZE_TEMP {
-            commands.entity(e).despawn();
-            count = count.saturating_sub(1);
-            continue;
-        }
-        // mortality off plant-capable soil: dry/wet mismatch, poor site (rock/desert/cold), or submerged.
-        // Confines grass to the plant-growth band. Dead grass just vanishes (no detritus).
-        let water = gw.get(ppos);
-        let m = (crate::sphere::moisture(pdir) + 0.2 * season + WET_GAIN * water).clamp(0.0, 1.0);
-        let stress = (m - g.wet).abs();
-        let mut hab = grass_hab(pdir, Some(&gw)); // rain-lifted: desert turf lives while wet, dies as it dries
-        if crate::sphere::rockiness(pdir) > 0.12 {
-            hab = hab.max(ROCK_GRASS_HAB); // thin grass clings between rocks: don't cull as "poor site"
-        }
-        let e01 = crate::sphere::elevation01(pdir);
-        let submersion = ((crate::sphere::SEA_LEVEL - e01) / crate::sphere::SEA_LEVEL).clamp(0.0, 1.0);
-        let drown = DROWN_KILL * submersion * (1.0 - g.wet.max(g.submerged)); // F22/F27: submerged = 2nd aquatic axis -> deep-water plants don't drown, softens the wet=1.0 wall
-        let p_mort = MOISTURE_KILL * (stress - MOISTURE_TOLERANCE).max(0.0) + HABITAT_KILL * (0.3 - hab).max(0.0) + drown;
-        if rng.f32() < p_mort {
-            commands.entity(e).despawn();
-            count = count.saturating_sub(1);
-            continue;
-        }
-        // grow/regrow: same drivers as plants (soil fertility + rain + light match), capped at maturity.
-        let light = crate::sphere::daylight_at(pdir, gen.tick);
-        let fert = soil.get(ppos);
-        let boost = (1.0 + FERT_GROWTH * (fert / FERT_CAP).min(1.0)) * (1.0 + WET_GROWTH * water);
-        let lf = 0.35 + 0.65 * (1.0 - (light - g.light_pref).abs());
-        st.mass = (st.mass + g.growth_rate() * boost * hab * lf * DT).min(g.maturity);
-        st.age += 1;
+        commands.entity(d.entity).despawn();
     }
     // refill toward target density: blanket plant-capable ground + replace grazed/burned tufts.
+    let alive = count.saturating_sub(dead.len());
     let mut spawned = 0;
-    while count + spawned < GRASS_CAP {
+    while alive + spawned < GRASS_CAP {
         spawn_grass(&mut commands, PlantGenome::grass(&mut rng), GRASS_START_MASS, grass_pos(&mut rng, Some(&gw)));
         spawned += 1;
     }
