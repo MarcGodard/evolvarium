@@ -81,6 +81,11 @@ live in `config.rs`; the live conversion plan is `SPHERE-PLAN.md`.
       root on the forward axis; freq from body `size` -> hummingbird flutter vs hawk beats), dedicated swept
       tapered wing mesh (`wing_mesh`, double-sided), bird tail fan, new cosmetic `beak` gene (forward cone =
       beak on birds / snout on others, backfilled by `ensure_cosmetic`). Wingspan scales with flight gene + size.
+- [x] **Vertical-medium invariant locked (2026-06-23)**: extracted the inline ceiling logic into pure
+      `sim::vertical_envelope(flight, swim, elev)` + `sim::can_drown(flight, swim, alt)`, unit-tested. Guarantees
+      fliers reach the sky over ANY terrain (never trapped on ground/water), swimmers are ground-pinned over dry
+      land (ceil 0 -> can't rise into air), walkers grounded everywhere, and the drown kill spares fliers
+      (float like a duck) + swimmers. Refactor only, behavior identical.
 - [ ] **Balance-phase follow-ups** (visuals-first now): dive-hunting tuning, flier predator niche, flock/school
       cohesion at altitude, HUD flier count.
 
@@ -258,9 +263,10 @@ live in `config.rs`; the live conversion plan is `SPHERE-PLAN.md`.
       camera on RenderLayers 1, corner viewport, synced to OrbitCam), colored by a chosen FIELD. 'M' cycles
       biome / heat / moisture / elevation. (UI fixed to the main camera via IsDefaultUiCamera so the HUD doesn't
       duplicate into the minimap viewport.) terrain::build_globe_colored + viz::minimap_*.
-  - [ ] Follow-ups: the 4 shipped fields are STATIC (sampled once per switch). Add DYNAMIC overlays that
-        rebuild each frame from live resources -> soil fertility (Soil), groundwater/rain (GroundWater), fire
-        (Fire), creature density. Also: walk-mode could aim the minimap at the walker instead of OrbitCam.
+  - [x] DYNAMIC overlays (2026-06-23): 'M' now cycles 8 fields = 4 static (biome/heat/moisture/elevation)
+        + 4 LIVE (soil fertility / groundwater / fire / creature-density), rebuilt each frame from sim
+        resources via grid_cell sampling + build_globe_colored. viz::minimap_dynamic.
+  - [ ] Follow-up: walk-mode could aim the minimap at the walker instead of OrbitCam.
 - [ ] **Land wear / soil compaction**: creatures walking compacts the ground -> where animals tread most,
       plants grow less. A per-cell wear field (like Soil/GroundWater, SOIL_RES grid) that creatures ADD to as
       they move (accumulate along the path in live_step), decays slowly, and REDUCES plant/grass growth +

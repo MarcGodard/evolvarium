@@ -2090,6 +2090,32 @@ struct LiveBatch {
     births: Vec<(u32, Genome, Vec3, f32, usize)>, // idx, child, pos, birth_energy, parent niche (running-cap in apply)
 }
 
+// Vertical envelope per medium: (climb_rate, ceiling) for a creature at terrain elevation `elev` (signed
+// bathymetry, waterline at 0). Sole authority on WHICH medium a creature lives in -> keeps fliers in the sky
+// and swimmers in the water column. Invariants (locked by tests):
+//   flier (flight>=FLIGHT_KNEE):  ceil>0 over ANY terrain (sky access regardless of land/sea below)
+//   swimmer (flight<KNEE, swim>=SWIM_DROWN_MIN): ceil>0 ONLY in deep enough water; over DRY land ceil==0
+//     -> a swimmer on land is pinned to the surface, can NEVER rise into the air
+//   walker (flight<KNEE, swim<DROWN_MIN): ceil==0 always (grounded)
+pub fn vertical_envelope(flight: f32, swim: f32, elev: f32) -> (f32, f32) {
+    if flight >= FLIGHT_KNEE {
+        (FLIGHT_CLIMB_RATE, MAX_FLIGHT_ALT * flight) // sky: higher flight gene -> higher ceiling
+    } else if swim >= SWIM_DROWN_MIN {
+        // -elev = water column above seafloor (>0 in sea). Rise toward waterline, stay submerged (CREATURE_Y
+        // base + 0.4 margin below surface). Dry land: -elev<0 -> ceil 0 (swimmer pinned to ground, not air).
+        (FLIGHT_CLIMB_RATE * 0.6, ((-elev - CREATURE_Y - 0.4) * swim).max(0.0))
+    } else {
+        (0.0, 0.0) // grounded walker: pinned to surface
+    }
+}
+
+// Drown gate: only a grounded NON-flier in deep water drowns. A flier (flight>=KNEE) FLOATS on the surface
+// (duck) + takes off again; a creature aloft (alt>=GROUND_EPS) isn't submerged. Keeps fliers from dying in
+// water without trapping them there (buoyancy lifts them off). Pairs with vertical_envelope.
+pub fn can_drown(flight: f32, swim: f32, alt: f32) -> bool {
+    swim < SWIM_DROWN_MIN && flight < FLIGHT_KNEE && alt < GROUND_EPS
+}
+
 // per-tick life: sense -> think -> move -> eat -> metabolism -> learn.
 pub fn live_step(
     gen: Res<GenState>,
@@ -2345,15 +2371,7 @@ pub fn live_step(
         // water column toward the waterline. Ceiling set by medium; gravity sinks fliers, swimmers ~neutral
         // buoyancy (hover, gentler vertical). Land creatures: ceiling 0 -> pinned to surface (no behavior change).
         let rise = (out[6] - 0.5) * 2.0; // -1 sink/dive .. +1 climb
-        let (climb_rate, ceil) = if genome.flight >= FLIGHT_KNEE {
-            (FLIGHT_CLIMB_RATE, MAX_FLIGHT_ALT * genome.flight) // sky: higher flight gene -> higher ceiling
-        } else if genome.swim >= SWIM_DROWN_MIN {
-            // ocean only (-h1 = water column above seafloor, >0 in sea). Rise toward waterline, stay submerged
-            // (CREATURE_Y base + 0.4 margin below surface). Dry land: -h1<0 -> ceil 0.
-            (FLIGHT_CLIMB_RATE * 0.6, ((-h1 - CREATURE_Y - 0.4) * genome.swim).max(0.0))
-        } else {
-            (0.0, 0.0) // grounded walker: pinned to surface (no behavior change)
-        };
+        let (climb_rate, ceil) = vertical_envelope(genome.flight, genome.swim, h1);
         // brain climbs/descends, then neutral buoyancy relaxes toward cruise -> a neutral brain hovers aloft /
         // mid-water (visible birds + fish); landing to eat = a sustained descend that overcomes buoyancy.
         let cruise = FLIGHT_CRUISE * ceil;
@@ -2415,7 +2433,7 @@ pub fn live_step(
         // sinks to abyss, unforageable). FLIERS exempt: a winged creature (flight >= FLIGHT_KNEE) FLOATS on the
         // surface like a duck + can take off again (also lets a raptor dive to snatch a surface fish without
         // drowning). It still can't FORAGE submerged (needs swim), so water is no home -> doesn't reside there.
-        if genome.swim < SWIM_DROWN_MIN && genome.flight < FLIGHT_KNEE && loco.alt < GROUND_EPS {
+        if can_drown(genome.flight, genome.swim, loco.alt) {
             // grounded NON-flier only: a flier crossing/floating over open ocean doesn't drown
             let sub = ((crate::sphere::SEA_LEVEL - crate::sphere::elevation01(nd)) / crate::sphere::SEA_LEVEL).clamp(0.0, 1.0);
             if sub > DROWN_DEPTH {
@@ -3276,4 +3294,56 @@ fn wrap_angle(a: f32) -> f32 {
         a += std::f32::consts::TAU;
     }
     a
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // representative elevations (signed bathymetry, waterline at 0): peak, hill, dry coast, shallow sea, abyss.
+    const LAND_ELEVS: [f32; 3] = [8.0, 2.0, 0.0];
+    const WATER_ELEVS: [f32; 2] = [-3.0, -12.0];
+
+    // Flier reaches the sky over ANY terrain (land OR sea below) -> never trapped on the ground/water.
+    #[test]
+    fn flier_has_sky_ceiling_everywhere() {
+        for &e in LAND_ELEVS.iter().chain(WATER_ELEVS.iter()) {
+            let (rate, ceil) = vertical_envelope(0.85, 0.05, e);
+            assert!(ceil > 0.5, "flier ceil should be aloft over elev {e}, got {ceil}");
+            assert!(rate > 0.0, "flier needs a climb rate over elev {e}");
+        }
+    }
+
+    // INVARIANT "swimmers don't settle in air": a swimmer (no flight) over dry land has ZERO ceiling -> pinned
+    // to the surface, alt clamps to 0, can never rise into the air. Only deep enough water opens a column.
+    #[test]
+    fn swimmer_pinned_on_land_floats_in_water() {
+        for &e in &LAND_ELEVS {
+            let (_, ceil) = vertical_envelope(0.05, 0.9, e);
+            assert_eq!(ceil, 0.0, "swimmer must be ground-pinned over dry land elev {e}, got ceil {ceil}");
+        }
+        // deep water: column opens (waterline above the submerged margin)
+        let (_, deep) = vertical_envelope(0.05, 0.9, -12.0);
+        assert!(deep > 0.0, "swimmer should have a water column in deep sea, got {deep}");
+    }
+
+    // Pure walker: grounded in every medium (flight + swim both below threshold).
+    #[test]
+    fn walker_grounded_everywhere() {
+        for &e in LAND_ELEVS.iter().chain(WATER_ELEVS.iter()) {
+            let (rate, ceil) = vertical_envelope(0.1, 0.1, e);
+            assert_eq!((rate, ceil), (0.0, 0.0), "walker must be pinned over elev {e}");
+        }
+    }
+
+    // INVARIANT "fliers don't drown/settle in water": a flier (flight>=KNEE) is exempt from the drown kill at
+    // any altitude (floats like a duck, takes off again). Only a grounded non-flier in water drowns.
+    #[test]
+    fn drown_gate_spares_fliers_and_swimmers() {
+        assert!(can_drown(0.0, 0.0, 0.0), "grounded walker on water surface drowns");
+        assert!(!can_drown(0.85, 0.05, 0.0), "flier on the surface floats, never drowns");
+        assert!(!can_drown(0.85, 0.05, 3.0), "flier aloft never drowns");
+        assert!(!can_drown(0.05, 0.9, 0.0), "swimmer is at home in water, never drowns");
+        assert!(!can_drown(0.0, 0.0, GROUND_EPS + 0.1), "anything airborne isn't submerged");
+    }
 }

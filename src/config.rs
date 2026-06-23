@@ -383,7 +383,6 @@ pub const DEF_REPRO_COST: f32 = 0.7; // armored plant (def=1) reproduces at (1-0
 
 // --- nutrient closed loop (M5): death -> soil fertility -> richer food ---
 pub const SOIL_RES: usize = 32; // fertility grid cells per axis
-pub const SOIL_DECAY: f32 = 0.999; // (unused since water-baseline model) old pure-leach factor
 // Water-driven fertility baseline: cells relax toward SOIL_BASE + SOIL_WATER_FERT x static moisture, so dry
 // ground is POOR + wetlands/coasts RICH (vs the old pile-up-everywhere model that pegged fert above FERT_CAP
 // globally). Death/decomp/ash still SPIKE cells above baseline (transient fertility where life died), then
