@@ -231,6 +231,7 @@ pub fn weather_step(
     mut gw: ResMut<GroundWater>,
     mut climate: ResMut<Climate>,
 ) {
+    let _g = crate::profile::scope("weather");
     let dt = DT;
     let tick = gen.tick;
     // Rain is LOCAL + cloud-driven: each cell wets only when a rain cloud drifts over it (sun dries otherwise).
@@ -289,6 +290,7 @@ pub fn fire_step(
     mut fire: ResMut<Fire>,
     mut soil: ResMut<Soil>,
 ) {
+    let _g = crate::profile::scope("fire");
     let _ = gen;
     // Flammability: ocean = no fuel (is_ocean -> 0), polar ice cap = firebreak (sphere::fuel gates 0 across
     // ice-temp band). Ignition + spread stay on vegetated non-frozen land. FIRE_ENABLED=false disables wildfire
@@ -1353,6 +1355,7 @@ pub fn grass_step(
     fire: Res<Fire>,
     mut q: Query<(Entity, &mut PlantState, &PlantGenome, &Transform), (With<Grass>, Without<Rot>)>,
 ) {
+    let _g = crate::profile::scope("grass");
     if gen.garden {
         return; // --garden: no turf (would top up to GRASS_CAP + bury the specimens)
     }
@@ -1419,6 +1422,7 @@ pub fn seaweed_step(
     gen: Res<GenState>,
     mut q: Query<(Entity, &mut PlantState, &PlantGenome, &Transform), With<Seaweed>>,
 ) {
+    let _g = crate::profile::scope("seaweed");
     if gen.garden {
         return; // --garden: no ambient carpet
     }
@@ -1471,6 +1475,7 @@ pub fn plant_step(
     mut stats: Option<ResMut<crate::scenario::ScenarioStats>>,
     mut q: Query<(Entity, &mut PlantState, &PlantGenome, &Transform, Option<&Tree>), (Without<Rot>, Without<Grass>)>, // not carrion, not grass (grass_step owns grass)
 ) {
+    let _g = crate::profile::scope("plant");
     soil.decay(); // fertility leaches / taken up over time
     // scenario mode: no PLANT_MIN reseed (cohort IS the only plants); normal mode keeps the floor. Caps are
     // cohort-scale in scenario (stats.cap ~ 2x target) so a viable cohort grows toward its target + shows vigor
@@ -1851,6 +1856,7 @@ pub fn predation_step(
     mut soil: ResMut<Soil>,
     mut cq: Query<(Entity, &Transform, &mut Energy, &mut Fitness, &mut Alive, &Genome, &mut Brain), With<Creature>>,
 ) {
+    let _g = crate::profile::scope("predation");
     // snapshot living creatures: (entity, pos, ATTACK combat, energy, kin-sig, DEFENSE combat, venom, climb,
     // attack-intent, defend-intent). attack = bite + size; defense = attack + armor (armor protects, doesn't help
     // hunt); intents = brain out[2]/out[3] stashed this tick in live_step.
@@ -1950,6 +1956,7 @@ pub fn rot_step(
     mut soil: ResMut<Soil>,
     mut q: Query<(Entity, &mut Rot, &mut PlantState, &PlantGenome, &Transform)>,
 ) {
+    let _g = crate::profile::scope("rot");
     for (e, mut rot, mut st, g, tf) in &mut q {
         rot.age += 1;
         st.mass = (st.mass - CARRION_MASS / ROT_GONE as f32).max(0.0); // decompose: less to scavenge
@@ -1974,6 +1981,7 @@ pub fn live_step(
     fire: Res<Fire>,
     fq: Query<(Entity, &Transform, &PlantState, &PlantGenome, Option<&Rot>, Option<&Tree>, Option<&Ferment>, Option<&Seed>), (With<Food>, Without<Creature>)>,
 ) {
+    let _g = crate::profile::scope("live");
     let dt = DT;
     let ntypes = gen.ntypes();
     let mut pop = cq.iter().count(); // live population (continuous-mode reproduction cap)
@@ -2784,6 +2792,7 @@ pub fn generation_step(
     // limps back up. Saving the peak gives a full balanced living world.
     mut best: Local<Option<(f32, crate::persist::Snapshot)>>,
 ) {
+    let _g = crate::profile::scope("generation");
     gen.tick = gen.tick.wrapping_add(1); // global clock: drives season (plant_step) + continuous timing
 
     // continuous mode (after warm-up): no generation boundary. Snapshot the ecosystem periodically; stop headless

@@ -70,37 +70,43 @@ code already notes grid iteration is not bit-identical). We hold a WEAKER but su
 - Optional shared spatial grid resource (creature grid, like the existing food `fgrid`) to cut predation +
   social from O(N^2) to O(N*k). Reused read-only across decide phases.
 
-## Per-system plan (in priority order; Phase 0 confirms the order)
+## Per-system plan (RETARGETED from Phase 0 profile, 2026-06-23)
 
-A. `plant_step` (~8000 plants/tick; likely the single biggest cost). Plants are highly independent. DECIDE:
-   growth, stress, mortality fate per plant (parallel). APPLY: despawn dead, spawn seedlings/fruit-drops
-   (RNG + mate_pool + SeedBank), soil deposits (serial). Highest expected win.
+Profile overturned the original guess: the flora steps dominate (grass+plant+seaweed = 94.3% of tick);
+`live_step` is only 2.1% and predation is noise. Drives the order below. Grass blades (`GRASS_CAP=8000`) are
+the largest entity set on the planet, hence grass_step is #1.
 
-B. `live_step` (creatures). DECIDE: sensing via fgrid, brain forward + learn, movement, altitude, basal burn,
-   eat-target selection, repro-eligibility (parallel, own components only). APPLY: eat resolution with
-   `eaten` dedup + soil/tree_bites, death rolls + carrion + soil, reproduction crossover/mutate/spawn
-   (serial, deterministic order). Most intricate (eat/energy/death/repro ordering); needs careful intent
-   design + the equivalence gate.
+A. `grass_step` (62.8% of tick, ~10.3 ms; iterates `GRASS_CAP`=8000 turf tufts). Blades are independent.
+   DECIDE: per-tuft grow/stress/cull fate (parallel, own components). APPLY: spawn new tufts (RNG +
+   SeedBank) + despawn dead + soil deposits (serial, deterministic). HIGHEST win by far.
 
-C. `predation_step` (O(N^2) pairwise scan). DECIDE: each attacker scans creature grid for prey + picks target
-   (parallel). APPLY: resolve kills (despawn + carrion) serially. Add creature spatial grid here to drop N^2.
+B. `plant_step` (24.4%, ~4.0 ms; ~4300 plants + 270 trees). DECIDE: growth, stress, mortality, fruit/seed
+   readiness per plant (parallel). APPLY: despawn dead, spawn seedlings/fruit-drops (RNG + SeedBank),
+   tree_bites + soil deposits (serial). Second-biggest win.
 
-D. `grass_step` / `seaweed_step`. DECIDE: per-blade grow/cull fate (parallel). APPLY: spawn/despawn serial.
+C. `seaweed_step` (7.1%, ~1.2 ms; `SEAWEED_CAP`=3500 fronds). Same shape as grass. DECIDE per-frond grow/
+   cull (parallel). APPLY spawn/despawn (serial). Co-implement with grass (near-identical pattern).
 
-E. `rot_step`. DECIDE: age carrion (parallel). APPLY: despawn expired serial. Cheap.
+D. `weather_step` (3.3%, ~0.5 ms) + `fire_step` (0.2%) + climate grids. Grid-cell loops; parallelize cell
+   chunks only if A-C don't already hit the Amdahl ceiling (low priority).
 
-F. `weather_step` / `fire_step` / climate grids. Grid-cell loops; parallelize cell chunks only if profiling
-   says they matter (likely low priority).
+E. `live_step` (creatures, only 2.1%, ~0.34 ms). DECIDE: sensing via fgrid, brain forward + learn, movement,
+   altitude, basal burn, eat-target selection, repro-eligibility (parallel, own components). APPLY: eat
+   resolution with `eaten` dedup + soil/tree_bites, death rolls + carrion + soil, reproduction crossover/
+   mutate/spawn (serial, deterministic). Most intricate, but LOW payoff at current pop: only do if it stays
+   cheap and the equivalence gate is easy, OR if creature pop grows much larger later.
 
-G. System-level parallelism: after the above, unchain genuinely independent systems so Bevy's multithreaded
+F. `predation_step` (0.0%, ~2 us) + `rot_step` (~7 us). Negligible. Skip parallelization (the O(N^2) scan
+   is cheap at current pop). Revisit only if creature pop scales up an order of magnitude.
+
+G. System-level parallelism: after A-C, unchain genuinely independent systems so Bevy's multithreaded
    executor runs them concurrently where data deps allow (limited; most conflict on creature/plant/food).
 
 ## Phases (each independently shippable + has a GREEN GATE; commit at each gate)
 
-- Phase 0 - PROFILE. Add a `--profile` headless flag that logs ms/system over a run (and % of tick). Run at a
-  realistic pop. Output the true hot-spot ranking. RETARGET the per-system order above from real data (decide
-  vs plant_step split is currently a guess). Deliverable: profile numbers in this file + BACKLOG. No sim
-  behavior change.
+- Phase 0 - PROFILE. DONE 2026-06-23. `--profile` headless flag (src/profile.rs: global thread-safe scope
+  guard at top of each hot system, report system prints cumulative ranking every 600 ticks). Result below.
+  Retargeted per-system order (grass > plant > seaweed). No sim behavior change.
 - Phase 1 - INFRA. Deterministic per-entity RNG module + stable entity-index component + intent/`Parallel`
   scaffolding + the serial-drain helper. Wire but do not parallelize yet (behavior byte-identical). Gate:
   cargo test, --gens smoke unchanged.
@@ -168,13 +174,30 @@ section updated as the source of truth.
 
 ## Status
 
-- [ ] Phase 0 - profile + retarget
+- [x] Phase 0 - profile + retarget (2026-06-23)
 - [ ] Phase 1 - infra (per-entity RNG, stable index, intent scaffolding)
-- [ ] Phase 2 - top hot system (plant_step expected)
-- [ ] Phase 3 - live_step decide/apply
-- [ ] Phase 4 - predation + creature grid
-- [ ] Phase 5 - grass/seaweed/rot
-- [ ] Phase 6 - weather/fire/climate grids (if flagged)
-- [ ] Phase 7 - system unchaining + final report
+- [ ] Phase 2 - grass_step (62.8%, top hot system)
+- [ ] Phase 3 - plant_step (24.4%)
+- [ ] Phase 4 - seaweed_step (7.1%)
+- [ ] Phase 5 - weather/climate grids (3.3%, if not already Amdahl-capped)
+- [ ] (deferred) live_step / predation - only 2.1% / ~0%; do only if creature pop scales up
+- [ ] Phase 6 - system unchaining + final report
 
-Profile data (filled by Phase 0): _pending_
+Profile data (Phase 0, 2026-06-23): pop with 4349 plants + 270 trees + 8000 grass + 3500 seaweed, single
+thread, `--release`, `--headless --gens=2 --profile` @ tick 7200 cumulative:
+
+| system | % tick | mean us/tick |
+|--------|-------:|-------------:|
+| grass      | 62.8 | 10333 |
+| plant      | 24.4 |  4018 |
+| seaweed    |  7.1 |  1170 |
+| weather    |  3.3 |   536 |
+| live       |  2.1 |   344 |
+| fire       |  0.2 |    32 |
+| rot        |  0.0 |     7 |
+| predation  |  0.0 |     2 |
+| generation |  0.0 |   0.3 |
+| niche      |  0.0 |   0.0 |
+
+Measured tick mean ~16.5 ms = ~61 ticks/s single-thread. Flora (grass+plant+seaweed) = 94.3%. Amdahl
+ceiling if those three parallelize ~Ncore at 16 cores: ~1/(0.057 + 0.943/16) ≈ 8.5x (minus serial apply).

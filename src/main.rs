@@ -18,6 +18,7 @@ mod niche;
 mod persist;
 mod capture;
 mod plant;
+mod profile;
 mod rng;
 mod scenario;
 mod sim;
@@ -33,6 +34,11 @@ use std::time::Duration;
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let headless = args.iter().any(|a| a == "--headless");
+    // --profile: time each hot system over the run, print cumulative ranking periodically (Phase 0,
+    // PARALLELIZATION.md). Headless only (perf target). Near-free otherwise (scope() = atomic load when off).
+    if args.iter().any(|a| a == "--profile") {
+        profile::ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     let learn = !args.iter().any(|a| a == "--nolearn"); // lifetime learning default ON
     let poison = args.iter().any(|a| a == "--poison"); // legacy: 2 food types (ntypes=2)
     // Epigenetic diet (NFOOD types + instincts) default ON. --no-diet = simple single-food world.
@@ -233,7 +239,7 @@ fn main() {
             .add_systems(Startup, sim::spawn_world_headless)
             .add_systems(
                 Update,
-                (snapshot::snapshot_capture, sim::weather_step, sim::fire_step, sim::live_step, sim::predation_step, sim::grass_step, sim::seaweed_step, sim::plant_step, sim::rot_step, niche::niche_step, sim::generation_step).chain(),
+                (snapshot::snapshot_capture, sim::weather_step, sim::fire_step, sim::live_step, sim::predation_step, sim::grass_step, sim::seaweed_step, sim::plant_step, sim::rot_step, niche::niche_step, sim::generation_step, profile_report).chain(),
             );
     } else {
         // Real-time visuals: step in FixedUpdate at sim rate so sim-time = wall-time.
@@ -253,6 +259,17 @@ fn main() {
     }
 
     app.run();
+}
+
+// --profile: print cumulative per-system ranking every 600 ticks (~1/8 gen). Last tick before exit not
+// guaranteed (exit fires in generation_step), but 600-tick cadence + flat-out headless gives a stable ranking.
+fn profile_report(gen: Res<sim::GenState>) {
+    if !profile::ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    if gen.tick > 0 && gen.tick % 600 == 0 {
+        profile::report(gen.tick);
+    }
 }
 
 // Render-only scene dressing: planet globe, translucent ocean shell, sun light + moon.

@@ -167,6 +167,7 @@ pub fn niche_step(
     q: Query<(&Genome, &Fitness, &DietState), With<Creature>>,
     scen: Option<Res<crate::scenario::ScenarioStats>>,
 ) {
+    let _g = crate::profile::scope("niche");
     let live_continuous = gen.continuous && gen.generation >= WARMUP_GENS;
     if scen.is_some() || !live_continuous {
         return;

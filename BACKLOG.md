@@ -258,6 +258,10 @@ live in `config.rs`; the live conversion plan is `SPHERE-PLAN.md`.
       big, do cautiously in validated steps.
 
 ### Bigger
+- [ ] Multi-core sim tick — full plan in `PARALLELIZATION.md`. Phase 0 (profile) DONE 2026-06-23: flora
+      dominates (grass 62.8% / plant 24.4% / seaweed 7.1% = 94.3% of tick; live only 2.1%, predation noise).
+      `--profile` headless flag added (src/profile.rs). Next: Phase 1 infra (per-entity RNG + stable index +
+      intent scaffolding), then parallelize grass -> plant -> seaweed. ~8.5x ceiling at 16 cores.
 - [ ] Solar system: real Tychos orbital model drives the sky (sun/moon + wandering planets) — spec
       `clients/evolvarium/15-solar-system-tychos.md`. Literal Tychos geometry (TSN deferent/epicycle data),
       drives existing sky, real orbital proportions. New `orrery.rs`; `sun_dir`/`moon_pos` delegate.

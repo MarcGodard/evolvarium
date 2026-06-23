@@ -32,6 +32,7 @@ pub fn snapshot_capture(
     foods: Query<(&Transform, Option<&Tree>, Option<&Rot>), With<Food>>,
     mut exit: MessageWriter<AppExit>,
 ) {
+    let _g = crate::profile::scope("snapshot");
     if !cfg.enabled || *done || gen.tick < cfg.at_tick {
         return;
     }
