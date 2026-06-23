@@ -133,6 +133,7 @@ const MM_SIZE: f32 = 200.0; // viewport square, logical px
 const MM_MARGIN: f32 = 10.0;
 const MM_DIST: f32 = 215.0; // minimap cam distance from globe center (PLANET_R=80 -> whole globe framed)
 const MM_DENSITY_FULL: f32 = 5.0; // creatures-per-cell that reads as full "life" brightness
+const MM_SOIL_MAX: f32 = 2.5; // soil overlay normalizer (> FERT_CAP so death-spike fertility shows above baseline)
 
 #[derive(Resource)]
 struct Minimap {
@@ -296,7 +297,7 @@ fn minimap_dynamic(
     }
     let n = crate::config::SOIL_RES * crate::config::SOIL_RES;
     let vals: Vec<f32> = match field {
-        4 => soil.cell.iter().map(|&f| (f / crate::config::FERT_CAP).clamp(0.0, 1.0)).collect(), // fertility 0..FERT_CAP
+        4 => soil.cell.iter().map(|&f| (f / MM_SOIL_MAX).clamp(0.0, 1.0)).collect(), // fertility 0..MM_SOIL_MAX (past FERT_CAP so death spikes show)
         5 => gw.cell.iter().map(|&w| w.clamp(0.0, 1.0)).collect(),                                // groundwater already 0..1
         6 => fire.cell.iter().map(|&f| f.clamp(0.0, 1.0)).collect(),                              // fire already 0..1
         _ => {

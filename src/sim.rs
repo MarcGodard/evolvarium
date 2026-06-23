@@ -49,16 +49,28 @@ impl GenState {
     }
 }
 
-// Dynamic soil-fertility grid (M5 closed loop): corpses deposit here, plants read for growth boost,
-// decays each tick. Coarse grid so deposits stay spatially local.
+// Dynamic soil-fertility grid (M5 closed loop): corpses deposit here, plants read for growth boost.
+// Fertility RELAXES toward a per-cell WATER-driven baseline (poor on dry ground, rich near water) instead of
+// piling up everywhere; death/decomposition/ash SPIKE it transiently above baseline (richer where life died).
+// So: dry interior = poor soil, wetlands/coasts = fertile, death sites = transient fertility pulse.
 #[derive(Resource)]
 pub struct Soil {
     pub cell: Vec<f32>,
+    base: Vec<f32>, // per-cell water-driven baseline fertility (static moisture); cell relaxes toward it
 }
 
 impl Soil {
     pub fn new() -> Self {
-        Soil { cell: vec![0.0; SOIL_RES * SOIL_RES] }
+        // baseline = SOIL_BASE (poor) + SOIL_WATER_FERT x static moisture (near water -> rich). moisture spans
+        // ~0.3..0.93 -> driest land ~poor, wettest ~saturates the growth bonus (FERT_CAP).
+        let base: Vec<f32> = (0..SOIL_RES * SOIL_RES)
+            .map(|c| {
+                let d = cell_center(c).normalize_or_zero();
+                let m = crate::sphere::moisture(d).clamp(0.0, 1.0);
+                SOIL_BASE + SOIL_WATER_FERT * m * m // squared: dry interior genuinely poor, wetlands rich
+            })
+            .collect();
+        Soil { cell: base.clone(), base } // start AT baseline (no cold-start shock)
     }
     fn index(pos: Vec3) -> usize {
         let (u, v) = grid_uv(pos);
@@ -73,9 +85,10 @@ impl Soil {
     fn get(&self, pos: Vec3) -> f32 {
         self.cell[Self::index(pos)]
     }
+    // relax each cell toward its water baseline: above-baseline (recent death/ash) leaches DOWN, below rises UP.
     fn decay(&mut self) {
-        for c in &mut self.cell {
-            *c *= SOIL_DECAY;
+        for i in 0..self.cell.len() {
+            self.cell[i] += (self.base[i] - self.cell[i]) * SOIL_RELAX;
         }
     }
     pub fn avg(&self) -> f32 {

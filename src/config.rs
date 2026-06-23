@@ -383,7 +383,15 @@ pub const DEF_REPRO_COST: f32 = 0.7; // armored plant (def=1) reproduces at (1-0
 
 // --- nutrient closed loop (M5): death -> soil fertility -> richer food ---
 pub const SOIL_RES: usize = 32; // fertility grid cells per axis
-pub const SOIL_DECAY: f32 = 0.999; // fertility leaches/taken up each tick
+pub const SOIL_DECAY: f32 = 0.999; // (unused since water-baseline model) old pure-leach factor
+// Water-driven fertility baseline: cells relax toward SOIL_BASE + SOIL_WATER_FERT x static moisture, so dry
+// ground is POOR + wetlands/coasts RICH (vs the old pile-up-everywhere model that pegged fert above FERT_CAP
+// globally). Death/decomp/ash still SPIKE cells above baseline (transient fertility where life died), then
+// relax back over ~1/SOIL_RELAX ticks. Sized so wettest land (~0.93 moisture) ~= FERT_CAP (1.5) keeps near-
+// water growth at today's level; only dry interior loses the former free max bonus.
+pub const SOIL_BASE: f32 = 0.12; // poor dry-ground baseline fertility (barren interior)
+pub const SOIL_WATER_FERT: f32 = 1.5; // baseline added at full moisture^2 (wettest land ~= FERT_CAP, dry stays poor)
+pub const SOIL_RELAX: f32 = 0.02; // per-tick relaxation toward baseline (~35-tick half-life; death spikes transient + BOUNDED, else continuous decomp/NFIX input piles up like the old model)
 pub const DECOMP_FERT: f32 = 3.0; // fertility released on full decomposition (x corpse nutrient)
 pub const DEATH_FERT: f32 = 0.5; // fertility deposited IMMEDIATELY where creature/plant dies (body enriches ground there); plants grow better on death sites, on top of slower decomposition release. Kept gentle: strong death->fertility->plant-boom->creature-boom->crash loop is destabilizing positive feedback.
 pub const FERT_GROWTH: f32 = 0.6; // max growth-rate bonus from saturated soil
