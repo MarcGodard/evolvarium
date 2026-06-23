@@ -992,160 +992,6 @@ fn seaweed_pos(rng: &mut Rng) -> Vec3 {
     crate::sphere::surface_pos(d, FOOD_Y)
 }
 
-// --- caves: shelter + a place to hide ---
-
-// Cave mouths on the planet (positions only; the render dome is dressing). Held as a resource so both live_step
-// (shade/heat shelter) and predation_step (hide-from-predator defense) can read it. Populated identically in
-// the headless + render spawn paths so the mechanics are present in BOTH modes.
-#[derive(Resource, Default)]
-pub struct CavePositions {
-    pub positions: Vec<Vec3>,
-}
-
-// Solid land-cliff footprint as an oriented box in the surface tangent plane -> walk-mode collision (can't walk
-// through the cliff). Render-only (walk happens only in the render app). `along` = cliff length axis, `into` =
-// uphill (toward the rock bulk); world extents in those axes block the walker. See CliffBlocks::resolve.
-#[derive(Clone)]
-pub struct CliffBlock {
-    pub center: Vec3, // unit dir of the cliff site
-    pub along: Vec3,  // unit world tangent, length axis
-    pub into: Vec3,   // unit world tangent, uphill (into the rock)
-    pub up: Vec3,     // unit radial at the site
-    pub r: f32,       // surface radius at the site (unit-offset -> world dist)
-    pub half_len: f32,
-    pub z_front: f32, // downhill solid edge (world, negative along `into`)
-    pub z_back: f32,  // uphill solid edge (world)
-}
-
-#[derive(Resource, Default)]
-pub struct CliffBlocks {
-    pub blocks: Vec<CliffBlock>,
-}
-
-impl CliffBlocks {
-    // Push a walker direction OUT of any cliff footprint (min-penetration exit through the nearest box face).
-    // dir = candidate unit surface dir; returns adjusted unit dir. margin keeps the eye off the rock face.
-    pub fn resolve(&self, dir: Vec3) -> Vec3 {
-        let mut p = dir.normalize_or_zero();
-        let margin = 1.4;
-        for b in &self.blocks {
-            let off = p - b.center;
-            let off_t = off - b.up * off.dot(b.up); // tangent offset
-            let a = off_t.dot(b.along) * b.r; // along-length world dist
-            let z = off_t.dot(b.into) * b.r; // into-hill world dist
-            let hl = b.half_len + margin;
-            let zf = b.z_front - margin;
-            let zb = b.z_back + margin;
-            if a > -hl && a < hl && z > zf && z < zb {
-                let pen_left = a + hl; // exit -along
-                let pen_right = hl - a; // exit +along
-                let pen_front = z - zf; // exit -into (downhill)
-                let pen_back = zb - z; // exit +into
-                let m = pen_left.min(pen_right).min(pen_front).min(pen_back);
-                let w = p * b.r;
-                let moved = if m == pen_front {
-                    w - b.into * pen_front
-                } else if m == pen_back {
-                    w + b.into * pen_back
-                } else if m == pen_left {
-                    w - b.along * pen_left
-                } else {
-                    w + b.along * pen_right
-                };
-                p = moved.normalize_or_zero();
-            }
-        }
-        p
-    }
-}
-
-// Place a small CLUSTER of caves in ONE rocky-highland region (a cave system in "the rocky area"), rather than
-// scattering them worldwide. Pick a rocky high-ground center, then drop CAVE_COUNT caves within a small cap of
-// it. Deterministic from rng. Returns empty if no rocky highland is found (a smooth/lowland planet just has none).
-fn place_caves(rng: &mut Rng) -> Vec<Vec3> {
-    let rocky_high = |d: Vec3| {
-        !crate::sphere::is_ocean(d) && crate::sphere::rockiness(d) > CAVE_ROCK_MIN && crate::sphere::elevation01(d) > CAVE_ELEV_MIN
-    };
-    // find a rocky-highland center for the cluster
-    let mut center = None;
-    for _ in 0..4000 {
-        let d = crate::sphere::random_dir_in_cap(rng, Vec3::Y, std::f32::consts::PI);
-        if rocky_high(d) {
-            center = Some(d);
-            break;
-        }
-    }
-    let Some(center) = center else { return Vec::new() };
-    // drop a few caves around that center, keeping each on rocky high ground (relaxed gate so the cluster fills)
-    let mut out = Vec::with_capacity(CAVE_COUNT);
-    let mut tries = 0usize;
-    while out.len() < CAVE_COUNT && tries < CAVE_COUNT * 200 {
-        tries += 1;
-        let d = crate::sphere::random_dir_in_cap(rng, center, CAVE_CLUSTER_CAP);
-        if !crate::sphere::is_ocean(d) && crate::sphere::rockiness(d) > CAVE_ROCK_MIN * 0.6 && crate::sphere::elevation01(d) > CAVE_ELEV_MIN * 0.9 {
-            out.push(crate::sphere::surface_pos(d, 0.0));
-        }
-    }
-    // fallback: if the cap was too tight to fill, at least put one at the center
-    if out.is_empty() {
-        out.push(crate::sphere::surface_pos(center, 0.0));
-    }
-    let (_lon, lat) = crate::sphere::dir_to_lonlat(center);
-    info!("caves: {} placed in a rocky highland cluster near lat {:.0} deg", out.len(), lat.to_degrees());
-    out
-}
-
-// Underwater caves: a cluster on a SUBMERGED seabed ridge (ocean, above the abyssal floor so reachable + lit),
-// a place for swimmers to hide. Same idea as place_caves but in the sea; folded into the same CavePositions, so
-// the shelter + predation-defense mechanics cover aquatic prey for free. Prefers the SHALLOWER seabed (a reef
-// ridge) by accepting a candidate with prob ~ how shallow it is.
-fn place_sea_caves(rng: &mut Rng) -> Vec<Vec3> {
-    let band = |d: Vec3| crate::sphere::is_ocean(d) && crate::sphere::elevation01(d) > crate::sphere::AQUATIC_FLOOR;
-    let shallow = |d: Vec3| ((crate::sphere::elevation01(d) - crate::sphere::AQUATIC_FLOOR) / (crate::sphere::SEA_LEVEL - crate::sphere::AQUATIC_FLOOR)).clamp(0.0, 1.0);
-    // pick a shallow seabed-ridge center for the cluster
-    let mut center = None;
-    for _ in 0..4000 {
-        let d = crate::sphere::random_dir_in_cap(rng, Vec3::Y, std::f32::consts::PI);
-        if band(d) && rng.f32() < shallow(d) {
-            center = Some(d);
-            break;
-        }
-    }
-    let Some(center) = center else { return Vec::new() };
-    let mut out = Vec::with_capacity(CAVE_SEA_COUNT);
-    let mut tries = 0usize;
-    while out.len() < CAVE_SEA_COUNT && tries < CAVE_SEA_COUNT * 200 {
-        tries += 1;
-        let d = crate::sphere::random_dir_in_cap(rng, center, CAVE_CLUSTER_CAP);
-        if band(d) {
-            out.push(crate::sphere::surface_pos(d, 0.0));
-        }
-    }
-    if out.is_empty() {
-        out.push(crate::sphere::surface_pos(center, 0.0));
-    }
-    let (_lon, lat) = crate::sphere::dir_to_lonlat(center);
-    info!("sea caves: {} placed on a submerged seabed ridge near lat {:.0} deg", out.len(), lat.to_degrees());
-    out
-}
-
-// How sheltered a position is by the nearest cave: 1 at the mouth, fading to 0 by CAVE_RADIUS. Shared by the
-// shade (heat) relief + the predation (hide) defense. O(caves) per call; caves are few (~50) so it's cheap.
-pub(crate) fn cave_shelter01(pos: Vec3, caves: &[Vec3]) -> f32 {
-    let mut best = f32::INFINITY;
-    for c in caves {
-        let d2 = pos.distance_squared(*c);
-        if d2 < best {
-            best = d2;
-        }
-    }
-    if best.is_finite() {
-        (1.0 - best.sqrt() / CAVE_RADIUS).clamp(0.0, 1.0)
-    } else {
-        0.0
-    }
-}
-
 // --- spawn ---
 
 // Headless: components only, no render assets (absent under MinimalPlugins).
@@ -1240,11 +1086,6 @@ pub fn spawn_world_headless(mut commands: Commands, mut rng: ResMut<Rng>, mut ge
             spawn_seaweed(&mut commands, PlantGenome::seaweed(&mut rng), SEAWEED_START_MASS, seaweed_pos(&mut rng));
         }
     }
-    // cave sites: positions only (no render assets headless), but the shelter + predation-defense mechanics read
-    // them. Land caves (rocky highland) + sea caves (submerged ridge) share one list.
-    let mut caves = place_caves(&mut rng);
-    caves.extend(place_sea_caves(&mut rng));
-    commands.insert_resource(CavePositions { positions: caves });
 }
 
 // Scatter initial trees (half fruit trees, half uneatable evergreens) on habitable land. Always WHOLE-PLANET:
@@ -1405,74 +1246,6 @@ pub fn spawn_world_render(
             placed += 1;
         }
     }
-
-    // caves: shelter + a place to hide. Land sites get a rock CLIFF EDGE (escarpment, face downhill); sea sites
-    // keep a recessed seabed hole. Same positions drive the shade-relief + predation-hide mechanics.
-    let land_caves = place_caves(&mut rng);
-    let sea_caves = place_sea_caves(&mut rng);
-    {
-        use std::f32::consts::PI;
-        let cliff_m = meshes.add(crate::viz::cliff_mesh()); // land: low-poly escarpment
-        let rock_mat = materials.add(StandardMaterial {
-            base_color: Color::srgb(0.46, 0.43, 0.4), // muted gray rock; vertex shades give face/top contrast
-            perceptual_roughness: 1.0,
-            double_sided: true, // cliff is a one-sided shell -> show both faces so no holes from any angle
-            cull_mode: None,
-            ..default()
-        });
-        // land cliffs: long + low escarpment, yawed so the steep face (local -Z) points DOWNHILL (descent dir).
-        let mut cliff_blocks: Vec<CliffBlock> = Vec::new();
-        for &c in &land_caves {
-            let up = c.normalize_or_zero();
-            let base = crate::sphere::surface_pos(up, 0.0);
-            // tangent basis + numeric elevation gradient -> downhill tangent (face the cliff that way)
-            let mut e1 = up.cross(Vec3::X);
-            if e1.length_squared() < 1e-4 {
-                e1 = up.cross(Vec3::Z);
-            }
-            let e1 = e1.normalize_or_zero();
-            let e2 = up.cross(e1).normalize_or_zero();
-            let el = |d: Vec3| crate::sphere::elevation01(d.normalize_or_zero());
-            let eps = 0.02;
-            let ga = el(up + e1 * eps) - el(up - e1 * eps);
-            let gb = el(up + e2 * eps) - el(up - e2 * eps);
-            let downhill = -(e1 * ga + e2 * gb);
-            let downhill = (downhill - up * downhill.dot(up)).normalize_or_zero();
-            let base_rot = Quat::from_rotation_arc(Vec3::Y, up);
-            let face = (base_rot * Vec3::NEG_Z).normalize_or_zero(); // where -Z points after up-align
-            let yaw = if downhill.length_squared() < 1e-5 {
-                rng.range(-PI, PI) // ~flat: no clear downhill, pick any heading
-            } else {
-                let a = (face - up * face.dot(up)).normalize_or_zero();
-                a.cross(downhill).dot(up).atan2(a.dot(downhill).clamp(-1.0, 1.0))
-            };
-            let sx = rng.range(7.0, 10.0); // length (mesh spans x in [-1,1] -> world ~2*sx)
-            let sy = rng.range(5.0, 7.0); // height
-            let sz = rng.range(5.5, 8.0); // depth back into highland
-            let mut tf = Transform::from_translation(base - up * (sy * 0.3)); // bury the skirt so the base never floats
-            tf.rotation = Quat::from_axis_angle(up, yaw) * base_rot;
-            tf.scale = Vec3::new(sx, sy, sz);
-            // shadow caster ON now -> the overhang/inside self-shadows (no fake sunlit interior)
-            commands.spawn((Mesh3d(cliff_m.clone()), MeshMaterial3d(rock_mat.clone()), tf));
-            // walk-collision footprint: oriented box, length along local X, depth along local +Z (uphill)
-            cliff_blocks.push(CliffBlock {
-                center: up,
-                along: (tf.rotation * Vec3::X).normalize_or_zero(),
-                into: (tf.rotation * Vec3::Z).normalize_or_zero(),
-                up,
-                r: base.length(),
-                half_len: sx,
-                z_front: -0.15 * sz, // a touch downhill of the crest base
-                z_back: 0.85 * sz,   // back into the hill
-            });
-        }
-        commands.insert_resource(CliffBlocks { blocks: cliff_blocks });
-        // sea caves: positions only (invisible underwater hide spots, folded into CavePositions below). Old
-        // recessed-hole dressing removed (ugly blob look at the shoreline); a proper sea-cave look can come later.
-    }
-    let mut caves = land_caves; // land first, then sea (order matches the shelter/predation scan; mechanics unchanged)
-    caves.extend(sea_caves);
-    commands.insert_resource(CavePositions { positions: caves });
 
     // --load resumes a saved population; else random founding pop. Positions re-randomized.
     let snap = gen.load.as_deref().and_then(crate::persist::load_snapshot);
@@ -2077,7 +1850,6 @@ pub fn predation_step(
     mut commands: Commands,
     mut soil: ResMut<Soil>,
     mut cq: Query<(Entity, &Transform, &mut Energy, &mut Fitness, &mut Alive, &Genome, &mut Brain), With<Creature>>,
-    caves: Option<Res<CavePositions>>, // prey near a cave is harder to pick off (the "place to hide"); absent in scenario mode
 ) {
     // snapshot living creatures: (entity, pos, ATTACK combat, energy, kin-sig, DEFENSE combat, venom, climb,
     // attack-intent, defend-intent). attack = bite + size; defense = attack + armor (armor protects, doesn't help
@@ -2093,7 +1865,6 @@ pub fn predation_step(
     if snap.len() < 2 {
         return;
     }
-    let cave_pos: &[Vec3] = caves.as_ref().map(|c| c.positions.as_slice()).unwrap_or(&[]);
     let mut killed: HashSet<Entity> = HashSet::new();
     let mut gains: HashMap<Entity, f32> = HashMap::new();
     let mut committed: HashSet<Entity> = HashSet::new(); // attackers that chose to hunt this tick (intent > thresh)
@@ -2133,12 +1904,9 @@ pub fn predation_step(
             // success = attacker combat vs prey EFFECTIVE defense (combat + armor + active BRACE), minus required
             // edge PREDATION_BIAS, reduced by herd safety AND prey climb agility (arboreal escape).
             let eff_def = bdef + BRACE_DEF * b_def_intent;
-            // a prey caught next to a cave can duck into it: passive positional defense, like herd/climb evasion.
-            let cave_hide = cave_shelter01(bpos, cave_pos);
             let success = sigmoid(BITE_K * (abite - eff_def) - PREDATION_BIAS)
                 * (1.0 - SOCIAL_SAFETY * prey_kin)
-                * (1.0 - CLIMB_EVADE * bclimb)
-                * (1.0 - CAVE_SHELTER * cave_hide);
+                * (1.0 - CLIMB_EVADE * bclimb);
             if rng.f32() < success {
                 killed.insert(be);
                 // venomous prey is a sickening kill -> the predator gains far less (the venom deterrent)
@@ -2205,10 +1973,8 @@ pub fn live_step(
     mut soil: ResMut<Soil>,
     fire: Res<Fire>,
     fq: Query<(Entity, &Transform, &PlantState, &PlantGenome, Option<&Rot>, Option<&Tree>, Option<&Ferment>, Option<&Seed>), (With<Food>, Without<Creature>)>,
-    caves: Option<Res<CavePositions>>, // cave shelter (heat relief via shade); absent in scenario mode
 ) {
     let dt = DT;
-    let cave_pos: &[Vec3] = caves.as_ref().map(|c| c.positions.as_slice()).unwrap_or(&[]);
     let ntypes = gen.ntypes();
     let mut pop = cq.iter().count(); // live population (continuous-mode reproduction cap)
     // continuous birth/death active only AFTER generational warm-up (WARMUP_GENS)
@@ -2342,9 +2108,7 @@ pub fn live_step(
         } else {
             0.0
         };
-        // a cave counts as shade too: relieves open-sun heat AND, since shade01 is a brain input, lets creatures
-        // LEARN to seek caves in the heat (no new input). max() so the nearer of canopy/cave shelters you.
-        let shade01 = tree_shade.max(cave_shelter01(pos, cave_pos));
+        let shade01 = tree_shade; // overhead canopy shade (brain input + heat relief)
         // nearest THREAT: a bigger-combat creature nearby drives flee. O(n) over the snapshot.
         let my_combat = genome.bite + SIZE_COMBAT * genome.size;
         let mut threat_d2 = f32::INFINITY;

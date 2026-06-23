@@ -158,7 +158,9 @@ fn orbit_drag(
 }
 
 // Keyboard fallback: A/D orbit longitude, W/S zoom, Q/E tilt latitude. Shift = faster.
-fn orbit_keys(mode: Res<CameraMode>, keys: Res<ButtonInput<KeyCode>>, time: Res<Time>, selected: Res<Selected>, mut q: Query<&mut OrbitCam>) {
+// Time<Real> (wall-clock), NOT Res<Time> (virtual): camera control must keep working while the sim is PAUSED
+// (paused Time<Virtual> -> delta 0 -> frozen camera). User looks/walks around a paused world.
+fn orbit_keys(mode: Res<CameraMode>, keys: Res<ButtonInput<KeyCode>>, time: Res<Time<bevy::time::Real>>, selected: Res<Selected>, mut q: Query<&mut OrbitCam>) {
     if *mode != CameraMode::Orbit || selected.follow {
         return;
     }
@@ -201,8 +203,7 @@ fn apply_orbit(mode: Res<CameraMode>, selected: Res<Selected>, mut q: Query<(&mu
 fn walk_move(
     mode: Res<CameraMode>,
     keys: Res<ButtonInput<KeyCode>>,
-    time: Res<Time>,
-    cliffs: Option<Res<crate::sim::CliffBlocks>>,
+    time: Res<Time<bevy::time::Real>>, // wall-clock: walk must work while sim PAUSED (virtual time -> dt 0)
     trees: Query<&GlobalTransform, With<crate::components::Tree>>,
     mut q: Query<&mut WalkCam>,
 ) {
@@ -235,10 +236,7 @@ fn walk_move(
         if keys.pressed(KeyCode::KeyA) { w.dir = crate::sphere::step(w.dir, w.yaw - FRAC_PI_2, dist).0; }
         if keys.pressed(KeyCode::KeyD) { w.dir = crate::sphere::step(w.dir, w.yaw + FRAC_PI_2, dist).0; }
     }
-    // solid-world collision (land only): push out of cliffs, then tree trunks -> can't walk through them
-    if let Some(cliffs) = cliffs.as_ref() {
-        w.dir = cliffs.resolve(w.dir);
-    }
+    // solid-world collision (land only): push out of tree trunks -> can't walk through them
     for gt in &trees {
         let tpos = gt.translation();
         let r = tpos.length();

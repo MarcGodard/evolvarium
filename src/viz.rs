@@ -1073,49 +1073,6 @@ pub fn dome_mesh() -> Mesh {
     b.finish(idx)
 }
 
-// Cliff edge: low-poly rock ESCARPMENT. A jagged crest with a steep FRONT FACE (the cliff) dropping to the
-// foot, then a gentle top sloping back into the highland. Flat-shaded angular quads (per-quad normals, no
-// shared verts) match the world's low-poly look; per-segment hashed heights -> jagged non-repeating crest
-// (NOT piled spheres -> no rib pattern). Runs along local X, the face points -Z (downhill); base at y0.
-// Render scales it long+low and yaws it so the face looks downhill. Cave notch can be carved later.
-pub fn cliff_mesh() -> Mesh {
-    let mut b = MeshBuf::new();
-    let mut idx = Vec::new();
-    let n = 12usize;
-    let depth = 0.85f32; // how far the flat top reaches back into the highland
-    let hash = |i: i32| ((i as f32 * 12.9898).sin() * 43758.547).fract().abs(); // classic GLSL hash -> 0..1
-    let mut crest = Vec::with_capacity(n + 1);
-    let mut foot = Vec::with_capacity(n + 1);
-    let mut back = Vec::with_capacity(n + 1);
-    for i in 0..=n as i32 {
-        let x = -1.0 + 2.0 * i as f32 / n as f32;
-        let h = 0.8 + 0.55 * hash(i); // jagged crest height
-        let zc = -0.08 + 0.2 * hash(i + 71); // crest leans back a bit, varied -> uneven overhang
-        let zf = -0.14 - 0.1 * hash(i + 19); // foot juts forward, varied -> ragged base
-        crest.push(Vec3::new(x, h, zc));
-        // foot + back dip well BELOW y0 -> a buried skirt so the base never floats off bumpy terrain
-        foot.push(Vec3::new(x, -0.6, zf));
-        back.push(Vec3::new(x, -0.3, depth));
-    }
-    let quad = |b: &mut MeshBuf, idx: &mut Vec<u32>, p0: Vec3, p1: Vec3, p2: Vec3, p3: Vec3, v: f32| {
-        let nrm = (p1 - p0).cross(p3 - p0).normalize_or_zero();
-        let start = b.pos.len() as u32;
-        for p in [p0, p1, p2, p3] {
-            b.pos.push([p.x, p.y, p.z]);
-            b.nor.push([nrm.x, nrm.y, nrm.z]);
-            b.col.push([v, v, v, 1.0]);
-        }
-        idx.extend_from_slice(&[start, start + 1, start + 2, start, start + 2, start + 3]);
-    };
-    for i in 0..n {
-        let fv = 0.4 + 0.12 * hash(i as i32 + 5); // front face darker (steep, less sun)
-        let tv = 0.56 + 0.12 * hash(i as i32 + 91); // top lighter (catches sun)
-        quad(&mut b, &mut idx, foot[i], foot[i + 1], crest[i + 1], crest[i], fv); // cliff face: foot -> crest
-        quad(&mut b, &mut idx, crest[i], crest[i + 1], back[i + 1], back[i], tv); // top: crest -> back highland
-    }
-    b.finish(idx)
-}
-
 // Cactus: tall rounded column + couple stubby up-curved arms (saguaro silhouette). Base at y=0.
 pub fn cactus_mesh() -> Mesh {
     let mut b = MeshBuf::new();
@@ -2253,10 +2210,14 @@ fn update_stats(
         let breadth = g.uptake.iter().filter(|u| **u > 0.4).count(); // nutrients actively absorbed (uptake > 0.4)
         let master = master_expression(&g.uptake, &diet.reserves, crate::config::RESERVE_REQ, crate::config::MASTER_FLOOR);
         let mode = if g.light_pref > 0.6 { "diurnal" } else if g.light_pref < 0.4 { "nocturnal" } else { "cathemeral" };
-        let habitat = if g.swim > 0.6 { "aquatic" } else if g.swim < 0.3 { "land" } else { "amphibious" };
+        // niche-priority (mirror niche::niche_of + the WORLD habitat tally): aquatic, then flying, then land
+        let habitat = if g.swim > 0.6 { "aquatic" }
+            else if g.flight >= crate::sim::FLIGHT_KNEE { "flying" }
+            else if g.swim < 0.3 { "land" }
+            else { "amphibious" };
         let clime = if g.temp_pref > 0.6 { "warm" } else if g.temp_pref < 0.4 { "cold" } else { "temperate" };
         text.0 = format!(
-            "CREATURE  {}\nenergy   {:.1}  f{:.0}/s{:.0}/fat{:.0}\nadiposity {:.2}\nfitness  {:.1}\nsensors  {}\nbite     {:.2}\nheight   {:.2}\nsize     {:.2}\nswim     {:.2} ({})\nsocial   {:.2}\ntemp     {:.2} ({})\nlongevity {:.2}\nmetab    {:.2}\nparental {:.2}\nrigidity {:.2}\nlight    {:.2} ({})\nfatigue  {:.2}\ngut>top n{} (master {:.2})\nbreadth  {}\nload(G)  {:.2}\nage      {}",
+            "CREATURE  {}\nenergy   {:.1}  f{:.0}/s{:.0}/fat{:.0}\nadiposity {:.2}\nfitness  {:.1}\nsensors  {}\nbite     {:.2}\nheight   {:.2}\nsize     {:.2}\nswim     {:.2} ({})\nflight   {:.2}\nsocial   {:.2}\ntemp     {:.2} ({})\nlongevity {:.2}\nmetab    {:.2}\nparental {:.2}\nrigidity {:.2}\nlight    {:.2} ({})\nfatigue  {:.2}\ngut>top n{} (master {:.2})\nbreadth  {}\nload(G)  {:.2}\nage      {}",
             if alive.0 { "alive" } else { "DEAD" },
             energy.total(),
             energy.fast,
@@ -2270,6 +2231,7 @@ fn update_stats(
             g.size,
             g.swim,
             habitat,
+            g.flight,
             g.social,
             g.temp_pref,
             clime,
