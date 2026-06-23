@@ -467,6 +467,32 @@ fn add_plant_visuals(
                     commands.entity(e).add_child(c);
                 }
             }
+            // FRUIT in the crown (matches sim eat model: fruit_height = height - branches*BRANCH_REACH).
+            // Bare tree hangs fruit HIGH (top of canopy, only tall/climbers/fliers reach); branchy tree drops
+            // it LOW (short ground creatures reach). Local y maps that drop; ring sits in the broadleaf crown.
+            // Ripe red/orange, toxic fruit warns violet (fruit_toxicity, decoupled from body toxicity).
+            if t.edible && g.fruiting > 0.3 {
+                let (fruit, fem) = if g.fruit_toxicity > 0.5 {
+                    (Color::srgb(0.62, 0.05, 0.78), LinearRgba::rgb(0.20, 0.0, 0.28)) // toxic: violet warning
+                } else {
+                    (Color::srgb(0.95, 0.30, 0.06), LinearRgba::rgb(0.32, 0.08, 0.0)) // ripe: orange-red, slight glow
+                };
+                let frmat = materials.add(StandardMaterial { base_color: fruit, emissive: fem, ..default() });
+                let fy = 1.4 - 0.95 * g.branches.clamp(0.0, 1.0); // bare ~1.4 (top), full branches ~0.45 (low in branches)
+                let n = 6;
+                for k in 0..n {
+                    let a = k as f32 * std::f32::consts::TAU / n as f32;
+                    let r = 0.85;
+                    let c = commands
+                        .spawn((
+                            Mesh3d(forms.berry.clone()),
+                            MeshMaterial3d(frmat.clone()),
+                            Transform::from_xyz(r * a.cos(), fy, r * a.sin()).with_scale(Vec3::splat(1.4)),
+                        ))
+                        .id();
+                    commands.entity(e).add_child(c);
+                }
+            }
             // some trees host climbing vine up trunk (vine appears only WITH a tree). Presence keyed off
             // flower_hue gene > 0.58 -> deterministic + varied (~40% of trees).
             if g.flower_hue > 0.58 {
