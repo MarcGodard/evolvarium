@@ -82,7 +82,7 @@ pub const ROCK_MOVE_COST: f32 = 9.0; // extra energy/sec over rocky highland (ha
 // alpine is pure cost -> stays low on average, rises only in highland dwellers. Real niche axis,
 // self-limiting -> won't peg like armor did.
 pub const ALPINE_RELIEF: f32 = 0.85;    // fraction of rock-crossing cost removed at full alpine
-pub const ALPINE_FLAT_COST: f32 = 1.2;  // energy/sec penalty at full alpine on flat (non-rocky) ground
+pub const ALPINE_FLAT_COST: f32 = 1.7;  // energy/sec penalty at full alpine on flat (non-rocky) ground. Raised 1.2->1.7 (balance harness): soft penalty let highland creatures forage cheaply across ~95% flat planet -> dominated + starved other niches. Confines heavy mountain build to the rocks.
 pub const SENSE_COST: f32 = 0.012; // energy/sec per unit total sensor range (long-range vision not free)
 pub const BRAIN_COST: f32 = 0.05; // energy/sec per hidden neuron. Bigger brain costs upkeep, so NN grows only when extra compute pays off -> brain size evolves to interior optimum.
 pub const EAT_RADIUS: f32 = 1.1;
@@ -122,7 +122,7 @@ pub const FLIGHT_BUOYANCY: f32 = 1.2;   // passive relax/sec toward cruise altit
                                         // hover aloft, fish hover mid-water, even with a neutral brain). Brain
                                         // out[6] climbs/descends around it; landing to eat = sustained descend.
 pub const FLIGHT_CRUISE: f32 = 0.55;    // resting altitude as fraction of medium ceiling (where buoyancy settles)
-pub const FLIGHT_ALT_COST: f32 = 2.5;   // energy/sec to hold full altitude (flapping upkeep)
+pub const FLIGHT_ALT_COST: f32 = 1.5;   // energy/sec to hold full altitude (flapping upkeep). Lowered 2.5->1.5 (balance harness): aerial niche couldn't net-forage on the wing -> needed constant rescue. Cheaper cruise lets birds self-sustain.
 pub const FLIGHT_GROUND_COST: f32 = 3.0;// energy/sec penalty for full flight gene while grounded (clumsy wings)
 pub const GROUND_EPS: f32 = 0.4;        // altitude below this = "on the ground" (can drown). Eating/predation/
                                         // collision need no vertical gate: all key off 3D translation, so an
@@ -189,7 +189,7 @@ pub const GRASS_GRAZE: f32 = 12.0; // energy/sec HUNGRY grazer nibbles from gras
 // (above abyssal floor) -> reliable food carpet for swimmers (position-based ocean graze). ---
 pub const SEAWEED_CAP: usize = 3500; // target frond count across submerged band (ocean ~half the planet)
 pub const SEAWEED_START_MASS: f32 = 0.5;
-pub const SEAWEED_GRAZE: f32 = 20.0; // energy/sec HUNGRY SUBMERGED grazer nibbles from kelp band (x depth x herbivory)
+pub const SEAWEED_GRAZE: f32 = 26.0; // energy/sec HUNGRY SUBMERGED grazer nibbles from kelp band (x depth x herbivory). Raised 20->26 (balance harness): aquatic grazers were net-marginal -> couldn't sustain. Richer kelp feeding lets fish breed past floor.
 // Grazing FORAGE nutrient: grass + seaweed each carry ONE fixed nutrient axis, so grazer can TUNE gut
 // (uptake at that index) to live off carpet alone: specialty, not free lunch. Graze refills that reserve
 // x creature's uptake-match, so mismatched gut starves of deficiency even while energy is fine.

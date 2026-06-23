@@ -21,6 +21,8 @@ const NICHES = [
   { name: 'highland-climber', band: [0.4, 0.9],  wetness: 0.4,  rocky: true,  food: ['Thistle', 'Clover'],   hint: { alpine: 0.7, size: 0.25 } },
   { name: 'tree-climber',     band: [0.3, 0.7],  wetness: 0.6,  food: ['Clover', 'TREE', 'TREE'], hint: { climb: 0.7, size: 0.18, height: 0.2 } },
   { name: 'arid-desert',      band: [0.5, 0.9],  wetness: 0.15, food: ['Cactus', 'Thistle'],   hint: { temp_pref: 0.8, adiposity: 0.7, size: 0.3 } },
+  // aerial: the bird niche (flight gene). Flies over a temperate band, lands to feed on ground plants.
+  { name: 'aerial-forager',   band: [0.1, 0.55], wetness: 0.5,  food: ['BerryBush', 'Wildflower'], hint: { flight: 0.7, size: 0.22, temp_pref: 0.6, eyes: 0.6 } },
 ]
 
 const BIN = './target/debug/evolvarium'
@@ -72,7 +74,7 @@ THE HARNESS:
   is a TUNING result, not just scarcity.
   The creature genome object is FREE-FORM: override ANY gene by name: size, metab, longevity, parental,
   adiposity, bite, height, light_pref, temp_pref, swim, alpine, social, rigidity, detox, carnivory, pelt,
-  armor, venom, limbs, climb, eyes, head, uptake (array of 10), sensors (array of {angle,range}). Unknown
+  armor, venom, limbs, climb, eyes, head, flight, uptake (array of 10), sensors (array of {angle,range}). Unknown
   keys warn + are ignored. Start from the niche hint: ${JSON.stringify(niche.hint)}.
 - Result JSON creature fields you read: creature_started, creature_survived, creature_survival
   (final/started; >=1 means the lineage sustained/grew), creature_mean_age, creature_mean_energy,
@@ -92,6 +94,9 @@ KEY TUNING LEVERS (no free lunch — every gene has a cost):
   - size: bigger = hungrier (basal scales super-linearly) but more combat/storage; small = cheap + nimble.
   - pelt: insulates cold (cut cold-band temp cost) but overheats + drags in water. swim: fast/cheap in water,
     costly on land. alpine: cheap on rock, costly on flat. climb: reaches fruit trees + evades, costly on flat.
+  - flight: above FLIGHT_KNEE the creature flies (fast aloft, skips ground collision + drowning) but holding
+    altitude burns energy and big wings are clumsy grounded. The aerial niche needs flight high enough to fly
+    yet cheap enough upkeep to forage (it lands to feed on ground plants); pair with good eyes to spot food.
   - heat/shade: hot sunny bands burn energy in the open; seed a couple of trees (shade) or pick a cooler band.
   - reflex "approach-food" is the bread-and-butter forager prior; lifetime learning refines it.
 
