@@ -25,7 +25,7 @@ const NICHES = [
   { name: 'aerial-forager',   band: [0.1, 0.55], wetness: 0.5,  food: ['BerryBush', 'Wildflower'], hint: { flight: 0.7, size: 0.22, temp_pref: 0.6, eyes: 0.6 } },
 ]
 
-const BIN = './target/debug/evolvarium'
+const BIN = './target/release/evolvarium' // release: scenario sims run ~3x faster over many tuning rounds
 const SEED_OUT = 'evolved-continuous.json'
 
 const TUNE_SCHEMA = {
@@ -47,7 +47,7 @@ const TUNE_SCHEMA = {
 }
 
 phase('build')
-await agent(`Run \`cargo build\` in /home/marc/Documents/Github/evolvarium and report only "ok" or the error tail.`, {
+await agent(`Run \`cargo build --release\` in /home/marc/Documents/Github/evolvarium and report only "ok" or the error tail.`, {
   label: 'build', phase: 'build',
 })
 

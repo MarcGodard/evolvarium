@@ -121,7 +121,7 @@ pub const FLIGHT_CLIMB_RATE: f32 = 4.0; // altitude units/sec gained/lost at ful
 pub const FLIGHT_BUOYANCY: f32 = 1.2;   // passive relax/sec toward cruise altitude (neutral buoyancy: fliers
                                         // hover aloft, fish hover mid-water, even with a neutral brain). Brain
                                         // out[6] climbs/descends around it; landing to eat = sustained descend.
-pub const FLIGHT_CRUISE: f32 = 0.55;    // resting altitude as fraction of medium ceiling (where buoyancy settles)
+pub const FLIGHT_CRUISE: f32 = 0.15;    // resting altitude as fraction of medium ceiling (where buoyancy settles). Low so fliers FORAGE near ground (within EAT_RADIUS 1.1 of ground food) + pop up to travel/escape. At 0.55 a flier hovered ~2.3 alt >> eat range -> untrained birds starved before learning to dive (bootstrap death).
 pub const FLIGHT_ALT_COST: f32 = 1.5;   // energy/sec to hold full altitude (flapping upkeep). Lowered 2.5->1.5 (balance harness): aerial niche couldn't net-forage on the wing -> needed constant rescue. Cheaper cruise lets birds self-sustain.
 pub const FLIGHT_GROUND_COST: f32 = 3.0;// energy/sec penalty for full flight gene while grounded (clumsy wings)
 pub const GROUND_EPS: f32 = 0.4;        // altitude below this = "on the ground" (can drown). Eating/predation/
