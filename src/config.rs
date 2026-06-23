@@ -38,19 +38,19 @@ pub const REPRO_COST: f32 = 16.0; // energy parent spends per child (parent stay
 pub const BIRTH_ENERGY: f32 = 28.0; // offspring start energy: buffer so newborns establish before starving (raised: newborn die-off was R<1 driver pinning pop at floor)
 pub const P_REPRO_CREATURE: f32 = 0.025; // per-tick repro chance while eligible (x density taper)
 pub const REPRO_MIN_AGE: u32 = 180; // min ticks of life before breeding (newborns establish first; paces waves)
-pub const CREATURE_CAP: usize = 130; // global pop ceiling (below grazing pressure that crashes plants). Loose backstop now; per-niche caps bind first.
+pub const CREATURE_CAP: usize = 1100; // global pop ceiling. Scaled ~8.5x for the ~1000-creature world (live_step parallel). Food web supports it: probe held plants ~5800 at pop 1600, no crash. Per-niche caps bind first.
 // Per-niche carrying capacity (repro tapers on the breeder's OWN niche fill, not global pop) -> each habitat
 // fills independently so no single niche soaks the shared cap (was winner-take-all: one niche -> ~83% planet,
 // which one is seed-stochastic). Order = Niche::idx [aquatic,aerial,highland,cold,warm,land]. Aquatic biggest
-// (ocean ~half planet) but ~30% not 83%. Sum (~152) > CREATURE_CAP on purpose: weak niches underfill so total
-// stays under the global ceiling; global cap only binds if many niches all max out.
-pub const NICHE_CAP: [usize; 6] = [45, 15, 16, 18, 22, 36];
+// (ocean ~half planet) but ~30% not 83%. Scaled ~7x from [45,15,16,18,22,36] for the ~1000-pop world; ratios
+// preserved so habitat balance holds. Sum (~1064) ~= CREATURE_CAP so global cap + niche caps both bind near 1000.
+pub const NICHE_CAP: [usize; 6] = [315, 105, 112, 126, 154, 252];
 pub const WARMUP_GENS: u32 = 12; // generational warm-up before continuous birth/death kicks in
 pub const CONT_LOG_TICKS: u32 = 600; // continuous-mode stats log interval (fine enough to watch a crash unfold)
 
 // Per-niche rescue (niche.rs): floors + hall-of-fame banks keep each habitat alive (aquatic/aerial/highland/
 // cold/warm/land). Replaces the global CREATURE_MIN floor for continuous mode. DAY_TICKS=2400, GEN_TICKS=4800.
-pub const NICHE_FLOOR: usize = 6;          // per-niche min pop; below -> rescue from bank
+pub const NICHE_FLOOR: usize = 40;         // per-niche min pop; below -> rescue from bank. Scaled ~7x with NICHE_CAP for the ~1000-pop world (emergency backstop; never triggers at healthy density).
 pub const NICHE_BANK_CAP: usize = 8;       // hall-of-fame size per niche (best genomes kept for revival)
 pub const NICHE_BANK_TICKS: u32 = 1200;    // rebuild banks every half-day from fittest living per niche
 pub const NICHE_RESCUE_COOLDOWN: u32 = 600; // min ticks between rescues of the SAME niche (ease in, not burst)
