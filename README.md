@@ -3,8 +3,9 @@
 A 3D artificial-life sim on a small **planet**. Tiny per-creature neural-net brains (genome = weights +
 sensors + traits) forage, eat, fight, breed, and learn during their lives; a genetic algorithm plus
 lifetime learning evolve them against a living, co-evolving food web. Creatures live on the surface of a
-sphere with day/night, drifting clouds, cloud-driven rain, lightning wildfire, oceans, mountains, and cold
-poles vs a warm equator. Design spec lives in `../clients/evolvarium/` (`00-concept.md` ..).
+sphere (birds fly above it, swimmers dive through its oceans) with day/night, drifting clouds, cloud-driven
+rain, lightning wildfire, oceans, mountains, a tilted magnetic field with polar auroras, and cold poles vs a
+warm equator. Design spec lives in `../clients/evolvarium/` (`00-concept.md` ..).
 
 ## Run it
 
@@ -20,7 +21,10 @@ First build compiles Bevy (slow, minutes); later builds are fast. Linux needs th
 to rotate around the planet, **scroll** to zoom, **WASD/QE** as a keyboard fallback. In walk, the eye rides a
 fixed height above the terrain: **WASD** move, arrows or right-drag to look, **Shift** to run, **[ / ]** scrub
 time-of-day, **\\** jump to noon. **Left-click** a creature/plant to inspect it; **F** follows the selection.
-Real sun shadows render in walk mode; **H** opens a legend of every control and HUD field.
+Real sun shadows render in walk mode; **H** opens a legend of every control and HUD field. **M** cycles a
+corner minimap globe through field overlays (biome / heat / moisture / elevation, plus live soil / groundwater
+/ fire / creature-density); **Y** opens a live phylogeny (a species tree of the population). God controls:
+**B** seed creatures, **P** populate the whole planet, **L** lightning, **K** cull.
 
 ### Headless + flags
 
@@ -47,8 +51,8 @@ cargo run -- --headless --shots=planet --shot-tick=4000   # CPU-render PNG views
   ignite wildfire that spreads through dry vegetation (oceans + the polar ice cap are firebreaks; spread
   scales with fuel density), burns plants/trees, and leaves fertile ash so burned ground regrows richer.
 - **Food web**: plants, fruit trees (reach-gated, seed-dispersed when eaten, dropping fallen fruit),
-  evergreens, fermenting fruit/detritus, carrion that rots to poison, and a soil-fertility loop (death
-  feeds the ground).
+  evergreens, fermenting fruit/detritus, carrion that rots to poison, and a soil-fertility loop where
+  fertility follows water (poor dry interior, rich wetlands/coasts) and spikes where life dies and decomposes.
 
 ## The genome (every trait is a trade-off)
 
@@ -57,8 +61,14 @@ per-connection plasticity + hidden-layer size), a 10-nutrient **diet** genome (p
 **rigidity** specialist-vs-generalist), **bite**, **height**, **size**, **swim** (aquatic niche),
 **alpine** (mountain niche), **social** (kin herding), **temp_pref** (thermal/latitudinal niche),
 **longevity** (long life vs upkeep), **metab** (frugal/sluggish vs fast/costly), **parental** (r/K
-investment), and **adiposity** (lean/nimble vs fatty/buffered). Plants/trees evolve a 10-nutrient profile
-plus defense, quality, moisture preference, height, light preference, regrow, branches, spread, and maturity.
+investment), and **adiposity** (lean/nimble vs fatty/buffered). They also evolve **flight** (birds cruise
+above the world; high flight excludes high swim, and a shared vertical axis lets swimmers dive through the
+water column), **magneto** (magnetoreception for navigation under the tilted field), and a defense/morphology
+cluster: **detox**, **carnivory**, **pelt**, **armor**, **venom**, **limbs**, **climb**, **eyes**, **head**,
+plus cosmetic appearance genes. The brain's action outputs (move, turn, attack, defend, eat, sprint, climb)
+mean predation, active defense, what to eat, and whether to fly are all learned in-life and selected across
+generations. Plants/trees evolve a 10-nutrient profile plus defense, quality, moisture preference, height,
+light preference, regrow, branches, spread, and maturity.
 
 **Metabolism**: three energy stores (fast / sugar / fat) burn fast->sugar->fat; fast leaks even at rest,
 fat mobilizes slowly and carries upkeep. Plants give sugar, meat gives fat, fruit and fermenting detritus
@@ -66,8 +76,9 @@ give the volatile fast store. A regulatory `master_expression` (reserves vs upta
 energy each food yields, so diet breadth is a real trade-off.
 
 Reproduction is **continuous** by default (self-sustaining birth/death after a short generational warm-up);
-the population self-regulates to a stable carrying capacity (~70-90). Creatures age and die of old age.
-`--mating` enables two-parent assortative reproduction (crossover + mate choice) for stronger speciation.
+the population self-regulates to a stable carrying capacity of ~1000+ creatures (the sim tick is
+multi-threaded to carry it; see `PARALLELIZATION.md`). Creatures age and die of old age. `--mating` enables
+two-parent assortative reproduction (crossover + mate choice) for stronger speciation.
 
 ## Layout
 
@@ -75,17 +86,19 @@ the population self-regulates to a stable carrying capacity (~70-90). Creatures 
 src/
   main.rs       app setup, CLI flags, render/headless wiring, the globe + sun + moon scene
   sphere.rs     planet geometry + climate: lat/lon<->3D, great-circle movement, terrain/temperature/
-                moisture/ocean fields, sun/moon, clouds + cloud-driven rain, biome color
+                moisture/ocean fields, tilted magnetic field, sun/moon, clouds + cloud-driven rain, biome color
   sim.rs        the simulation: movement, sensing, metabolism, eating, predation, reproduction, weather,
                 fire, soil, the nutrient loop, and per-generation/continuous logging
   genome.rs     creature genome + mutation + the tiny NN (forward + Hebbian/Oja lifetime learning)
   plant.rs      plant/tree genome, growth, coloring
   terrain.rs    build the globe render mesh from the sphere fields
-  viz.rs        render-only: creature/plant styling, clouds, rain, fire, day/night, inspect panel
-  camera.rs     orbit camera (drag rotate, scroll zoom, follow)
+  viz.rs        render-only: creature/plant styling, clouds, rain, fire, aurora, day/night, inspect panel,
+                corner minimap globe, phylogeny view
+  camera.rs     orbit + walk cameras (drag rotate, scroll zoom, follow, ground walk, swim), per-mode shadows
   snapshot.rs   headless CPU ray-tracer -> PNG snapshots of the planet
   persist.rs    save/load population snapshots (serde JSON)
   config.rs     all balance/tuning constants in one place
 ```
 
-See `SPHERE-PLAN.md` for the in-progress conversion checklist and `BACKLOG.md` for further ideas.
+See `BACKLOG.md` for the roadmap + done items and `PARALLELIZATION.md` for the multi-core tick; the
+`../clients/evolvarium/` specs hold the design detail. `SPHERE-PLAN.md` is the (completed) sphere-conversion history.
