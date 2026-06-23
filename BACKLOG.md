@@ -254,8 +254,20 @@ live in `config.rs`; the live conversion plan is `SPHERE-PLAN.md`.
       seed on the NEW world (50% ocean + mountains) so the showcase holds aquatic + alpine + land niches.
       Consider making --mating the default once seeds are re-evolved under it.
 - [ ] Visual polish: nicer creature meshes per niche, axial-tilt seasons, atmosphere rim/haze.
+- [ ] **Corner inspector minimap**: small second planet copy in a screen corner showing a chosen FIELD as a
+      color map -> heat/temperature, soil moisture (GroundWater + sphere::moisture), and toggle through more
+      (fertility/Soil, fire, rain/cloud cover, elevation/bathymetry, plant_habitability, creature density,
+      magnetic latitude). Reuse the existing field sampling (sphere::*, Soil/GroundWater/Fire resources);
+      render to an offscreen sphere or a UI texture, key/god-control to cycle the active field. Diagnostic
+      overlay (see WHY a region is barren/lush) without leaving the walk/orbit view.
+- [ ] **Land wear / soil compaction**: creatures walking compacts the ground -> where animals tread most,
+      plants grow less. A per-cell wear field (like Soil/GroundWater, SOIL_RES grid) that creatures ADD to as
+      they move (accumulate along the path in live_step), decays slowly, and REDUCES plant/grass growth +
+      habitability where high. Emergent trails/paths + grazing-pressure feedback (overused ground degrades ->
+      herds must roam). Pairs with the minimap (a "wear" overlay). Balance-phase: tune wear gain/decay so it
+      shapes movement without desertifying popular niches.
 - [ ] Scale-up toward thousands of creatures (original spec headline) via density-invariant rebalance —
-      big, do cautiously in validated steps.
+      big, do cautiously in validated steps. (Carrying cap now ~1100 w/ parallel live_step; see PARALLELIZATION.md Phase 6.)
 
 ### Bigger
 - [x] Multi-core sim tick (Phases 0-5 DONE 2026-06-23, full plan + report in `PARALLELIZATION.md`).
