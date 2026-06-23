@@ -258,10 +258,13 @@ live in `config.rs`; the live conversion plan is `SPHERE-PLAN.md`.
       big, do cautiously in validated steps.
 
 ### Bigger
-- [ ] Multi-core sim tick — full plan in `PARALLELIZATION.md`. Phase 0 (profile) DONE 2026-06-23: flora
-      dominates (grass 62.8% / plant 24.4% / seaweed 7.1% = 94.3% of tick; live only 2.1%, predation noise).
-      `--profile` headless flag added (src/profile.rs). Next: Phase 1 infra (per-entity RNG + stable index +
-      intent scaffolding), then parallelize grass -> plant -> seaweed. ~8.5x ceiling at 16 cores.
+- [x] Multi-core sim tick (Phases 0-5 DONE 2026-06-23, full plan + report in `PARALLELIZATION.md`).
+      Parallelized grass/plant/seaweed (snapshot->par decide->serial apply, per-entity deterministic RNG) +
+      weather (grid chunked over ComputeTaskPool, byte-identical). Whole tick ~16.5->3.48 ms = **4.7x** on 16
+      cores (61->~290 ticks/s). Deterministic; equivalent (flora <3% + traits within +-10% pooled; seaweed +
+      weather byte-identical). `--profile` flag + `Rng::for_entity` infra added. Deferred: live_step (~16%,
+      selection-critical, do when creature pop scales up); system unchaining (unsafe: systems share Soil/gw/fire
+      within a tick). Helps headless runs + fast-forward viz only; normal viz/campaign unchanged by design.
 - [ ] Solar system: real Tychos orbital model drives the sky (sun/moon + wandering planets) — spec
       `clients/evolvarium/15-solar-system-tychos.md`. Literal Tychos geometry (TSN deferent/epicycle data),
       drives existing sky, real orbital proportions. New `orrery.rs`; `sun_dir`/`moon_pos` delegate.

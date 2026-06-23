@@ -182,10 +182,18 @@ section updated as the source of truth.
 - [x] Phase 3 - plant_step parallel (trees + ~12 repro pathways, PlantBatch intents, coarse cap gate +
       precise spawn cap). 3968->917 us/tick = 4.3x. Tick 8.2->5.0 ms. Deterministic; equivalent (flora <3%,
       creature trait means within +-10% pooled over 4 seeds). (2026-06-23)
-- [ ] Phase 4 - seaweed_step (now 23%; identical pattern to grass)
-- [ ] Phase 5 - weather/climate grids (~10%, if not already Amdahl-capped)
-- [ ] (deferred) live_step / predation - only 2.1% / ~0%; do only if creature pop scales up
-- [ ] Phase 6 - system unchaining + final report
+- [x] Phase 4 - seaweed_step parallel (no decide RNG -> deterministic by construction; despawn-or-grow +
+      refill). 1172->214 us/tick = 5.5x. Tick 5.0->3.95 ms. (2026-06-23)
+- [x] Phase 5 - weather_step parallel (grid chunked over ComputeTaskPool). BYTE-IDENTICAL to serial (verified
+      by diff). 490->103 us/tick = 4.8x. Tick 3.95->3.48 ms. (2026-06-23)
+- [defer] live_step (~16% / 554 us) - the most intricate system (eat-dedup HashSet, soil/tree_bites writes,
+      repro crossover, death+carrion); selection-critical so the equivalence gate is HARD. ~13% more tick for
+      real regression risk. Left for when creature pop scales up an order of magnitude. predation/rot negligible.
+- [x] Phase 6/7 - system unchaining assessed UNSAFE here + final report (2026-06-23). Systems share Soil
+      (fire/plant/grass/live/predation all write), gw (weather writes -> plant/grass read same tick), fire
+      (fire writes -> plant reads same tick): the `.chain()` order encodes real within-tick data flow.
+      Unchaining would reorder those reads/writes and change results. Not worth the risk for no extra parallelism
+      (intra-system par_iter already saturates cores on the hot systems).
 
 Profile data (Phase 0, 2026-06-23): pop with 4349 plants + 270 trees + 8000 grass + 3500 seaweed, single
 thread, `--release`, `--headless --gens=2 --profile` @ tick 7200 cumulative:
@@ -205,3 +213,33 @@ thread, `--release`, `--headless --gens=2 --profile` @ tick 7200 cumulative:
 
 Measured tick mean ~16.5 ms = ~61 ticks/s single-thread. Flora (grass+plant+seaweed) = 94.3%. Amdahl
 ceiling if those three parallelize ~Ncore at 16 cores: ~1/(0.057 + 0.943/16) ≈ 8.5x (minus serial apply).
+
+## Final report (Phases 0-5 done, 2026-06-23; 16-core machine)
+
+Per-system tick time, single-thread Phase-0 baseline -> after parallelization:
+
+| system  | before us/tick | after us/tick | speedup | notes |
+|---------|---------------:|--------------:|:-------:|-------|
+| grass   | 10333 | ~1700 | 5.2-6x | par decide; floor = 8000 blades x multi-octave noise + serial refill |
+| plant   |  4018 |  ~872 | 4.3x   | par decide w/ PlantBatch intents; trees + 12 repro pathways |
+| seaweed |  1170 |  ~214 | 5.5x   | no decide RNG -> deterministic by construction |
+| weather |   536 |  ~103 | 4.8x   | grid chunked over ComputeTaskPool; byte-identical |
+| live    |   344 |  ~554 | (n/a)  | UNCHANGED (creature pop grew since Phase 0); plan-deferred |
+| others  |   ~40 |   ~40 | -      | fire/rot/predation/niche/generation negligible |
+
+Whole tick: ~16.5 ms -> ~3.48 ms = **4.7x** (61 -> ~290 ticks/s single-thread-equiv). Below the 8.5x
+ceiling because (a) grass+plant keep a serial apply (despawn/spawn via Commands, RNG refill) that doesn't
+parallelize, and (b) live_step (~16% now) was left serial. Headless single runs + fast-forward viz scale
+with this. Normal-speed viz + campaign throughput unchanged (by design).
+
+Determinism: every phase verified same-seed-twice identical. Equivalence: grass/plant statistically
+equivalent (flora <3%, creature trait means within +-10% pooled over seeds; per-seed trajectory divergence
+is shared-RNG repartition, like a seed change); seaweed + weather byte-identical to serial.
+
+Infra: `src/profile.rs` (`--profile`), `Rng::for_entity` (per-entity deterministic stream keyed by
+seed+entity.index+tick), `GenState.seed`. Pattern for any future hot system: snapshot -> par_iter_mut
+decide (own components + per-entity RNG, push intents into `bevy::utils::Parallel<Vec<_>>`) -> serial apply
+sorted by entity index (caps, shared-resource writes, Commands spawn/despawn).
+
+If creature pop scales up an order of magnitude, do live_step next (same intent pattern; hardest because
+eat-dedup + repro are selection-critical -> needs the multi-seed equivalence fan-out).
