@@ -306,9 +306,15 @@ items from M0-M6 stay in the specs (status notes inline there); only the still-O
       lethal, not just the current soft growth-load via `DEFICIT_G`). Deepens the diet model; balance-
       sensitive -> tune via the harness. NOTE carrion-TIMING already done (Rot{age} + Ferment chain: fresh ->
       sugar -> toxic fast -> gone), so a fresh kill is already richer than an old one; don't re-add that.
-- [ ] **Lineage / phylogeny view** (M7 data + open-q #7): tag + follow lineages, a species/phylogeny tree,
-      trait-distribution-over-time charts. Basic stats overlay is DONE; this is the "fancy charts" tail.
-      Pairs with the god-panel UI item below (shared charting surface). Render/UI-side, not balance-sensitive.
+- [x] **Lineage / phylogeny view** (M7 data + open-q #7, DONE 2026-06-23): 'Y' toggles a live SPECIES TREE
+      panel (under the minimap). Render-only online genetic clustering (`viz.rs` phylogeny_classify +
+      Phylogeny resource): every PHY_INTERVAL ticks each creature joins its nearest species (centroid EMA) or
+      BUDS a new species (parent = nearest relative) when past PHY_THRESH on a niche-gene trait vector. Works
+      as descent because offspring resemble parents. Panel draws the tree indented by ancestry, colored per
+      clade, with live pop + peak + clade tags (flier/swimmer/alpine/land, herbivore/omnivore/carnivore,
+      size, thermal). Verified --capture: 10 clades from the bird seed, sensible nesting. NO sim changes
+      (determinism + shared worktree safe). FOLLOW-UP: trait-distribution-over-time charts (the other half of
+      M7 data) still open; pairs with the god-panel UI item below (shared charting surface).
 - [ ] **Recurrent / memory brains** (M7+, ARCHITECTURE -> confirm first): add recurrent connections or a
       memory unit so creatures carry state across ticks (path memory, hysteresis). Changes the NN eval +
       invalidates saved brains -> gate + migrate + regenerate seeds. See "Not automated here".

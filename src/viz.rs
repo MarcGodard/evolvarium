@@ -87,8 +87,10 @@ impl Plugin for VizPlugin {
             .init_resource::<ShowLegend>()
             .init_resource::<SunOffset>()
             .init_resource::<Underwater>()
+            .init_resource::<Phylogeny>()
+            .init_resource::<ShowPhylo>()
             .insert_resource(ShowShadows(true)) // shadows on by default (O toggles)
-            .add_systems(Startup, (log_viz_help, spawn_stats_ui, spawn_world_stats_ui, spawn_legend_ui, spawn_daycycle_ui, spawn_underwater_tint, spawn_clouds, set_initial_speed, spawn_minimap))
+            .add_systems(Startup, (log_viz_help, spawn_stats_ui, spawn_world_stats_ui, spawn_legend_ui, spawn_daycycle_ui, spawn_underwater_tint, spawn_clouds, set_initial_speed, spawn_minimap, spawn_phylo_ui))
             .add_systems(
                 Update,
                 (
@@ -111,6 +113,7 @@ impl Plugin for VizPlugin {
                     god_disturbances,
                     draw_selection,
                     (minimap_sync_cam, minimap_input, minimap_rebuild, minimap_dynamic),
+                    (phylogeny_classify, toggle_phylo, update_phylo_panel),
                 ),
             );
     }
@@ -1742,7 +1745,7 @@ fn fire_visuals(fire: Res<Fire>, gen: Res<GenState>, mut gizmos: Gizmos) {
 pub struct ShowSensors(pub bool);
 
 fn log_viz_help() {
-    info!("viz: TAB=orbit/walk (keeps true sim time; [ ] scrub time, \\ noon; swim into the sea: look + W to dive) | hue=diet, vividness=rigidity, size=sensors | color=skin genes (venom=warning tint), head/eyes/legs=genome, size=body | G=sensor rays | SPACE=pause | 1-5=speed +/-=fine | B=seed life P=populate planet L=lightning K=cull | H=legend");
+    info!("viz: TAB=orbit/walk (keeps true sim time; [ ] scrub time, \\ noon; swim into the sea: look + W to dive) | hue=diet, vividness=rigidity, size=sensors | color=skin genes (venom=warning tint), head/eyes/legs=genome, size=body | G=sensor rays | SPACE=pause | 1-5=speed +/-=fine | B=seed life P=populate planet L=lightning K=cull | M=minimap field Y=phylogeny | H=legend");
 }
 
 
@@ -2202,6 +2205,7 @@ CONTROLS
   1-5  speed presets (slow..fast)   + / -  fine speed
   B  seed creatures    P  populate whole planet
   L  lightning fire    K  cull    H  this legend
+  M  cycle minimap field    Y  phylogeny (species tree)
   (P seeds plants+trees+creatures in every habitat)";
 
 fn spawn_legend_ui(mut commands: Commands) {
@@ -2234,6 +2238,244 @@ fn toggle_legend(
             *v = if show.0 { Visibility::Inherited } else { Visibility::Hidden };
         }
     }
+}
+
+// --- Lineage / phylogeny view (M7 data, spec 09 open-q #7). Render-only: online genetic clustering builds a
+// live SPECIES tree from the living population, no sim/spawn changes (keeps determinism + shared worktree safe).
+// Works because offspring resemble parents -> cluster-by-similarity tracks descent; a lineage that drifts past
+// PHY_THRESH from every existing species BUDS a new species whose parent = its nearest relative (its ancestor).
+// 'Y' toggles a panel drawing the species tree (indented by ancestry, colored by clade, live pop + peak + tags).
+const PHY_K: usize = 10; // trait-vector dims (niche-defining heritable genes)
+const PHY_W: [f32; PHY_K] = [2.2, 2.4, 2.0, 1.2, 1.6, 1.4, 1.0, 0.8, 0.9, 0.7]; // weight niche-defining genes up
+const PHY_THRESH: f32 = 0.9; // weighted distance beyond which a creature founds a NEW species
+const PHY_EMA: f32 = 0.03; // centroid drift per member per pass (species slowly tracks its members)
+const PHY_INTERVAL: u32 = 180; // ticks between classification passes (cheap: few species)
+const PHY_MAX_SPECIES: usize = 80; // cap new-species creation (beyond -> force nearest) to bound memory + panel
+const PHY_ROOT: u32 = u32::MAX; // sentinel parent for a founding (root) species
+
+// Niche-defining heritable genes -> trait vector for clustering. Order matches PHY_W.
+fn phy_traits(g: &Genome) -> [f32; PHY_K] {
+    [g.swim, g.flight, g.alpine, g.size, g.carnivory, g.temp_pref, g.bite, g.light_pref, g.height, g.social]
+}
+fn phy_dist(a: &[f32; PHY_K], b: &[f32; PHY_K]) -> f32 {
+    let mut s = 0.0;
+    for i in 0..PHY_K {
+        let d = (a[i] - b[i]) * PHY_W[i];
+        s += d * d;
+    }
+    s.sqrt()
+}
+// Short clade label from a species centroid (what KIND of creature this lineage is).
+fn phy_tags(c: &[f32; PHY_K]) -> String {
+    let (swim, flight, alpine, size, carn, temp) = (c[0], c[1], c[2], c[3], c[4], c[5]);
+    let mut t: Vec<&str> = Vec::new();
+    t.push(if flight > 0.5 { "flier" } else if swim > 0.5 { "swimmer" } else if alpine > 0.5 { "alpine" } else { "land" });
+    t.push(if carn > 0.6 { "carnivore" } else if carn < 0.3 { "herbivore" } else { "omnivore" });
+    if size > 0.62 {
+        t.push("large");
+    } else if size < 0.3 {
+        t.push("small");
+    }
+    if temp < 0.35 {
+        t.push("cold");
+    } else if temp > 0.65 {
+        t.push("warm");
+    }
+    t.join(" ")
+}
+
+struct Species {
+    id: u32,
+    parent: u32, // parent species id; PHY_ROOT = founding/root species
+    centroid: [f32; PHY_K],
+    color: Color,
+    alive: u32, // recomputed each classification pass
+    peak: u32,
+}
+
+#[derive(Resource, Default)]
+struct Phylogeny {
+    species: Vec<Species>,
+    next_id: u32,
+    last_tick: u32,
+    revision: u32,      // bump when species set/counts change -> panel rebuilds
+    lines: Vec<Entity>, // current panel line-entities (despawned + rebuilt on revision change)
+}
+
+#[derive(Resource, Default)]
+struct ShowPhylo(bool);
+#[derive(Component)]
+struct PhyloPanel;
+#[derive(Component)]
+struct PhyloTitle;
+
+// Classify the living population into species every PHY_INTERVAL ticks: assign each creature to its nearest
+// species (drifts the centroid), or bud a NEW species (parent = nearest) when it's past PHY_THRESH from all.
+fn phylogeny_classify(gen: Res<GenState>, creatures: Query<&Genome, With<Creature>>, mut phy: ResMut<Phylogeny>) {
+    let first = phy.last_tick == 0 && phy.species.is_empty();
+    if !first && gen.tick.saturating_sub(phy.last_tick) < PHY_INTERVAL {
+        return;
+    }
+    phy.last_tick = gen.tick.max(1);
+    let tick = gen.tick;
+    for s in &mut phy.species {
+        s.alive = 0;
+    }
+    for g in creatures.iter() {
+        let v = phy_traits(g);
+        let (mut best, mut bi) = (f32::INFINITY, usize::MAX);
+        for (i, s) in phy.species.iter().enumerate() {
+            let d = phy_dist(&v, &s.centroid);
+            if d < best {
+                best = d;
+                bi = i;
+            }
+        }
+        if bi != usize::MAX && (best < PHY_THRESH || phy.species.len() >= PHY_MAX_SPECIES) {
+            let s = &mut phy.species[bi];
+            for k in 0..PHY_K {
+                s.centroid[k] += (v[k] - s.centroid[k]) * PHY_EMA;
+            }
+            s.alive += 1;
+        } else {
+            let parent = if bi == usize::MAX { PHY_ROOT } else { phy.species[bi].id };
+            let id = phy.next_id;
+            phy.next_id += 1;
+            let color = creature_look(g).0;
+            phy.species.push(Species { id, parent, centroid: v, color, alive: 1, peak: 1 });
+        }
+    }
+    for s in &mut phy.species {
+        if s.alive > s.peak {
+            s.peak = s.alive;
+        }
+    }
+    let _ = tick;
+    phy.revision = phy.revision.wrapping_add(1);
+}
+
+// Phylogeny panel sits under the minimap (top-right), hidden until 'Y'. Title child stays; species lines are
+// rebuilt as colored children on revision change.
+fn spawn_phylo_ui(mut commands: Commands) {
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                top: Val::Px(MM_SIZE + MM_MARGIN + 26.0), // below the minimap globe + its label
+                right: Val::Px(MM_MARGIN),
+                flex_direction: FlexDirection::Column,
+                padding: UiRect::all(Val::Px(10.0)),
+                max_width: Val::Px(320.0),
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.02, 0.04, 0.08, 0.86)),
+            Visibility::Hidden,
+            PhyloPanel,
+        ))
+        .with_child((
+            Text::new("PHYLOGENY  [Y]"),
+            TextFont { font_size: 13.0, ..default() },
+            TextColor(Color::srgb(0.9, 0.95, 1.0)),
+            PhyloTitle,
+        ));
+}
+
+// Y toggles the phylogeny panel. Bump revision on open so it rebuilds immediately with current species.
+fn toggle_phylo(keys: Res<ButtonInput<KeyCode>>, mut show: ResMut<ShowPhylo>, mut phy: ResMut<Phylogeny>, mut q: Query<&mut Visibility, With<PhyloPanel>>) {
+    if keys.just_pressed(KeyCode::KeyY) {
+        show.0 = !show.0;
+        if show.0 {
+            phy.revision = phy.revision.wrapping_add(1);
+        }
+        for mut v in &mut q {
+            *v = if show.0 { Visibility::Inherited } else { Visibility::Hidden };
+        }
+    }
+}
+
+// Rebuild the species-tree lines when visible + the species set/counts changed. Shows living species + the
+// ancestor nodes that connect them to a root (extinct dead-end branches hidden), depth-first, indented by
+// ancestry, each line colored by clade.
+fn update_phylo_panel(
+    show: Res<ShowPhylo>,
+    mut phy: ResMut<Phylogeny>,
+    mut commands: Commands,
+    panel: Query<Entity, With<PhyloPanel>>,
+    mut title: Query<&mut Text, With<PhyloTitle>>,
+    mut last_rev: Local<u32>,
+) {
+    if !show.0 || phy.revision == *last_rev {
+        return;
+    }
+    *last_rev = phy.revision;
+    let Ok(panel_e) = panel.single() else { return };
+
+    let n = phy.species.len();
+    // keep = alive, or an ancestor of an alive species (connect the living tree to its roots)
+    let mut keep = vec![false; n];
+    let pos_of = |id: u32| phy.species.iter().position(|s| s.id == id);
+    for i in 0..n {
+        if phy.species[i].alive > 0 {
+            keep[i] = true;
+            let mut p = phy.species[i].parent;
+            while let Some(pi) = pos_of(p) {
+                if keep[pi] {
+                    break;
+                }
+                keep[pi] = true;
+                p = phy.species[pi].parent;
+            }
+        }
+    }
+    // effective parent: ROOT if the real parent isn't kept (orphan -> a root)
+    let kept_ids: std::collections::HashSet<u32> = (0..n).filter(|&i| keep[i]).map(|i| phy.species[i].id).collect();
+    let eff: Vec<u32> = (0..n)
+        .map(|i| {
+            let p = phy.species[i].parent;
+            if p != PHY_ROOT && kept_ids.contains(&p) { p } else { PHY_ROOT }
+        })
+        .collect();
+    // pre-order DFS from roots (parent id PHY_ROOT); children ordered by id (= birth order) -> indented tree
+    let mut rows: Vec<(usize, usize)> = Vec::new(); // (species index, depth)
+    fn preorder(species: &[Species], keep: &[bool], eff: &[u32], pid: u32, depth: usize, rows: &mut Vec<(usize, usize)>) {
+        let mut kids: Vec<usize> = (0..species.len()).filter(|&i| keep[i] && eff[i] == pid).collect();
+        kids.sort_by_key(|&i| species[i].id);
+        for i in kids {
+            rows.push((i, depth));
+            preorder(species, keep, eff, species[i].id, depth + 1, rows);
+        }
+    }
+    preorder(&phy.species, &keep, &eff, PHY_ROOT, 0, &mut rows);
+
+    // snapshot display data (release phy borrow before spawning)
+    let alive_total: u32 = phy.species.iter().map(|s| s.alive).sum();
+    let alive_species = phy.species.iter().filter(|s| s.alive > 0).count();
+    let total_species = phy.species.len();
+    let display: Vec<(String, Color)> = rows
+        .iter()
+        .map(|&(i, depth)| {
+            let s = &phy.species[i];
+            let mark = if s.alive > 0 { "●" } else { "·" };
+            let line = format!("{}{} sp{} {}  x{} (pk {})", "  ".repeat(depth), mark, s.id, phy_tags(&s.centroid), s.alive, s.peak);
+            let col = if s.alive > 0 { s.color } else { s.color.with_alpha(0.45) };
+            (line, col)
+        })
+        .collect();
+
+    if let Ok(mut t) = title.single_mut() {
+        t.0 = format!("PHYLOGENY  {} alive / {} ever, {} creatures  [Y]", alive_species, total_species, alive_total);
+    }
+    for e in phy.lines.drain(..) {
+        commands.entity(e).despawn();
+    }
+    let mut new_lines = Vec::with_capacity(display.len());
+    for (line, col) in display {
+        let e = commands
+            .spawn((Text::new(line), TextFont { font_size: 12.0, ..default() }, TextColor(col), ChildOf(panel_e)))
+            .id();
+        new_lines.push(e);
+    }
+    phy.lines = new_lines;
 }
 
 // Unicode sparkline of history series, scaled 0..max.
