@@ -75,6 +75,7 @@ fn force_niche(g: &mut Genome, n: Niche) {
         Niche::Aerial => {
             g.flight = 0.7;
             g.swim = 0.0;
+            g.size = 0.15; // birds small: wing loading (FLIGHT_SIZE_LIFT) punishes heavy fliers -> start light
         }
         Niche::Highland => g.alpine = 0.7,
         Niche::Cold => g.temp_pref = 0.15,

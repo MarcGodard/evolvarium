@@ -22,7 +22,7 @@ const NICHES = [
   { name: 'tree-climber',     band: [0.3, 0.7],  wetness: 0.6,  food: ['Clover', 'TREE', 'TREE'], hint: { climb: 0.7, size: 0.18, height: 0.2 } },
   { name: 'arid-desert',      band: [0.5, 0.9],  wetness: 0.15, food: ['Cactus', 'Thistle'],   hint: { temp_pref: 0.8, adiposity: 0.7, size: 0.3 } },
   // aerial: the bird niche (flight gene). Flies over a temperate band, lands to feed on ground plants.
-  { name: 'aerial-forager',   band: [0.1, 0.55], wetness: 0.5,  food: ['BerryBush', 'Wildflower'], hint: { flight: 0.7, size: 0.22, temp_pref: 0.6, eyes: 0.6 } },
+  { name: 'aerial-forager',   band: [0.1, 0.55], wetness: 0.5,  food: ['BerryBush', 'Wildflower'], hint: { flight: 0.7, size: 0.15, temp_pref: 0.6, eyes: 0.6 } },
 ]
 
 const BIN = './target/release/evolvarium' // release: scenario sims run ~3x faster over many tuning rounds

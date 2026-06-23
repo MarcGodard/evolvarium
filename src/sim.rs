@@ -2537,7 +2537,9 @@ pub fn live_step(
             + MAG_COST * mexpr // magnetoreception organ + neural processing (no free lunch)
             + LONGEVITY_COST * (lifespan_mult - 1.0).max(0.0) // a long-lived body costs more to maintain
             + SWIM_LAND_COST * genome.swim * (1.0 - wet_here) // fins are a liability on dry land
-            + FLIGHT_ALT_COST * genome.flight * air_here // flapping to hold altitude burns fuel (gene x height)
+            + (FLIGHT_ALT_COST + FLIGHT_SIZE_LIFT * genome.size) // wing loading: heavy body costs more to lift -> selects SMALL birds
+                * genome.flight * air_here
+                * (1.0 - GLIDE_RELIEF * genome.flight * move_thrust.abs()).max(0.25) // glide: fast forward flight soars cheap (airspeed lift)
             + FLIGHT_GROUND_COST * genome.flight * (1.0 - air_here) // big wings clumsy when grounded (mirror SWIM_LAND_COST)
             + WATER_PRESSURE_COST * (1.0 - genome.swim) * (-h1 / crate::sphere::SEA_FLOOR_MAX).clamp(0.0, 1.0) // non-swimmers struggle in deep water (depth pressure)
             + FAT_UPKEEP * genome.adiposity * fat_frac // carrying fat costs upkeep (no free lunch)

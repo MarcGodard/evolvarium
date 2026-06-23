@@ -98,7 +98,7 @@ pub const HEIGHT_COST: f32 = 0.7; // energy/sec upkeep per unit height (tall rea
 // maintain. Small = nimble + cheap; large = tank. Physical axis visualizer shows as scale.
 pub const SIZE_ENERGY: f32 = 1.0;  // fat-store ceiling scales: fat_cap *= (1 + this*size)
 pub const SIZE_COMBAT: f32 = 0.5;  // added to bite as effective combat power in predation (mass wins fights)
-pub const SIZE_BASAL: f32 = 1.6;   // energy/sec extra basal upkeep at full size (big bodies cost to maintain)
+pub const SIZE_BASAL: f32 = 2.8;   // energy/sec extra basal upkeep at full size (big bodies cost to maintain)
 pub const SIZE_MOVE: f32 = 1.2;    // move cost mult scales (1 + this*size) (more mass to push)
 // Swim (aquatic): in water/wet lowland a swimmer moves faster + cheaper (exploits river + productive
 // moist shoreline -> "fish" niche); on dry high ground its fins are liability (move penalty).
@@ -128,8 +128,16 @@ pub const FLIGHT_BUOYANCY: f32 = 1.2;   // passive relax/sec toward cruise altit
                                         // hover aloft, fish hover mid-water, even with a neutral brain). Brain
                                         // out[6] climbs/descends around it; landing to eat = sustained descend.
 pub const FLIGHT_CRUISE: f32 = 0.15;    // resting altitude as fraction of medium ceiling (where buoyancy settles). Low so fliers FORAGE near ground (within EAT_RADIUS 1.1 of ground food) + pop up to travel/escape. At 0.55 a flier hovered ~2.3 alt >> eat range -> untrained birds starved before learning to dive (bootstrap death).
-pub const FLIGHT_ALT_COST: f32 = 1.5;   // energy/sec to hold full altitude (flapping upkeep). Lowered 2.5->1.5 (balance harness): aerial niche couldn't net-forage on the wing -> needed constant rescue. Cheaper cruise lets birds self-sustain.
-pub const FLIGHT_GROUND_COST: f32 = 3.0;// energy/sec penalty for full flight gene while grounded (clumsy wings)
+pub const FLIGHT_ALT_COST: f32 = 0.8;   // energy/sec BASE to hold full altitude (small-bird flapping upkeep). Lowered 1.5->0.8: birds must be SMALL + CHEAP aloft (wing-loading via FLIGHT_SIZE_LIFT adds the body-mass cost on top). Cheap base lets a small flier self-sustain on the wing.
+// Wing loading: big body costs MUCH more to hold aloft (mass to lift). Adds to FLIGHT_ALT_COST per unit
+// size, so flight selects SMALL birds (a heavy flier can't pay its altitude). Small (size 0.15) flier ~free;
+// big (size 0.6) flier punished -> aerial niche evolves toward tiny light bodies.
+pub const FLIGHT_SIZE_LIFT: f32 = 3.0;
+// Glide ("slide"): fast FORWARD flight discounts altitude cost (airspeed gives lift -> stop flapping, soar).
+// Scales with flight gene x forward effort: a fast strong flier cruising barely pays to stay up; a hovering
+// flier pays full. Max discount = this * flight * move_thrust (capped so cost stays positive).
+pub const GLIDE_RELIEF: f32 = 0.7;
+pub const FLIGHT_GROUND_COST: f32 = 2.0;// energy/sec penalty for full flight gene while grounded (clumsy wings). Lowered 3.0->2.0 so landing to feed on ground food isn't brutal (birds still feed grounded until aerial food exists).
 pub const GROUND_EPS: f32 = 0.4;        // altitude below this = "on the ground" (can drown). Eating/predation/
                                         // collision need no vertical gate: all key off 3D translation, so an
                                         // airborne flier is auto > EAT_RADIUS/ATTACK_RADIUS from ground stuff.
@@ -424,7 +432,7 @@ pub const R_EAT: f32 = 1.0; // bonus reward on tick food eaten
 // --- M4 creature expansion: physiology + morphology gene costs/effects (see plan + 02/03) ---
 // size = energy use: basal upkeep scales SUPER-LINEARLY with body size (allometry), so big body markedly
 // hungrier per mass. size still buys storage/combat/reach (above) -> big = powerful but dear.
-pub const SIZE_BASAL_EXP: f32 = 1.5; // allometric exponent: size basal term = SIZE_BASAL * size^this
+pub const SIZE_BASAL_EXP: f32 = 2.0; // allometric exponent: size basal term = SIZE_BASAL * size^this
 // detox (liver): clears toxic_load; costs basal upkeep.
 pub const DETOX_COST: f32 = 0.5; // energy/sec basal at full detox (running a big liver costs)
 // toxic load: ingested toxins (plant tox, rotten meat, fermented spoilage, venomous prey, protein excess)
