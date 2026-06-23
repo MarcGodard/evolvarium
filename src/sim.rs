@@ -2276,6 +2276,7 @@ pub fn live_step(
         let mut sd = vec![f32::INFINITY; n_s]; // nearest dist per sensor
         let mut skind = vec![0u8; n_s]; // food kind of nearest sensor-food
         let mut nearest_tree_d2 = f32::INFINITY; // nearest tree (canopy shade), any kind
+        let flier = genome.flight >= FLIGHT_KNEE; // bird: picks fruit from the canopy by HORIZONTAL distance (any altitude)
         let _r = max_range.max(NEAR_QUERY);
         // scan a neighborhood of food-grid (lon/lat) cells around this creature. SPAN cells each way covers
         // sensor + near-query radius at this grid res. (Longitude doesn't wrap here + pole cells narrow -> minor
@@ -2295,7 +2296,14 @@ pub fn live_step(
                         continue;
                     }
                     let to = f.1 - pos;
-                    let d2 = to.length_squared();
+                    let mut d2 = to.length_squared();
+                    // fruit tree (f.5 = Some(true)): fruit is up in the CANOPY. A flier targets it by HORIZONTAL
+                    // distance (strip the altitude gap) so a bird cruising near a tree homes on the crown fruit
+                    // from any height. Ground creatures keep 3D distance (reach the base, climb/height gates up).
+                    if flier && matches!(f.5, Some(true)) {
+                        let horiz = to - to.dot(pdir) * pdir; // remove radial (altitude) component
+                        d2 = horiz.length_squared();
+                    }
                     if best.is_none_or(|(_, bd2)| d2 < bd2) {
                         best = Some((i, d2));
                     }
@@ -2577,13 +2585,26 @@ pub fn live_step(
             let seed = foods[i].7.clone(); // Some(genome) -> fallen fruit carrying a viable seed (planted if eaten ripe)
             // eat-gate (out[4]): ingestion is a CHOICE -> brain can refuse bad food (unripe/spoiled/toxic).
             // EAT_GATE sits BELOW the fresh-net 0.5 baseline so founders feed before learning (no gen-0 starve).
-            if out[4] > EAT_GATE && np.distance(fp) < EAT_RADIUS {
-                // trees: reach an EDIBLE tree if height + TREE_REACH_MARGIN, EXTENDED by tree branches
-                // (BRANCH_REACH), >= tree height. Tall bare tree feeds only tall creatures; branchy one hangs
-                // fruit low for short creatures too. Evergreens never eatable. Plants/carrion: bite vs defense.
-                let tree_reach = genome.height + TREE_REACH_MARGIN + pg.branches * BRANCH_REACH + CLIMB_REACH * genome.climb;
+                // fruit-tree eating uses HORIZONTAL distance for a flier (picks from the canopy at any altitude);
+                // everyone else uses 3D (reach the base from the ground). Plants/carrion always 3D.
+                let eat_dist = if flier && matches!(tree, Some(true)) {
+                    let to = fp - np;
+                    let pnorm = np.normalize_or_zero();
+                    (to - to.dot(pnorm) * pnorm).length() // strip altitude gap -> horizontal proximity to crown
+                } else {
+                    np.distance(fp)
+                };
+                if out[4] > EAT_GATE && eat_dist < EAT_RADIUS {
+                // fruit hangs at the crown, pulled DOWN by branches: branchy tree offers fruit LOW (short creatures
+                // reach it); a bare tree holds fruit only at the TOP (tall/climbers/fliers). fruit_height = tree
+                // height minus the branch drop. Ground creature reaches up to height+margin+climb; FLIERS reach
+                // ANY crown (wings clear the canopy) = flight payoff + birds become fruit dispersers (a low-height
+                // bird still counts as "short" below -> 0 tree damage, just picks + disperses fruit). Evergreens
+                // never eatable. Plants/carrion: bite vs defense.
+                let fruit_height = (pg.height - pg.branches * BRANCH_REACH).max(0.0);
+                let ground_reach = genome.height + TREE_REACH_MARGIN + CLIMB_REACH * genome.climb;
                 let success = match tree {
-                    Some(edible) => edible && tree_reach >= pg.height,
+                    Some(edible) => edible && (flier || ground_reach >= fruit_height),
                     // plant: creature must be tall enough to reach it (height defense) AND bite its defense
                     None => {
                         genome.height + 0.15 >= pg.height
