@@ -1,7 +1,6 @@
 /target
 *.png
 seed-new.json
-evolved-morph.json
 gait-best.json
 gymseed.json
 creature-seed.json
