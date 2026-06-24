@@ -2725,12 +2725,19 @@ pub fn live_step(
         // flailing while exhausted is a net loss -> resting to recover is the only way out. Bracing (defend)
         // immobilizes: trade ground speed for a harder-to-kill stance.
         let move_thrust = thrust * (1.0 - FATIGUE_DRAG * diet.fatigue) * (1.0 - BRACE_DRAG * out[3]);
+        // M5: geometry-derived stats of the evolved body (cached on genome at spawn; cheap fallback if absent)
+        let morph = genome.morph.unwrap_or_else(|| crate::morph::Morphometrics::of(&genome.body));
         // metabolic tempo: frugal (metab>0.5) trades top speed for cheaper basal; fast (metab<0.5) reverse
         let metab_f = genome.metab - 0.5; // -0.5 fast .. +0.5 frugal
+        // shape -> locomotion: extra legs grip land, fins thrust in water, a bluff cross-section drags in water
+        let morph_land = 1.0 + MORPH_TRACTION * (morph.ground_contacts as f32 - MORPH_GC_REF) * (1.0 - wet_here);
+        let morph_water = 1.0 + (MORPH_FIN * morph.fin_area - MORPH_DRAG * (morph.frontal_area - MORPH_AREA_REF).max(0.0)) * wet_here;
         let speed = MOVE_SPEED
             * (1.0 + SWIM_SPEED * genome.swim * wet_here) // swimmers fast in water
             * (1.0 + FLIGHT_SPEED * genome.flight * air_here) // fliers fast aloft (gene x altitude)
             * (1.0 + LIMB_TRACTION * genome.limbs * (1.0 - wet_here)) // more legs = land traction (ground speed)
+            * morph_land.max(0.4) // body-shape land traction (ground-contact count)
+            * morph_water.max(0.4) // body-shape water thrust/drag (fins vs bluff cross-section)
             * (1.0 - 0.5 * metab_f)
             * (1.0 + SPRINT_BOOST * sprint); // sprint: burst speed for chase/flee
 
@@ -2831,7 +2838,7 @@ pub fn live_step(
         let warm_miss = (temp_here - genome.temp_pref).max(0.0); // warmer than preferred (pelt hurts)
         energy.burn((BASAL_COST * (1.0 - 0.6 * metab_f) // frugal metabolism lowers the cost of living
             + SIZE_BASAL * genome.size.powf(SIZE_BASAL_EXP) // size = energy use: basal scales allometrically with mass
-            + MOVE_COST * (1.0 + SIZE_MOVE * genome.size + ARMOR_MOVE * genome.armor + LIMB_MOVE_COST * genome.limbs) * thrust * thrust // mass + plates + legs to push
+            + MOVE_COST * (1.0 + SIZE_MOVE * genome.size + ARMOR_MOVE * genome.armor + LIMB_MOVE_COST * genome.limbs + MORPH_MASS_MOVE * (morph.mass - MORPH_MASS_REF).max(0.0)) * thrust * thrust // mass + plates + legs + evolved-body mass to push
             + BITE_COST * genome.bite
             + ROCK_MOVE_COST * rock * thrust.abs() * (1.0 - ALPINE_RELIEF * genome.alpine) // alpine climbers cross rock cheaply
             + ALPINE_FLAT_COST * genome.alpine * (1.0 - rock) // heavy mountain build wastes energy on flat ground
@@ -2856,6 +2863,9 @@ pub fn live_step(
             + (FLIGHT_ALT_COST + FLIGHT_SIZE_LIFT * genome.size) // wing loading: heavy body costs more to lift -> selects SMALL birds
                 * genome.flight * air_here
                 * (1.0 - GLIDE_RELIEF * genome.flight * move_thrust.abs()).max(0.25) // glide: fast forward flight soars cheap (airspeed lift)
+                * (1.0 - MORPH_WING_RELIEF * morph.wing_area).max(0.3) // evolved wings provide lift -> cheaper to stay aloft
+            + MORPH_TISSUE_COST * (morph.part_count as f32 - MORPH_PARTS_REF).max(0.0) // running an elaborate many-part body
+            + MORPH_MASS_BASAL * (morph.mass - MORPH_MASS_REF).max(0.0) // a heavy evolved body costs more at rest
             + FLIGHT_GROUND_COST * genome.flight * (1.0 - air_here) // big wings clumsy when grounded (mirror SWIM_LAND_COST)
             + FLIGHT_SWIM_CONFLICT * genome.flight * genome.swim // wings + fins antagonistic: can't be BOTH flier AND swimmer -> high-flight forced low-swim (drowns in water), high-swim forced low-flight (can't fly). Keeps fliers out of water + swimmers out of air.
             + WATER_PRESSURE_COST * (1.0 - genome.swim) * (-h1 / crate::sphere::SEA_FLOOR_MAX).clamp(0.0, 1.0) // non-swimmers struggle in deep water (depth pressure)
@@ -2911,7 +2921,7 @@ pub fn live_step(
                 // bird still counts as "short" below -> 0 tree damage, just picks + disperses fruit). Evergreens
                 // never eatable. Plants/carrion: bite vs defense.
                 let fruit_height = (pg.height - pg.branches * BRANCH_REACH).max(0.0);
-                let ground_reach = genome.height + TREE_REACH_MARGIN + CLIMB_REACH * genome.climb;
+                let ground_reach = genome.height + TREE_REACH_MARGIN + CLIMB_REACH * genome.climb + MORPH_REACH_BROWSE * (morph.reach - MORPH_REACH_REF).max(0.0); // a tall evolved body (long neck/legs) browses higher
                 let success = match tree {
                     Some(edible) => edible && (flier || ground_reach >= fruit_height),
                     // plant: creature must be tall enough to reach it (height defense) AND bite its defense

@@ -505,6 +505,24 @@ pub const HEAD_BASAL: f32 = 0.4;        // energy/sec basal at full head (carryi
 // Scaled by mag_expression (`magneto` gene switch), so sense only worth keeping where it pays off.
 pub const MAG_COST: f32 = 0.25;         // energy/sec basal at full magneto expression (no free lunch)
 
+// --- M5 generative morphology: geometry-derived costs/benefits (morph.rs Morphometrics). Couplings are
+// GENTLE deviations from a reference body so a typical founder ~= neutral; the harness (P2) refines balance.
+// "No free lunch": an elaborate/heavy body costs more to run + move; legs help on land; fins help in water;
+// wings ease flight; a tall body browses higher.
+pub const MORPH_PARTS_REF: f32 = 5.0;   // reference developed-part count (above = tissue-upkeep penalty)
+pub const MORPH_MASS_REF: f32 = 2.5;    // reference body mass (Σvolume); above = basal + move penalty
+pub const MORPH_GC_REF: f32 = 4.0;      // reference ground-contact count (legs); above = land-traction bonus
+pub const MORPH_AREA_REF: f32 = 1.5;    // reference frontal cross-section (above = extra water drag)
+pub const MORPH_REACH_REF: f32 = 2.2;   // reference body reach (above = taller browse reach)
+pub const MORPH_TISSUE_COST: f32 = 0.05; // energy/sec per developed part above ref (running more tissue)
+pub const MORPH_MASS_BASAL: f32 = 0.12;  // energy/sec per mass-unit above ref (bigger body, higher basal)
+pub const MORPH_MASS_MOVE: f32 = 0.25;   // move-cost mult add per mass-unit above ref (heavy = costly to push)
+pub const MORPH_TRACTION: f32 = 0.03;    // land-speed mult per ground-contact above ref (more legs = grip)
+pub const MORPH_FIN: f32 = 0.04;         // swim-speed mult per unit fin area (caudal/pectoral thrust)
+pub const MORPH_DRAG: f32 = 0.05;        // swim-speed mult LOSS per frontal-area unit above ref (bluff body)
+pub const MORPH_WING_RELIEF: f32 = 0.06; // flight-cost fraction removed per unit wing area (lift), capped
+pub const MORPH_REACH_BROWSE: f32 = 0.18; // browse-reach added per body-reach unit above ref
+
 // --- M4 brain inputs + need-for-shade (Phase 3) ---
 // threat sense: nearby creature with enough COMBAT edge over you registers as predator -> brain can learn
 // to flee (threat_dist/threat_bearing inputs).

@@ -126,6 +126,11 @@ pub struct Genome {
     // scalars. serde default = single capsule -> old saves load + render as today's creature.
     #[serde(default = "crate::morph::default_body")]
     pub body: crate::morph::BodyGraph,
+
+    // Cached geometry-derived stats of `body` (mass/reach/areas/limbs). NOT serialized (derived from body):
+    // populated by ensure_net_shape at every spawn so live_step reads it without re-developing per tick.
+    #[serde(skip)]
+    pub morph: Option<crate::morph::Morphometrics>,
 }
 
 // serde defaults for traits absent in old saves
@@ -299,6 +304,7 @@ impl Genome {
             flight: if rng.f32() < 0.15 { rng.range(0.55, 1.0) } else { rng.f32() * rng.f32() * 0.4 },
             beak: rng.f32() * rng.f32(), // skew short snouts; few long beaks/snouts
             body: crate::morph::BodyGraph::random(rng), // generative body-graph (mesh + derived stats)
+            morph: None, // populated at spawn (ensure_net_shape)
         }
     }
 
@@ -331,6 +337,7 @@ impl Genome {
         pad_net_ho(&mut self.net, OUTPUTS);
         pad_plast_ho(&mut self.plast, OUTPUTS);
         self.ensure_cosmetic(); // backfill body-plan genes on saves predating them -> loaded pop looks varied at once
+        self.morph = Some(crate::morph::Morphometrics::of(&self.body)); // cache derived stats for live_step
     }
 
     // Old saves lack body-plan render genes (elongate/tail/fin) -> all-zero loads as identical capsules, so a
