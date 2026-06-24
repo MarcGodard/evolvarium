@@ -130,7 +130,7 @@ fn toggle_mode(
     *mode = match *mode {
         CameraMode::Orbit => {
             selected.follow = false;
-            info!("camera: ORRERY mode (TSN solar system: right-drag rotate, scroll zoom, TAB to walk)");
+            info!("camera: ORRERY mode (TSN solar system: right-drag rotate, scroll zoom in/out, TAB to walk). Overlays: T traces, G ecliptic grid, Z zodiac, B labels, L constellations");
             CameraMode::Orrery
         }
         CameraMode::Orrery => {
@@ -216,7 +216,7 @@ fn apply_orbit(mode: Res<CameraMode>, selected: Res<Selected>, mut q: Query<(&mu
 
 // --- orrery mode (TSN solar system at the far ORRERY_CENTER) ---
 
-const ORRERY_MIN_DIST: f32 = 60.0;   // close in on the inner bodies
+const ORRERY_MIN_DIST: f32 = 6.0;    // fly right in to resolve close pairs (moon by Earth, Mars' moons)
 const ORRERY_MAX_DIST: f32 = 8000.0; // whole system incl. outer planets (kept under the 12k far clip)
 
 fn orrery_drag(

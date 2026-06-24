@@ -106,6 +106,11 @@ pub fn body_positions(tau: f32) -> Vec<Vec3> {
     world_positions(tau)
 }
 
+/// Body's own deferent/epicycle angular speed (rad/year). For sizing orbit-trace sample windows.
+pub fn body_speed(idx: usize) -> f32 {
+    TABLE[idx].speed
+}
+
 // --- precession (slow binary orbit on REAL time) ---
 fn solve_ecc_anomaly(m: f32, e: f32) -> f32 {
     let m = m.rem_euclid(TAU);
