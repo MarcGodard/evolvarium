@@ -31,6 +31,7 @@ impl Plugin for OrreryViewPlugin {
                 Update,
                 (
                     position_orrery_bodies,
+                    size_sirius,
                     pick_orrery,
                     toggle_constellations,
                     orrery_scene_visibility,
@@ -75,12 +76,18 @@ fn constellation_visibility(
 
 // --- toggleable orrery overlays: orbit traces (T), ecliptic grid (G), zodiac (Z), labels (B) ---
 
-#[derive(Resource, Default)]
+#[derive(Resource)]
 struct Overlays {
     traces: bool,
     grid: bool,
     zodiac: bool,
     labels: bool,
+}
+impl Default for Overlays {
+    fn default() -> Self {
+        // labels ON by default so bodies + bright named stars are identifiable on arrival (B toggles).
+        Overlays { traces: false, grid: false, zodiac: false, labels: true }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -95,7 +102,15 @@ struct OrreryOverlay(OverlayKind);
 enum SkyLabel {
     Body(usize),
     Zodiac(usize),
+    Star(usize), // index into StarCatalog: bright named stars (Capella, Pollux...)
+    Sirius,      // the binary companion body (on the precession orbit), not a catalog dot
 }
+
+// Sirius (Earth's binary companion driving the 24,000-yr precession) rendered as a bright body far out along
+// the apsidal line (sirius_dir). Distinct from the faint catalog Sirius; this is the modeled companion.
+#[derive(Component)]
+struct SiriusBody;
+const D_SIRIUS: f32 = 7000.0; // render distance from the system center (inside the 9000 star shell)
 
 const ZODIAC: [&str; 12] = [
     "Aries", "Taurus", "Gemini", "Cancer", "Leo", "Virgo", "Libra", "Scorpio", "Sagittarius", "Capricorn", "Aquarius", "Pisces",
@@ -268,12 +283,20 @@ fn spawn_sky_labels(mut commands: Commands) {
     for (k, name) in ZODIAC.iter().enumerate() {
         mk(&mut commands, name.to_string(), SkyLabel::Zodiac(k));
     }
+    mk(&mut commands, "Sirius".to_string(), SkyLabel::Sirius);
+    // bright named stars (Capella, Pollux, Sirius's neighbors...): label the brightest with proper names.
+    for (i, st) in crate::stars::star_catalog().iter().enumerate() {
+        if st.name.is_some() && st.mag < 2.0 {
+            mk(&mut commands, st.label(), SkyLabel::Star(i));
+        }
+    }
 }
 
 fn update_sky_labels(
     mode: Res<CameraMode>,
     ov: Res<Overlays>,
     gen: Res<crate::sim::GenState>,
+    catalog: Option<Res<crate::viz::StarCatalog>>,
     cam: Query<(&Camera, &GlobalTransform), With<crate::camera::OrreryCam>>,
     mut q: Query<(&SkyLabel, &mut Node, &mut Visibility)>,
 ) {
@@ -287,6 +310,11 @@ fn update_sky_labels(
             SkyLabel::Zodiac(k) => {
                 let lon = TAU * *k as f32 / 12.0 + TAU / 24.0; // center of each 30-deg sign
                 (ORRERY_CENTER + Vec3::new(lon.cos(), 0.0, lon.sin()) * r, on && ov.zodiac)
+            }
+            SkyLabel::Sirius => (ORRERY_CENTER + crate::orrery::sirius_dir() * D_SIRIUS, on && ov.labels),
+            SkyLabel::Star(i) => {
+                let dir = catalog.as_ref().and_then(|c| c.0.get(*i)).map(|s| s.dir).unwrap_or(Vec3::Z);
+                (ORRERY_CENTER + dir * STAR_SHELL, on && ov.labels)
             }
         };
         let mut visible = false;
@@ -416,7 +444,34 @@ fn spawn_orrery_bodies(
             bevy::light::NotShadowCaster,
         ));
     }
-    info!("orrery view: spawned TSN bodies at {:?}; press TAB to reach it (Orbit -> Orrery -> Walk)", ORRERY_CENTER);
+    // Sirius: the binary companion, far out along the apsidal line. Bright blue-white (Sirius A is blue-white).
+    commands.spawn((
+        SiriusBody,
+        OrreryScenery,
+        Mesh3d(unit.clone()),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::WHITE,
+            emissive: LinearRgba::rgb(3.2, 3.5, 4.4),
+            unlit: true,
+            ..default()
+        })),
+        Transform::from_translation(ORRERY_CENTER + crate::orrery::sirius_dir() * D_SIRIUS).with_scale(Vec3::splat(20.0)),
+        Visibility::Hidden,
+        bevy::light::NotShadowCaster,
+    ));
+    info!("orrery view: spawned TSN bodies + Sirius; press TAB to reach it (Orbit -> Orrery -> Walk)");
+}
+
+// Keep Sirius a visible size at any zoom (constant angular size, like the planets).
+fn size_sirius(mode: Res<CameraMode>, cam: Query<&crate::camera::OrreryCam>, mut q: Query<&mut Transform, With<SiriusBody>>) {
+    if *mode != CameraMode::Orrery {
+        return;
+    }
+    let dist = cam.single().map(|c| c.dist).unwrap_or(1800.0);
+    let r = body_render_radius(6.0, dist);
+    for mut tf in &mut q {
+        tf.scale = Vec3::splat(r);
+    }
 }
 
 // Render radius for a body: CONSTANT angular size (scales with camera distance) so every body, even the tiny
