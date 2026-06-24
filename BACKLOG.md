@@ -154,6 +154,25 @@ pholmq/TSN (GPL-2.0) @ commit 49fd49c (pinned in `orrery.rs` + `stars.rs` commen
       (float like a duck) + swimmers. Refactor only, behavior identical.
 - [ ] **Balance-phase follow-ups** (visuals-first now): dive-hunting tuning, flier predator niche, flock/school
       cohesion at altitude, HUD flier count.
+- [ ] **FLAGSHIP (balance phase): body SHAPE under selection — morphology emerges, not decoration.** Today
+      several shape genes (`elongate`, `head`, `tail`, `fin`, `limbs`-count) are PURE COSMETICS: they mutate +
+      inherit but nothing in `sim.rs`/`config.rs` reads them, so proportion drifts randomly. Only `size`,
+      `height`, `climb`, `eyes`, `swim`, `flight` pay rent. Make proportions functional so body plans are an
+      emergent optimum per biome instead of being declared by hard switches (`swim>0.45`->fish, `flight>0.5`
+      ->bird). Proposed trade-offs (each gene needs a benefit AND a cost, mirror the no-free-lunch pattern used
+      for `magneto`/`armor`):
+      - `elongate`: + lower swim drag + burst speed + slips into cover; − less body volume -> smaller energy
+        store + worse cold tolerance (surface-area heat loss).
+      - `fin`/`tail`: + swim thrust + turn rate; − drag + mass on land when not swimming.
+      - `limbs` (count/length): + land move speed + grip/climb; − metabolic upkeep per limb + swim drag.
+      - `head`: + bite leverage + sensor capacity (room for more eyes); − upkeep + slower turn.
+      - `girth`: + energy/fat store + armor capacity; − agility loss + higher upkeep.
+      Bigger move: replace the niche SWITCHES with GRADIENTS (lift ~ `flight` and costs mass; partial-swimmers
+      viable) so eels/octopuses/hawks/sprinters are discovered by pressure, not coded forks. Needs a small
+      water-drag model (cross-section x elongate x fins), a land-locomotion cost model (limbs x height x
+      girth), and a reach model for browsing. Gate/regenerate saved seeds (changes fitness landscape). Verify
+      carrying capacity holds (~70-90) per the balance gate. NOTE (idea from user 2026-06-24): "would be so
+      much cooler if shape, not just size, was under genetic pressure" — exactly this.
 
 ### Magnetic field + magnetoreception (2026-06-22)
 - [x] **Tilted geomagnetic dipole** (`sphere.rs`): `MAG_TILT` + `mag_pole_dir` (magnetic north ~11.5 deg off
