@@ -207,8 +207,11 @@ fn spawn_overlays(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut 
     over(build_zodiac_marks(r * 0.99), OverlayKind::Zodiac, Color::srgb(0.45, 0.35, 0.5), &mut commands, &mut meshes, &mut materials);
 }
 
-// T traces, G grid, Z zodiac, B labels. (L constellations handled separately.)
-fn toggle_overlays(keys: Res<ButtonInput<KeyCode>>, mut ov: ResMut<Overlays>) {
+// T traces, G grid, Z zodiac, B labels. Orrery-mode only (these keys do planet things otherwise).
+fn toggle_overlays(keys: Res<ButtonInput<KeyCode>>, mode: Res<CameraMode>, mut ov: ResMut<Overlays>) {
+    if *mode != CameraMode::Orrery {
+        return;
+    }
     if keys.just_pressed(KeyCode::KeyT) {
         ov.traces = !ov.traces;
     }
@@ -351,9 +354,9 @@ pub struct OrreryBody {
 #[derive(Component)]
 struct ConstellationLines;
 
-// Toggle constellation lines with L (off by default); constellation_visibility applies it (orrery only).
-fn toggle_constellations(keys: Res<ButtonInput<KeyCode>>, mut show: ResMut<ShowConstellations>) {
-    if keys.just_pressed(KeyCode::KeyL) {
+// Toggle constellation lines with L (orrery-mode only; L is "lightning fire" on the planet).
+fn toggle_constellations(keys: Res<ButtonInput<KeyCode>>, mode: Res<CameraMode>, mut show: ResMut<ShowConstellations>) {
+    if *mode == CameraMode::Orrery && keys.just_pressed(KeyCode::KeyL) {
         show.0 = !show.0;
     }
 }

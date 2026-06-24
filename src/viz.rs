@@ -90,6 +90,7 @@ impl Plugin for VizPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ShowSensors>()
             .init_resource::<Selected>()
+            .init_resource::<ShowHud>()
             .init_resource::<ShowLegend>()
             .init_resource::<SunOffset>()
             .init_resource::<Underwater>()
@@ -118,7 +119,7 @@ impl Plugin for VizPlugin {
                     toggle_legend,
                     (god_disturbances, crate::sim::save_world_key, crate::sim::save_on_window_close),
                     draw_selection,
-                    (minimap_sync_cam, minimap_visibility, hud_visibility, planet_sky_visibility, minimap_input, minimap_rebuild, minimap_dynamic),
+                    (minimap_sync_cam, minimap_visibility, toggle_hud, hud_visibility, planet_sky_visibility, minimap_input, minimap_rebuild, minimap_dynamic),
                     (phylogeny_classify, toggle_phylo, update_phylo_panel),
                 ),
             );
@@ -289,13 +290,29 @@ fn minimap_visibility(
     }
 }
 
-// Planet HUD (world stats, inspector, day cycle, legend) is irrelevant in the orrery solar-system view: hide
-// it there so the sky reads clean. (Minimap handled separately by minimap_visibility.)
+// Master HUD toggle (H). The planet HUD (world stats, inspector hint, day cycle) is hidden when toggled off
+// OR in the orrery view. (Legend has its own toggle; minimap handled by minimap_visibility.)
+#[derive(Resource)]
+pub struct ShowHud(pub bool);
+impl Default for ShowHud {
+    fn default() -> Self {
+        ShowHud(true)
+    }
+}
+
+fn toggle_hud(keys: Res<ButtonInput<KeyCode>>, mut show: ResMut<ShowHud>) {
+    if keys.just_pressed(KeyCode::KeyH) {
+        show.0 = !show.0;
+    }
+}
+
 fn hud_visibility(
     mode: Res<crate::camera::CameraMode>,
-    mut q: Query<&mut Visibility, Or<(With<WorldStatsText>, With<StatsText>, With<DayCycleText>, With<LegendText>)>>,
+    show: Res<ShowHud>,
+    mut q: Query<&mut Visibility, Or<(With<WorldStatsText>, With<StatsText>, With<DayCycleText>)>>,
 ) {
-    let want = if *mode == crate::camera::CameraMode::Orrery { Visibility::Hidden } else { Visibility::Inherited };
+    let on = show.0 && *mode != crate::camera::CameraMode::Orrery;
+    let want = if on { Visibility::Inherited } else { Visibility::Hidden };
     for mut v in &mut q {
         if *v != want {
             *v = want;
@@ -1888,6 +1905,7 @@ fn toggle_sensors(keys: Res<ButtonInput<KeyCode>>, mut show: ResMut<ShowSensors>
 // Pokes sim resources/state transiently; no balance constants changed. Uses no sim RNG (deterministic-safe).
 fn god_disturbances(
     keys: Res<ButtonInput<KeyCode>>,
+    mode: Res<crate::camera::CameraMode>,
     gen: Res<GenState>,
     mut fire: ResMut<Fire>,
     gw: Res<GroundWater>,
@@ -1895,6 +1913,9 @@ fn god_disturbances(
     mut commands: Commands,
     mut rng: ResMut<crate::rng::Rng>,
 ) {
+    if *mode == crate::camera::CameraMode::Orrery {
+        return; // B/P/L/K are orrery overlay toggles in orrery mode; god controls only on the planet
+    }
     if keys.just_pressed(KeyCode::KeyB) {
         // seed burst of creatures cloned from living pop (competent brains)
         const BURST: usize = 200;
@@ -2273,7 +2294,7 @@ struct ShowLegend(bool);
 struct LegendText;
 
 const LEGEND: &str = "\
-EVOLVARIUM  -  legend   (press H to close)
+EVOLVARIUM  -  legend   (press J to close)
 
 TOP-CENTER (walk mode)
   time-of-day phase where you stand: NIGHT / DAWN /
@@ -2313,11 +2334,13 @@ CONTROLS
          [ / ]  scrub time-of-day   \\  jump to noon
          (walk keeps true sim time; scrub [ ] for
           low sun + long shadows; night goes dark)
-  G  sensor rays   SPACE  pause/resume
+  G  sensor rays   SPACE  pause/resume   H  hide/show HUD
   1-5  speed presets (slow..fast)   + / -  fine speed
   B  seed creatures    P  populate whole planet
-  L  lightning fire    K  cull    H  this legend
+  L  lightning fire    K  cull    J  this legend
   M  cycle minimap field    Y  phylogeny (species tree)
+  ORRERY (TAB to it): T traces, G grid, Z zodiac,
+         B labels, L constellations; scroll to zoom
   O  save full world -> savestate.json (reload: --load=savestate.json)
   (P seeds plants+trees+creatures in every habitat)";
 
@@ -2339,13 +2362,14 @@ fn spawn_legend_ui(mut commands: Commands) {
     ));
 }
 
-// H toggles legend panel. Starts hidden; top-left hint tells player it exists.
+// J toggles legend panel. Starts hidden; top-left hint tells player it exists. (H is the master HUD toggle;
+// K is "cull" on the planet.)
 fn toggle_legend(
     keys: Res<ButtonInput<KeyCode>>,
     mut show: ResMut<ShowLegend>,
     mut q: Query<&mut Visibility, With<LegendText>>,
 ) {
-    if keys.just_pressed(KeyCode::KeyH) {
+    if keys.just_pressed(KeyCode::KeyJ) {
         show.0 = !show.0;
         for mut v in &mut q {
             *v = if show.0 { Visibility::Inherited } else { Visibility::Hidden };
@@ -2660,7 +2684,7 @@ fn update_world_stats(
 
 fn spawn_stats_ui(mut commands: Commands) {
     commands.spawn((
-        Text::new("press H for legend  -  left-click a creature or plant to inspect"),
+        Text::new("J legend  -  H hide HUD  -  left-click a creature or plant to inspect"),
         TextFont { font_size: 13.0, ..default() },
         TextColor(Color::WHITE),
         Node {
@@ -2695,7 +2719,7 @@ fn ray_hit(origin: Vec3, dir: Vec3, center: Vec3, r: f32) -> Option<f32> {
 fn pick_on_click(
     mouse: Res<ButtonInput<MouseButton>>,
     windows: Query<(&Window, &CursorOptions), With<PrimaryWindow>>,
-    cam: Query<(&Camera, &GlobalTransform)>,
+    cam: Query<(&Camera, &GlobalTransform), Without<MinimapCam>>, // main cam only (minimap is a 2nd camera)
     creatures: Query<(Entity, &GlobalTransform), With<Creature>>,
     foods: Query<(Entity, &GlobalTransform, Option<&Tree>), With<Food>>,
     mut selected: ResMut<Selected>,
