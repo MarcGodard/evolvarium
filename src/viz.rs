@@ -118,7 +118,7 @@ impl Plugin for VizPlugin {
                     (add_plant_visuals, size_plants, add_grass_visuals, add_seaweed_visuals, size_creatures),
                     (day_night_lighting, update_sun_glow, time_of_day, toggle_shadows, walk_ambient, update_daycycle, track_underwater, update_sky, toggle_underwater_tint, animate_ocean, update_globe_climate, update_aurora_curtains, rotate_sky_stars, position_sky_planets, fade_sky_stars),
                     rain_visuals,
-                    fire_visuals,
+                    (fire_visuals, fire_sheet_visuals, smoke_visuals),
                     meteor_visuals,
                     update_clouds,
                     (track_tree_positions, spawn_logs_on_tree_death, age_logs),
@@ -1927,10 +1927,213 @@ fn age_logs(time: Res<Time>, mut q: Query<(Entity, &mut Log, &mut Transform)>, m
     }
 }
 
-// Wildfire (immediate-mode gizmos). Each burning cell = teardrop cluster of flickering flame tongues (hot
-// yellow-white base -> dim red swaying tips) + a few rising cooling embers. Tongue count, body radius +
-// height scale with burn intensity. Tight to land cell so coarse-grid coastal cells don't spill onto sea.
-// Deterministic (tick clock + hashed jitter).
+// One little flame tongue as a crossed-sheet "X" (aurora trick): two tiny vertical sheets (XY + ZY) so each
+// tongue reads as a full volume from ANY angle, never a thin line. Hot near-white base -> orange -> red tip,
+// width tapers to a point (teardrop). Baked into the shared cluster mesh at local (cx,0,cz), half-width rr,
+// height hh. Additive: RGB carries the vertical falloff, alpha mirrors it.
+fn push_flamelet(pos: &mut Vec<[f32; 3]>, nor: &mut Vec<[f32; 3]>, uv: &mut Vec<[f32; 2]>, col: &mut Vec<[f32; 4]>, idx: &mut Vec<u32>, cx: f32, cz: f32, rr: f32, hh: f32) {
+    let (cols, rows) = (3usize, 6usize);
+    let lerp = |a: [f32; 3], b: [f32; 3], t: f32| [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+    let stop = |fy: f32| -> [f32; 3] {
+        let hot = [1.5, 1.30, 0.72]; // near-white-yellow, hottest base
+        let orange = [1.6, 0.55, 0.10];
+        let red = [1.2, 0.13, 0.02]; // cooling red top (alpha fades it out)
+        if fy < 0.30 {
+            lerp(hot, orange, fy / 0.30)
+        } else {
+            lerp(orange, red, ((fy - 0.30) / 0.70).min(1.0))
+        }
+    };
+    let stride = (cols + 1) as u32;
+    for plane in 0..2 {
+        let vbase = pos.len() as u32;
+        for r in 0..=rows {
+            let fy = r as f32 / rows as f32;
+            let va = (1.0 - fy).powf(1.05); // bright base -> 0 at tip
+            let taper = 1.0 - 0.85 * fy; // converge toward a point -> teardrop
+            let c = stop(fy);
+            for cc in 0..=cols {
+                let fxn = cc as f32 / cols as f32 - 0.5; // -0.5..0.5 (untapered, for even edge feather)
+                let fx = fxn * taper * rr;
+                let hf = (fxn * std::f32::consts::PI).cos().max(0.0); // 1 center -> 0 edges (soft sides)
+                let a = va * hf;
+                let y = fy * hh;
+                let p = if plane == 0 { [cx + fx, y, cz] } else { [cx, y, cz + fx] };
+                let n = if plane == 0 { [0.0, 0.0, 1.0] } else { [1.0, 0.0, 0.0] };
+                pos.push(p);
+                nor.push(n);
+                uv.push([fxn + 0.5, 1.0 - fy]);
+                col.push([c[0] * a, c[1] * a, c[2] * a, a]);
+            }
+        }
+        for r in 0..rows as u32 {
+            for cc in 0..cols as u32 {
+                let i = vbase + r * stride + cc;
+                idx.extend_from_slice(&[i, i + 1, i + stride + 1, i, i + stride + 1, i + stride]);
+            }
+        }
+    }
+}
+
+// Flame BODY mesh: a CLUSTER of little crossed-X flamelets (replaces the old gizmo line-tongues with the
+// aurora "X" trick, one X per tongue). Flamelets packed in a unit disk (denser center via sqrt), each its own
+// height/width (center taller -> teardrop envelope) so the cell reads as many small flames, not one blob.
+// Deterministic (hashed per flamelet). One shared mesh; per-cell transform scales/flickers the whole cluster.
+pub fn flame_cluster_mesh() -> Mesh {
+    let mut pos: Vec<[f32; 3]> = Vec::new();
+    let mut nor: Vec<[f32; 3]> = Vec::new();
+    let mut uv: Vec<[f32; 2]> = Vec::new();
+    let mut col: Vec<[f32; 4]> = Vec::new();
+    let mut idx: Vec<u32> = Vec::new();
+    let n = 10usize; // little flamelets per cell
+    for k in 0..n as u32 {
+        let ang = hash01(k * 7 + 1) * std::f32::consts::TAU;
+        let rad = hash01(k * 13 + 3).sqrt() * 0.42; // sqrt -> denser toward center
+        let (cx, cz) = (ang.cos() * rad, ang.sin() * rad);
+        let rr = 0.15 + 0.07 * hash01(k * 17 + 5); // flamelet half-width
+        let hh = (0.55 + 0.45 * hash01(k * 23 + 7)) * (1.0 - 0.5 * rad / 0.42); // center tongues tallest
+        push_flamelet(&mut pos, &mut nor, &mut uv, &mut col, &mut idx, cx, cz, rr, hh);
+    }
+    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, pos);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, nor);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uv);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, col);
+    mesh.insert_indices(Indices::U32(idx));
+    mesh
+}
+
+// Smoke plume mesh: crossed-X grey column (same X trick, but ALPHA-blend not additive -> smoke darkens). Soft
+// fade-in just off the flame, WIDENS upward (smoke spreads), wisps out to transparent at top. Local Y 0..1;
+// per-cell transform stands it above the flame, leans it downwind, fades it by intensity (see smoke_visuals).
+pub fn smoke_plume_mesh() -> Mesh {
+    let (cols, rows) = (5usize, 12usize);
+    let mut pos: Vec<[f32; 3]> = Vec::new();
+    let mut nor: Vec<[f32; 3]> = Vec::new();
+    let mut uv: Vec<[f32; 2]> = Vec::new();
+    let mut col: Vec<[f32; 4]> = Vec::new();
+    let mut idx: Vec<u32> = Vec::new();
+    let grey = [0.24f32, 0.23, 0.22];
+    let stride = (cols + 1) as u32;
+    for plane in 0..2 {
+        let vbase = pos.len() as u32;
+        for r in 0..=rows {
+            let fy = r as f32 / rows as f32;
+            // fade in just above the fire, billow, then wisp out: ramp up -> peak -> fade to 0 at top
+            let va = (fy / 0.18).clamp(0.0, 1.0) * (1.0 - fy).powf(1.3) * 0.6;
+            let spread = 0.5 + 0.9 * fy; // plume widens as it rises
+            for cc in 0..=cols {
+                let fxn = cc as f32 / cols as f32 - 0.5;
+                let fx = fxn * spread;
+                let hf = (fxn * std::f32::consts::PI).cos().max(0.0);
+                let a = va * hf;
+                let p = if plane == 0 { [fx, fy, 0.0] } else { [0.0, fy, fx] };
+                let n = if plane == 0 { [0.0, 0.0, 1.0] } else { [1.0, 0.0, 0.0] };
+                pos.push(p);
+                nor.push(n);
+                uv.push([fxn + 0.5, 1.0 - fy]);
+                col.push([grey[0], grey[1], grey[2], a]); // grey RGB; alpha carries the plume shape
+            }
+        }
+        for r in 0..rows as u32 {
+            for cc in 0..cols as u32 {
+                let i = vbase + r * stride + cc;
+                idx.extend_from_slice(&[i, i + 1, i + stride + 1, i, i + stride + 1, i + stride]);
+            }
+        }
+    }
+    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, pos);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, nor);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uv);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, col);
+    mesh.insert_indices(Indices::U32(idx));
+    mesh
+}
+
+// Tags pooled flame/smoke entities to a fire grid cell. One each per cell, pre-spawned hidden (setup_scene).
+#[derive(Component)]
+pub struct FlameCell {
+    pub cell: usize,
+}
+#[derive(Component)]
+pub struct SmokeCell {
+    pub cell: usize,
+}
+
+// Flame BODIES: drive the pooled flamelet-cluster meshes. Per cell: hide if cold/ocean, else stand on the cell
+// surface, scale width+height by burn intensity (pulses on tick clock), sway, and modulate additive brightness
+// by intensity*flicker (same feel as the old gizmo tongues, now many little X's). Deterministic.
+fn fire_sheet_visuals(
+    fire: Res<Fire>,
+    gen: Res<GenState>,
+    mut mats: ResMut<Assets<StandardMaterial>>,
+    mut q: Query<(&FlameCell, &MeshMaterial3d<StandardMaterial>, &mut Transform, &mut Visibility)>,
+) {
+    let t = gen.tick as f32;
+    for (fc, mat, mut tf, mut vis) in &mut q {
+        let f = fire.cell[fc.cell];
+        let surf = grid_cell_surface(fc.cell);
+        let up = surf.normalize_or_zero();
+        // cold or over water -> hide (sim won't ignite ocean; guards coarse coastal cells reading as sea)
+        if f < 0.1 || crate::sphere::is_ocean(up) {
+            *vis = Visibility::Hidden;
+            continue;
+        }
+        *vis = Visibility::Visible;
+        let flick = 0.5 + 0.5 * (t * 0.30 + fc.cell as f32 * 1.7).sin();
+        let wob = (t * 0.18 + fc.cell as f32 * 2.3).sin() * 0.28; // sway around the up axis
+        let w = 0.9 + 1.6 * f; // wider with intensity
+        let hgt = (0.7 + 2.0 * f) * (0.7 + 0.5 * flick); // height, pulsing (~ up to 2.4)
+        tf.translation = surf + up * 0.04;
+        tf.rotation = Quat::from_axis_angle(up, wob) * Quat::from_rotation_arc(Vec3::Y, up);
+        tf.scale = Vec3::new(w, hgt, w);
+        if let Some(m) = mats.get_mut(mat) {
+            let b = (0.55 + 0.45 * flick) * (0.5 + 0.5 * f); // hotter + flicker = brighter additive glow
+            m.base_color = Color::LinearRgba(LinearRgba::new(b, b, b, b));
+        }
+    }
+}
+
+// SMOKE: drive the pooled crossed-X grey plumes. Per cell: hide if cold/ocean, else sit above the flame, lean
+// downwind + sway, scale taller with intensity, fade overall opacity by intensity*flicker. Alpha-blend.
+fn smoke_visuals(
+    fire: Res<Fire>,
+    gen: Res<GenState>,
+    mut mats: ResMut<Assets<StandardMaterial>>,
+    mut q: Query<(&SmokeCell, &MeshMaterial3d<StandardMaterial>, &mut Transform, &mut Visibility)>,
+) {
+    let t = gen.tick as f32;
+    for (sc, mat, mut tf, mut vis) in &mut q {
+        let f = fire.cell[sc.cell];
+        let surf = grid_cell_surface(sc.cell);
+        let up = surf.normalize_or_zero();
+        if f < 0.1 || crate::sphere::is_ocean(up) {
+            *vis = Visibility::Hidden;
+            continue;
+        }
+        *vis = Visibility::Visible;
+        let flick = 0.5 + 0.5 * (t * 0.13 + sc.cell as f32 * 1.1).sin(); // slower than flame
+        let wob = (t * 0.10 + sc.cell as f32 * 1.7).sin();
+        let (east, north) = crate::sphere::tangent_frame(up);
+        let flame_h = 0.7 + 2.0 * f; // base sits near the flame top
+        let w = 0.6 + 1.0 * f;
+        let hgt = 2.5 + 3.5 * f;
+        // lean downwind (fixed east bias) + sway -> plume drifts, never a rigid pillar
+        let lean = (up + east * 0.30 + north * wob * 0.18).normalize_or_zero();
+        tf.translation = surf + up * (0.04 + flame_h * 0.55);
+        tf.rotation = Quat::from_rotation_arc(Vec3::Y, lean);
+        tf.scale = Vec3::new(w, hgt, w);
+        if let Some(m) = mats.get_mut(mat) {
+            let op = (0.35 + 0.55 * f) * (0.8 + 0.2 * flick); // denser smoke from hotter fire
+            m.base_color = Color::srgba(1.0, 1.0, 1.0, op); // multiplies the baked grey+alpha plume
+        }
+    }
+}
+
+// Wildfire EMBERS (immediate-mode gizmos): small bright motes rise, drift wider, fade as they cool. Flame
+// bodies are the crossed-sheet meshes (fire_sheet_visuals); embers stay cheap transient gizmo sparks. Tight to
+// land cell so coarse-grid coastal cells don't spill onto sea. Deterministic (tick clock + hashed jitter).
 fn fire_visuals(fire: Res<Fire>, gen: Res<GenState>, mut gizmos: Gizmos) {
     let t = gen.tick as f32;
     for c in 0..fire.cell.len() {
@@ -1940,34 +2143,10 @@ fn fire_visuals(fire: Res<Fire>, gen: Res<GenState>, mut gizmos: Gizmos) {
         }
         let surf = grid_cell_surface(c);
         let up = surf.normalize_or_zero();
-        // safety: never draw flame over water (sim won't ignite ocean cells; guards coarse-grid coastal
-        // cells whose center reads as sea -> no flame on waves).
         if crate::sphere::is_ocean(up) {
             continue;
         }
         let (east, north) = crate::sphere::tangent_frame(up);
-        use std::f32::consts::TAU;
-        // flame body: many short tongues packed in small disk, fanning into teardrop converging to point.
-        // Hot bright at base, cooling to dim red at flickering tips.
-        let tongues = 10 + (f * 16.0) as usize; // hotter = fuller flame body (10..26)
-        for k in 0..tongues {
-            let seed = (c * 32 + k) as u32;
-            // base point in disk, denser toward center (sqrt) -> solid core
-            let ang = hash01(seed) * TAU;
-            let rad = hash01(seed ^ 0x9e3);
-            let rr = rad.sqrt() * (0.4 + 0.6 * f); // body radius grows with intensity (~ up to 1.0)
-            let (bx, bz) = (ang.cos() * rr, ang.sin() * rr);
-            let foot = surf + up * 0.05 + east * bx + north * bz;
-            // height: center-tall teardrop (edge tongues short), pulsing on tick clock
-            let flick = 0.5 + 0.5 * (t * 0.30 + seed as f32 * 1.7).sin();
-            let h = (0.6 + 1.8 * f) * (1.0 - 0.6 * rad) * (0.55 + 0.7 * flick); // ~ up to 2.4
-            let sway = (t * 0.22 + seed as f32 * 2.3).sin() * 0.3 * f; // tips wander as it flickers
-            // tips pull back toward center as they rise -> flame comes to a point
-            let tip = surf + up * (0.05 + h) + east * (bx * 0.2 + sway) + north * (bz * 0.2 + sway * 0.5);
-            let hot = Color::srgb(1.0, 0.92, 0.55); // near yellow-white, hottest at base
-            let cool = Color::srgba(0.85, 0.12, 0.02, 0.55); // dim red, fading at cooling tip
-            gizmos.line_gradient(foot, tip, hot, cool);
-        }
         // embers: small bright motes rise, drift wider, fade as they cool
         let embers = (f * 4.0) as usize;
         for k in 0..embers {

@@ -596,4 +596,41 @@ fn setup_scene(
             ));
         }
     }
+    // wildfire flames + smoke: pooled crossed-X meshes, one each per fire grid cell, hidden until that cell
+    // burns. viz::fire_sheet_visuals/smoke_visuals stand/scale/flicker active ones each frame. Flame = additive
+    // emissive (aurora trick, many little X tongues); smoke = alpha-blend grey plume above it.
+    let flame_mesh = meshes.add(viz::flame_cluster_mesh());
+    let smoke_mesh = meshes.add(viz::smoke_plume_mesh());
+    for c in 0..(crate::config::SOIL_RES * crate::config::SOIL_RES) {
+        commands.spawn((
+            Mesh3d(flame_mesh.clone()),
+            MeshMaterial3d(materials.add(StandardMaterial {
+                base_color: Color::LinearRgba(LinearRgba::new(0.0, 0.0, 0.0, 0.0)),
+                alpha_mode: AlphaMode::Add,
+                unlit: true,
+                double_sided: true, // both crossed sheets visible any side
+                cull_mode: None,
+                ..default()
+            })),
+            Transform::default(),
+            Visibility::Hidden,
+            bevy::light::NotShadowCaster,
+            viz::FlameCell { cell: c },
+        ));
+        commands.spawn((
+            Mesh3d(smoke_mesh.clone()),
+            MeshMaterial3d(materials.add(StandardMaterial {
+                base_color: Color::srgba(1.0, 1.0, 1.0, 0.0),
+                alpha_mode: AlphaMode::Blend,
+                unlit: true,
+                double_sided: true,
+                cull_mode: None,
+                ..default()
+            })),
+            Transform::default(),
+            Visibility::Hidden,
+            bevy::light::NotShadowCaster,
+            viz::SmokeCell { cell: c },
+        ));
+    }
 }
