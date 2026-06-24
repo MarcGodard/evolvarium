@@ -56,7 +56,7 @@ impl Plugin for ViewerPlugin {
         app.init_resource::<ViewerCam>()
             .init_resource::<PointerOverUi>()
             .add_systems(Startup, spawn_viewer_creature)
-            .add_systems(Update, (hold_pause, rebuild_on_edit, release_into_sim, bind_egui_to_main))
+            .add_systems(Update, (bind_egui_to_main, hold_pause, rebuild_on_edit, release_into_sim))
             .add_systems(EguiPrimaryContextPass, viewer_panel)
             // PostUpdate: run AFTER the planet camera systems so the close-orbit transform wins.
             .add_systems(PostUpdate, viewer_camera);
@@ -122,7 +122,8 @@ fn viewer_panel(mut contexts: EguiContexts, state: Option<Res<ViewerState>>, mut
     }
 
     egui::SidePanel::left("genome_panel").resizable(true).default_width(360.0).width_range(320.0..=680.0).show(ctx, |ui| {
-        ui.set_min_height(ui.available_height()); // fill full window height, not shrink-wrap to content
+        // (SidePanel is full window height already; don't set_min_height here -> in multipass it re-flows the
+        // layout each pass and makes sliders jump/reset while dragging.)
         ui.heading("Genome");
         ui.label(if state.released { "released into sim (edits still rebuild this creature)" } else { "T = release into sim" });
         ui.separator();
