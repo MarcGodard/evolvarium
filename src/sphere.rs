@@ -629,4 +629,17 @@ mod tests {
         assert!(daylight_at(day, 600) > 0.5);
         assert!(daylight_at(night, 600) < 0.01);
     }
+
+    #[test]
+    fn eclipses_occur() {
+        // sun + moon discs share angular radius `ar`; a solar eclipse needs their sky dirs within 2*ar.
+        // Scan a synodic month: the moon laps the sun, so min separation must reach ~0 (new-moon alignment).
+        let ar = MOON_R / MOON_ORBIT;
+        let mut min_sep = f32::MAX;
+        for t in (0..90_000).step_by(150) {
+            let sep = sun_dir(t).dot(moon_dir(t)).clamp(-1.0, 1.0).acos();
+            min_sep = min_sep.min(sep);
+        }
+        assert!(min_sep < 2.0 * ar, "moon should occlude sun within a month (min_sep {min_sep}, 2ar {})", 2.0 * ar);
+    }
 }

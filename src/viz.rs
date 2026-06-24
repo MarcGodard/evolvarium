@@ -1425,31 +1425,55 @@ fn add_seaweed_visuals(
 // Orbit sun + moon: directional light comes FROM sun current direction (lit half + terminator sweep as it
 // spins); moon sphere rides its orbit. Globe self-shades via surface normals -> illuminance constant;
 // ambient (set in setup) lifts night side.
+// Base directional sun illuminance (matches main.rs spawn). Eclipse dims this toward twilight.
+const SUN_ILLUM: f32 = 64_000.0;
+
 fn day_night_lighting(
     gen: Res<GenState>,
     offset: Res<SunOffset>,
-    mut suns: Query<&mut Transform, (With<SunLight>, Without<Moon>, Without<SunDisc>)>,
-    mut moons: Query<&mut Transform, (With<Moon>, Without<SunLight>, Without<SunDisc>)>,
+    mut suns: Query<(&mut Transform, &mut DirectionalLight), (With<SunLight>, Without<Moon>, Without<SunDisc>)>,
+    mut moons: Query<(&mut Transform, &MeshMaterial3d<StandardMaterial>), (With<Moon>, Without<SunLight>, Without<SunDisc>)>,
     mut discs: Query<&mut Transform, (With<SunDisc>, Without<SunLight>, Without<Moon>)>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     // visual sky time = sim tick + offset (offset lets walk pick sunny hour without moving sim). FULL tick
     // (not mod DAY_TICKS): the Tychos sun carries a yearly ecliptic term, so reducing to one day would erase
     // seasons from the lit sky.
     let vtick = (gen.tick as i64 + offset.0).max(0) as u32;
     let sd = crate::sphere::sun_dir(vtick);
-    for mut tf in &mut suns {
+    let md = crate::sphere::moon_dir(vtick); // unit geocentric moon dir
+
+    // Eclipses (sun disc + moon disc share angular radius `ar` here by design, see sphere::SUN_R):
+    // SOLAR = moon disc over sun disc (new moon, sep small) -> dim the sun (moon's shadow on the world).
+    // LUNAR = moon in the planet's umbra (full moon, moon opposite sun within planet's angular radius) -> blood moon.
+    let ar = crate::sphere::MOON_R / crate::sphere::MOON_ORBIT; // ~0.045 rad (~2.6 deg), stylized large
+    let sep = sd.dot(md).clamp(-1.0, 1.0).acos();
+    let solar = ((2.0 * ar - sep) / (2.0 * ar)).clamp(0.0, 1.0); // 0 none .. 1 total
+    let par = crate::sphere::PLANET_R / crate::sphere::MOON_ORBIT; // planet angular radius seen from moon
+    let lang = (-sd).dot(md).clamp(-1.0, 1.0).acos();
+    let lunar = ((par - lang) / par).clamp(0.0, 1.0);
+
+    for (mut tf, mut light) in &mut suns {
         // ROTATE directional light in place (only direction matters). Light carries NoFrustumCulling -> stays
         // ViewVisible -> Bevy keeps building shadow cascades. GOTCHA: teleporting it far / to planet core
         // frustum-culled it to invisible, silently disabling shadows.
         *tf = Transform::IDENTITY.looking_to(-sd, Vec3::Y);
+        light.illuminance = SUN_ILLUM * (1.0 - 0.96 * solar); // total eclipse -> ~4% (deep twilight)
     }
     for mut tf in &mut discs {
         tf.translation = sd * crate::sphere::SUN_DIST; // visible sun rides same direction, far out
     }
     let mtick = (gen.tick as i64 + offset.0).max(0) as u32;
     let mp = crate::sphere::moon_pos(mtick);
-    for mut tf in &mut moons {
+    for (mut tf, mat) in &mut moons {
         tf.translation = mp;
+        if let Some(m) = materials.get_mut(&mat.0) {
+            // blood moon: lerp the moon toward dark red as it enters the umbra
+            let e = Vec3::new(0.5, 0.5, 0.55).lerp(Vec3::new(0.35, 0.05, 0.03), lunar);
+            m.emissive = LinearRgba::rgb(e.x, e.y, e.z);
+            let bc = Vec3::new(0.85, 0.85, 0.9).lerp(Vec3::new(0.45, 0.12, 0.09), lunar);
+            m.base_color = Color::srgb(bc.x, bc.y, bc.z);
+        }
     }
 }
 
