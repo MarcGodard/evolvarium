@@ -300,6 +300,7 @@ fn setup_scene(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<bevy::image::Image>>,
 ) {
     // planet: elevation-displaced, biome-vertex-colored globe. White base_color lets vertex colors show.
     // Globe is shadow caster in BOTH views (camera::update_planet_caster) -> shadows own night side /
@@ -389,12 +390,19 @@ fn setup_scene(
         bevy::camera::visibility::NoFrustumCulling,
         viz::SunLight,
     ));
-    // moon: small emissive sphere; position set per-frame by day_night_lighting.
+    // moon: UV sphere w/ procedural lunar texture, SUN-LIT for real PHASES (lit hemisphere bright, far side
+    // dark). Faint emissive floor (carries the same texture) keeps the dark side a dim ghost, not a black void
+    // nor a glowing ball -> when it crosses the sun it reads as a dark silhouette/eclipse, not a bright disc.
+    // Tidally locked toward planet each frame (day_night_lighting look_at origin).
+    let moon_tex = images.add(stars::moon_texture());
     commands.spawn((
-        Mesh3d(meshes.add(Sphere::new(sphere::MOON_R).mesh().ico(3).unwrap())),
+        Mesh3d(meshes.add(Sphere::new(sphere::MOON_R).mesh().uv(48, 24))),
         MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(0.85, 0.85, 0.9),
-            emissive: LinearRgba::rgb(0.5, 0.5, 0.55),
+            base_color: Color::WHITE, // texture carries albedo; full sun light -> bright lit crescent/face
+            base_color_texture: Some(moon_tex.clone()),
+            perceptual_roughness: 1.0,
+            emissive: LinearRgba::rgb(0.06, 0.06, 0.07), // faint floor so dark side is a ghost, not black
+            emissive_texture: Some(moon_tex),
             ..default()
         })),
         Transform::from_translation(sphere::moon_pos(0)),
@@ -406,8 +414,8 @@ fn setup_scene(
     commands.spawn((
         Mesh3d(meshes.add(Sphere::new(sphere::SUN_R).mesh().ico(3).unwrap())),
         MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(1.0, 0.95, 0.65),
-            emissive: LinearRgba::rgb(9.0, 8.0, 4.0),
+            base_color: Color::srgb(1.0, 0.97, 0.8),
+            emissive: LinearRgba::rgb(14.0, 12.5, 8.0), // brighter, whiter-warm: reads as a hot sun, not olive
             unlit: true,
             ..default()
         })),
@@ -427,9 +435,25 @@ fn setup_scene(
     commands.spawn((
         Mesh3d(meshes.add(sky_mesh)),
         MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::WHITE, // vertex colors carry per-star temperature
+            base_color: Color::WHITE, // vertex colors carry per-star temperature; viz::fade_sky_stars dims at day
             unlit: true,
             cull_mode: None,
+            alpha_mode: AlphaMode::Add, // additive: stars glow over dark sky, vanish against bright day sky
+            ..default()
+        })),
+        Transform::IDENTITY,
+        bevy::light::NotShadowCaster,
+        viz::SkyStars,
+    ));
+    // Milky Way: faint additive band along the real galactic plane, on a slightly farther shell. Tagged
+    // SkyStars too -> wheels with the day + fades at midday like the stars.
+    commands.spawn((
+        Mesh3d(meshes.add(stars::build_milky_way(sky_r * 1.01))),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::WHITE,
+            unlit: true,
+            cull_mode: None,
+            alpha_mode: AlphaMode::Add,
             ..default()
         })),
         Transform::IDENTITY,

@@ -360,6 +360,21 @@ fn spawn_starfield(
         Visibility::Hidden, // shown only in Orrery mode (orrery_scene_visibility)
         bevy::light::NotShadowCaster,
     ));
+    // Milky Way band, faint additive, on a slightly farther shell (galactic plane, real orientation).
+    commands.spawn((
+        OrreryScenery,
+        Mesh3d(meshes.add(crate::stars::build_milky_way(STAR_SHELL * 1.01))),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::WHITE,
+            unlit: true,
+            cull_mode: None,
+            alpha_mode: AlphaMode::Add,
+            ..default()
+        })),
+        Transform::from_translation(ORRERY_CENTER),
+        Visibility::Hidden,
+        bevy::light::NotShadowCaster,
+    ));
     if let Some(lines) = crate::stars::build_constellation_lines(&hip_dir, STAR_SHELL) {
         commands.spawn((
             Mesh3d(meshes.add(lines)),

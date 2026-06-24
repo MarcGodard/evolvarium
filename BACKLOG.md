@@ -27,8 +27,13 @@ pholmq/TSN (GPL-2.0) @ commit 49fd49c (pinned in `orrery.rs` + `stars.rs` commen
 - [x] **Orrery overlays** (orrery-mode only, mode-gated keys): T orbit/deferent traces, G ecliptic grid,
   Z zodiac, B body+bright-star labels (on by default), L constellations (off by default). Legend moved to J;
   H is the master HUD toggle; planet HUD hidden in orrery.
-- [x] **HUD calendar**: WORLD panel shows the Earth date (Yr/Mon/Day) + a sky line (current year length,
-  Sirius near/far, apparent precession ~26000); creature age in days.
+- [x] **HUD calendar**: WORLD panel shows the full Earth date + clock (Yr/Mon/Day HH:MM), season, and the
+  next solar/lunar eclipse countdown; creature age in days. (Dropped the sirius/year-length line.)
+- [x] **Sky polish (2026-06-24)**: stars + Milky Way are additive and fade with local daylight (midday ->
+  only the brightest survive; orbit/orrery keep full); procedural Milky Way band on the real galactic plane
+  (`stars::build_milky_way`, galactic->equatorial transform). Moon got a procedural cratered texture
+  (`stars::moon_texture`) on a UV sphere, tidally locked toward the planet, SUN-LIT for real phases (lit
+  crescent + dark-side ghost; reads as a silhouette when transiting the sun). Sun disc brightened/whiter.
 - [x] **Bodies visible at any zoom**: constant-angular-size rendering so the moon/Phobos/Deimos/asteroids
   stay visible; orrery min-zoom 6 so you can fly in and resolve the moon by Evolvarium.
 - [x] **Sirius as a body** on the precession apsidal line (bright blue-white), labeled + click-identifiable.

@@ -428,6 +428,54 @@ pub fn fmt_age_days(ticks: u32) -> String {
     format!("{:.1}d", ticks as f32 / DAY_TICKS as f32)
 }
 
+/// Wall-clock HH:MM within the local day (tick 0 = 00:00 midnight). Display only.
+pub fn fmt_clock(tick: u32) -> String {
+    let mins = ((tick % DAY_TICKS) as f32 / DAY_TICKS as f32 * 24.0 * 60.0) as u32;
+    format!("{:02}:{:02}", mins / 60, mins % 60)
+}
+
+/// Season from the sub-solar latitude (sun_dir.y = sin of solar declination; daily spin leaves y unchanged).
+/// Northern-hemisphere framing. Spring/autumn split by whether the sun is climbing or falling in declination.
+pub fn season_label(tick: u32) -> &'static str {
+    let decl = sun_dir(tick).y;
+    let rising = sun_dir(tick + DAY_TICKS * 5).y > decl;
+    if decl > 0.2 {
+        "N summer"
+    } else if decl < -0.2 {
+        "N winter"
+    } else if rising {
+        "N spring"
+    } else {
+        "N autumn"
+    }
+}
+
+/// Scan forward for the next solar + lunar eclipse, as days from `tick` (-1 if none within the horizon).
+/// Conditions mirror viz::day_night_lighting: solar when sun/moon discs overlap (sep < 2*angular radius),
+/// lunar when the moon enters the planet's umbra (anti-sun within planet angular radius). Geocentric
+/// separation is invariant under the daily spin, so this depends only on the orrery's monthly drift. Coarse
+/// step is fine: the alignment windows (~5 deg solar, ~10 deg lunar) are far wider than per-step moon motion.
+pub fn next_eclipse(tick: u32) -> (f32, f32) {
+    let solar_thr = 2.0 * MOON_R / MOON_ORBIT; // overlapping discs
+    let lunar_thr = PLANET_R / MOON_ORBIT; // planet umbra half-angle seen from moon
+    let horizon = 400 * DAY_TICKS;
+    let step = 120u32;
+    let (mut solar, mut lunar) = (-1.0f32, -1.0f32);
+    let mut tk = tick + step;
+    while tk < tick + horizon && (solar < 0.0 || lunar < 0.0) {
+        let sd = sun_dir(tk);
+        let md = moon_dir(tk);
+        if solar < 0.0 && sd.dot(md).clamp(-1.0, 1.0).acos() < solar_thr {
+            solar = (tk - tick) as f32 / DAY_TICKS as f32;
+        }
+        if lunar < 0.0 && (-sd).dot(md).clamp(-1.0, 1.0).acos() < lunar_thr {
+            lunar = (tk - tick) as f32 / DAY_TICKS as f32;
+        }
+        tk += step;
+    }
+    (solar, lunar)
+}
+
 /// Local daylight 0..1 at surface dir `d` for tick: how much point faces sun.
 pub fn daylight_at(d: Vec3, tick: u32) -> f32 {
     d.dot(sun_dir(tick)).clamp(0.0, 1.0)
@@ -641,5 +689,17 @@ mod tests {
             min_sep = min_sep.min(sep);
         }
         assert!(min_sep < 2.0 * ar, "moon should occlude sun within a month (min_sep {min_sep}, 2ar {})", 2.0 * ar);
+    }
+
+    #[test]
+    fn next_eclipse_predicts_within_a_month() {
+        // both a solar and a lunar alignment must be found, and within ~a synodic month (monthly cadence).
+        let (s, l) = next_eclipse(0);
+        assert!(s > 0.0 && s < 45.0, "next solar {s}d");
+        assert!(l > 0.0 && l < 45.0, "next lunar {l}d");
+        // clock + season helpers produce well-formed strings
+        assert_eq!(fmt_clock(0), "00:00");
+        assert_eq!(fmt_clock(DAY_TICKS / 2), "12:00");
+        assert!(season_label(0).starts_with('N'));
     }
 }

@@ -11,7 +11,9 @@
 #![allow(dead_code)]
 use bevy::prelude::*;
 use bevy::asset::RenderAssetUsages;
+use bevy::image::Image;
 use bevy::mesh::{Indices, PrimitiveTopology};
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use std::collections::HashMap;
 
 const BSC_JSON: &str = include_str!("../assets/stars/BSC.json");
@@ -147,9 +149,9 @@ pub fn build_starfield(r: f32) -> (Mesh, HashMap<u32, Vec3>) {
         let k: f32 = f32_field(st, "K").unwrap_or(5500.0);
         // brightness 0.08..1 from magnitude (bright = low V). Size + color intensity scale with it.
         let lum = ((6.5 - v) / 8.0).clamp(0.06, 1.0);
-        let s = 22.0 * (0.32 + lum) * (r / 9000.0); // quad half-size, scaled so angular size is constant at any shell r
+        let s = 14.0 * (0.28 + lum) * (r / 9000.0); // quad half-size, scaled so angular size is constant at any shell r
         let rgb = temp_to_rgb(k);
-        let i = (0.45 + lum * 0.55).min(1.0);
+        let i = (0.30 + lum * 0.70).min(1.0); // dim faint stars harder so the field reads as points, not a wall
         let col = [rgb[0] * i, rgb[1] * i, rgb[2] * i, 1.0];
 
         let pos = dir * r;
@@ -201,7 +203,7 @@ fn lcg(state: &mut u64) -> f32 {
 /// bulge. Positioned via real galactic->equatorial transform so it aligns with the catalog stars and wheels
 /// with them. Use an ADDITIVE material so it glows over the dark sky and vanishes against bright day sky.
 pub fn build_milky_way(r: f32) -> Mesh {
-    const N: usize = 5000;
+    const N: usize = 2600;
     let mut positions: Vec<[f32; 3]> = Vec::with_capacity(N * 4);
     let mut colors: Vec<[f32; 4]> = Vec::with_capacity(N * 4);
     let mut indices: Vec<u32> = Vec::with_capacity(N * 6);
@@ -211,7 +213,7 @@ pub fn build_milky_way(r: f32) -> Mesh {
         // galactic latitude: Box-Muller Gaussian, sigma wider toward the central bulge (l near 0).
         let center = ((l + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI).abs(); // 0 at GC..PI at anticenter
         let centerness = (1.0 - center / std::f32::consts::PI).powf(1.5); // bright bulge near GC
-        let sigma = 0.06 + 0.10 * centerness; // rad: ~3.5deg disk, ~9deg bulge
+        let sigma = 0.045 + 0.08 * centerness; // rad: ~2.5deg disk, ~7deg bulge
         let u1 = lcg(&mut rng).max(1e-6);
         let u2 = lcg(&mut rng);
         let b = sigma * (-2.0 * u1.ln()).sqrt() * (std::f32::consts::TAU * u2).cos();
@@ -219,11 +221,11 @@ pub fn build_milky_way(r: f32) -> Mesh {
 
         // faint patch: brighter near plane + center; jittered so the band looks mottled, not uniform.
         let lat_fall = (-(b / sigma) * (b / sigma) * 0.5).exp();
-        let mottle = 0.4 + 0.6 * lcg(&mut rng);
-        let bright = (0.05 + 0.13 * centerness) * lat_fall * mottle;
+        let mottle = 0.35 + 0.65 * lcg(&mut rng);
+        let bright = (0.022 + 0.06 * centerness) * lat_fall * mottle; // faint: subtle glow band, not squares
         let col = [bright * 0.82, bright * 0.84, bright, 1.0]; // pale blue-white
 
-        let s = (34.0 + 30.0 * lcg(&mut rng)) * (r / 9000.0); // big soft patches; overlap -> smooth glow
+        let s = (12.0 + 14.0 * lcg(&mut rng)) * (r / 9000.0); // small soft patches; overlap -> smooth glow
         let pos = dir * r;
         let up_ref = if dir.y.abs() > 0.95 { Vec3::X } else { Vec3::Y };
         let right = dir.cross(up_ref).normalize_or_zero();
@@ -241,6 +243,79 @@ pub fn build_milky_way(r: f32) -> Mesh {
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
     mesh.insert_indices(Indices::U32(indices));
     mesh
+}
+
+/// Procedural equirectangular lunar texture (grey highlands + dark maria + cratered). For the planet's moon,
+/// mapped onto a UV sphere and tidally locked so the same face points at the world (no real photo asset, so
+/// we synthesize a moon-like surface). u = longitude, v = latitude; near-side maria roughly placed.
+pub fn moon_texture() -> Image {
+    const W: usize = 512;
+    const H: usize = 256;
+    // (u, v, radius, depth): dark mare basins clustered on the near face (centered ~u=0.5).
+    let maria = [
+        (0.46_f32, 0.40_f32, 0.15_f32, 0.24_f32),
+        (0.40, 0.34, 0.11, 0.20),
+        (0.55, 0.46, 0.13, 0.18),
+        (0.50, 0.55, 0.10, 0.16),
+        (0.61, 0.38, 0.08, 0.14),
+        (0.36, 0.50, 0.07, 0.12),
+    ];
+    let mut rng: u64 = 0xC0FF_EE12_3400_0777;
+    let craters: Vec<(f32, f32, f32)> = (0..110)
+        .map(|_| {
+            let u = lcg(&mut rng);
+            let v = lcg(&mut rng);
+            let r = 0.005 + 0.028 * lcg(&mut rng).powi(2); // many small, few large
+            (u, v, r)
+        })
+        .collect();
+    // shortest longitudinal distance (texture wraps in u).
+    let du_wrap = |a: f32, b: f32| {
+        let mut d = a - b;
+        if d > 0.5 {
+            d -= 1.0;
+        } else if d < -0.5 {
+            d += 1.0;
+        }
+        d
+    };
+    let mut data = vec![0u8; W * H * 4];
+    for y in 0..H {
+        for x in 0..W {
+            let u = x as f32 / W as f32;
+            let v = y as f32 / H as f32;
+            let mut g = 0.60 + 0.04 * ((u * 41.0).sin() * (v * 33.0).cos()); // faint highland mottle
+            for (mu, mv, mr, md) in maria {
+                let du = du_wrap(u, mu);
+                let dv = v - mv;
+                let d2 = (du * du + dv * dv) / (mr * mr);
+                g -= md * (-d2).exp();
+            }
+            for (cu, cv, cr) in &craters {
+                let du = du_wrap(u, *cu);
+                let dv = v - *cv;
+                let d = (du * du + dv * dv).sqrt();
+                if d < *cr {
+                    g -= 0.12 * (1.0 - d / cr); // dark floor
+                } else if d < cr * 1.4 {
+                    g += 0.12 * (1.0 - (d - cr) / (cr * 0.4)); // bright rim
+                }
+            }
+            let g = g.clamp(0.06, 0.94);
+            let i = (y * W + x) * 4;
+            data[i] = (g * 252.0) as u8;
+            data[i + 1] = (g * 250.0) as u8;
+            data[i + 2] = (g * 255.0) as u8; // faint cool tint
+            data[i + 3] = 255;
+        }
+    }
+    Image::new(
+        Extent3d { width: W as u32, height: H as u32, depth_or_array_layers: 1 },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::RENDER_WORLD,
+    )
 }
 
 /// Build constellation lines as a single LineList mesh from TSN constellations.json (polylines of HIP ids),
@@ -313,6 +388,28 @@ mod tests {
             assert!(!s.label().is_empty());
             assert!((s.dir.length() - 1.0).abs() < 1e-3);
         }
+    }
+
+    #[test]
+    fn milky_way_aligns_with_galactic_center() {
+        // galactic center (l=0,b=0) must land at RA ~266.4 deg, Dec ~-28.9 deg (Sagittarius).
+        let gc = gal_to_dir(0.0, 0.0);
+        let dec = gc.y.asin().to_degrees();
+        let ra = gc.z.atan2(gc.x).rem_euclid(std::f32::consts::TAU).to_degrees();
+        assert!((dec - (-28.9)).abs() < 1.5, "GC dec {dec}");
+        assert!((ra - 266.4).abs() < 2.0, "GC ra {ra}");
+        // band mesh has thousands of patches
+        let m = build_milky_way(9000.0);
+        assert!(m.count_vertices() > 8000, "milky way verts {}", m.count_vertices());
+    }
+
+    #[test]
+    fn moon_texture_is_well_formed() {
+        let img = moon_texture();
+        let sz = img.texture_descriptor.size;
+        assert_eq!(sz.width, 512);
+        assert_eq!(sz.height, 256);
+        assert_eq!(img.data.as_ref().map(|d| d.len()), Some(512 * 256 * 4));
     }
 
     #[test]

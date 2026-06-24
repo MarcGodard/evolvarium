@@ -1516,12 +1516,10 @@ fn day_night_lighting(
         // tidal lock: same face toward planet center (look_at origin) so the textured near side always shows.
         tf.look_at(Vec3::ZERO, Vec3::Y);
         if let Some(m) = materials.get_mut(&mat.0) {
-            // moon is sun-lit now (texture + phases) so keep emissive a faint floor; blood moon reddens it +
-            // tints the base (which multiplies the lunar texture) as it enters the umbra.
-            let e = Vec3::new(0.05, 0.05, 0.06).lerp(Vec3::new(0.30, 0.04, 0.02), lunar);
+            // sun-lit moon (phases via N.L); emissive is only a faint floor. Blood moon: in the umbra sun light
+            // ~vanishes, so raise emissive to a coppery glow so the eclipsed full moon reads dim red.
+            let e = Vec3::new(0.06, 0.06, 0.07).lerp(Vec3::new(0.35, 0.08, 0.05), lunar);
             m.emissive = LinearRgba::rgb(e.x, e.y, e.z);
-            let bc = Vec3::new(1.0, 1.0, 1.0).lerp(Vec3::new(0.55, 0.18, 0.13), lunar);
-            m.base_color = Color::srgb(bc.x, bc.y, bc.z);
         }
     }
 }
@@ -2732,6 +2730,7 @@ fn update_world_stats(
     mut text: Query<&mut Text, With<WorldStatsText>>,
     mut hist: Local<Vec<u16>>,
     mut frame: Local<u32>,
+    mut ecl_cache: Local<(u32, f32, f32)>, // (last_tick, solar_days, lunar_days): throttle the forward scan
 ) {
     let Ok(mut t) = text.single_mut() else { return };
     let (mut n, mut temp, mut lng, mut met, mut par) = (0u32, 0.0f32, 0.0f32, 0.0f32, 0.0f32);
@@ -2751,13 +2750,17 @@ fn update_world_stats(
         if g.rigidity > 0.6 { spec += 1; }
     }
     let nf = n.max(1) as f32;
-    // calendar date + Sirius-precession readout (the year breathes with Sirius distance)
+    // full calendar date + clock + season, and the next solar/lunar eclipse countdown
     let date = crate::sphere::fmt_date(gen.tick);
-    let ty = crate::sphere::t_years(gen.tick);
-    let yrlen = crate::orrery::year_len_days(ty).round() as i32;
-    let sdist = crate::orrery::sirius_dist01(ty); // 0 near .. 1 far
-    let prox = if sdist > 0.66 { "far" } else if sdist < 0.33 { "near" } else { "mid" };
-    let prec = ((crate::orrery::apparent_precession_years(ty) / 100.0).round() as i32) * 100;
+    let clock = crate::sphere::fmt_clock(gen.tick);
+    let season = crate::sphere::season_label(gen.tick);
+    // forward scan is ~thousands of table walks: recompute only when the day rolls (or first run), else reuse.
+    if ecl_cache.1 == 0.0 && ecl_cache.2 == 0.0 || gen.tick / crate::sphere::DAY_TICKS != ecl_cache.0 / crate::sphere::DAY_TICKS {
+        let (s, l) = crate::sphere::next_eclipse(gen.tick);
+        *ecl_cache = (gen.tick, s, l);
+    }
+    let fmt_ecl = |d: f32| if d < 0.0 { ">400d".to_string() } else { format!("{d:.1}d") };
+    let eclipse = format!("solar {} / lunar {}", fmt_ecl(ecl_cache.1), fmt_ecl(ecl_cache.2));
     // sample population ~1x/sec into rolling history (~48 samples) for trend sparkline
     *frame += 1;
     if (*frame).is_multiple_of(60) {
@@ -2773,7 +2776,7 @@ fn update_world_stats(
         format!("{:.2}x", vtime.relative_speed())
     };
     t.0 = format!(
-        "WORLD\nspeed      {speed}\npop        {n}\ndate       {date}\nsky        yr {yrlen}d  sirius {prox}  prec ~{prec}\ntrend      {trend}\ntemp avg   {:.2}  (cold {cold} / warm {warm})\nlongevity  {:.2}\nmetab      {:.2}\nr/K        {:.2}\nhabitat    aquatic {aq} / flying {fly} / land {land}\nspecialists {spec}",
+        "WORLD\nspeed      {speed}\npop        {n}\ndate       {date}  {clock}\nseason     {season}\neclipse    {eclipse}\ntrend      {trend}\ntemp avg   {:.2}  (cold {cold} / warm {warm})\nlongevity  {:.2}\nmetab      {:.2}\nr/K        {:.2}\nhabitat    aquatic {aq} / flying {fly} / land {land}\nspecialists {spec}",
         temp / nf, lng / nf, met / nf, par / nf
     );
 }
