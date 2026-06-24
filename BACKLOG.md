@@ -319,7 +319,10 @@ pholmq/TSN (GPL-2.0) @ commit 49fd49c (pinned in `orrery.rs` + `stars.rs` commen
 - [x] **Atmosphere rim/haze (2026-06-24)**: additive sky-blue shell just above the surface, FRONT-culled so
   the opaque globe occludes all but the thin ring past its silhouette -> soft blue limb halo in orbit view
   (`viz::Atmosphere` + `atmosphere_visibility`, orbit-only). Axial-tilt seasons already landed (Tychos sun).
-- [ ] Visual polish: nicer creature meshes per niche; day-side-biased atmosphere glow (currently uniform).
+- [x] **Day-biased atmosphere glow (2026-06-24)**: rim shell now carries per-vertex color driven by the sun
+  (`viz::update_atmosphere`) -> bright blue on the sunlit limb, dim airglow on the night side, warm sliver at
+  the terminator. Replaces the uniform ring.
+- [ ] Visual polish: nicer creature meshes per niche.
 - [x] **Corner inspector minimap** (DONE): a real 3D globe in the top-right that ROTATES WITH the view (2nd
       camera on RenderLayers 1, corner viewport, synced to OrbitCam), colored by a chosen FIELD. 'M' cycles
       biome / heat / moisture / elevation. (UI fixed to the main camera via IsDefaultUiCamera so the HUD doesn't

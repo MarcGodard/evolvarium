@@ -134,7 +134,7 @@ impl Plugin for VizPlugin {
                     toggle_legend,
                     (god_disturbances, crate::sim::save_world_key, crate::sim::save_on_window_close),
                     draw_selection,
-                    (minimap_sync_cam, minimap_visibility, toggle_hud, hud_visibility, planet_sky_visibility, atmosphere_visibility, minimap_input, minimap_rebuild, minimap_dynamic),
+                    (minimap_sync_cam, minimap_visibility, toggle_hud, hud_visibility, planet_sky_visibility, atmosphere_visibility, update_atmosphere, minimap_input, minimap_rebuild, minimap_dynamic),
                     (phylogeny_classify, toggle_phylo, update_phylo_panel),
                 ),
             );
@@ -361,6 +361,43 @@ fn atmosphere_visibility(
             *v = want;
         }
     }
+}
+
+// Day-bias the atmosphere rim: per-vertex glow tracks the sun. Lit hemisphere bright blue, night side a dim
+// airglow floor, warm sliver at the terminator. Only runs in orbit (the only mode the shell shows). Rewrites
+// the shell's vertex colors each frame; ico(4) (~2.5k verts) keeps it cheap.
+fn update_atmosphere(
+    mode: Res<crate::camera::CameraMode>,
+    gen: Res<GenState>,
+    offset: Res<SunOffset>,
+    atmo: Query<&Mesh3d, With<Atmosphere>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+) {
+    if *mode != crate::camera::CameraMode::Orbit {
+        return;
+    }
+    let Ok(m3) = atmo.single() else { return };
+    let Some(mesh) = meshes.get_mut(&m3.0) else { return };
+    let pos: Vec<[f32; 3]> = match mesh.attribute(Mesh::ATTRIBUTE_POSITION) {
+        Some(bevy::mesh::VertexAttributeValues::Float32x3(p)) => p.clone(),
+        _ => return,
+    };
+    let vtick = (gen.tick as i64 + offset.0).max(0) as u32;
+    let sun = crate::sphere::sun_dir(vtick);
+    let day_blue = Vec3::new(0.35, 0.55, 1.0);
+    let twilight = Vec3::new(0.9, 0.5, 0.55); // warm terminator sliver
+    let cols: Vec<[f32; 4]> = pos
+        .iter()
+        .map(|p| {
+            let lit = Vec3::from_array(*p).normalize_or_zero().dot(sun); // -1 night .. 1 sub-solar
+            let t = ((lit + 0.22) / 0.44).clamp(0.0, 1.0);
+            let day = t * t * (3.0 - 2.0 * t); // smoothstep across the terminator
+            let warm = (1.0 - (lit.abs() / 0.18)).clamp(0.0, 1.0); // bump at lit~0
+            let c = day_blue.lerp(twilight, warm * 0.6) * (0.1 + 0.95 * day); // airglow floor .. day bright
+            [c.x, c.y, c.z, 1.0]
+        })
+        .collect();
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, cols);
 }
 
 fn minimap_input(keys: Res<ButtonInput<KeyCode>>, mut mm: ResMut<Minimap>) {

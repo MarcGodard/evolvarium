@@ -365,12 +365,15 @@ fn setup_scene(
     // atmosphere rim: thin shell just above the surface, additive sky-blue, FRONT-culled (only far-side back
     // faces drawn). The opaque globe writes depth first, so the far shell is occluded EXCEPT the thin ring
     // peeking past the planet silhouette -> a soft blue limb halo, no tint over the disc. Orbit-view only
-    // (viz::atmosphere_visibility); from the surface you are inside it. Day-lit crescent set per-frame.
+    // (viz::atmosphere_visibility). Per-VERTEX color (multiplies base) is set each frame by viz::update_atmosphere:
+    // bright day-side limb, dim night airglow, warm twilight band -> a day-biased glow, not a uniform ring.
+    let mut atmo_mesh = Sphere::new(sphere::PLANET_R * 1.055).mesh().ico(4).unwrap();
+    let nverts = atmo_mesh.count_vertices();
+    atmo_mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, vec![[0.35f32, 0.55, 1.0, 1.0]; nverts]);
     commands.spawn((
-        Mesh3d(meshes.add(Sphere::new(sphere::PLANET_R * 1.055).mesh().ico(5).unwrap())),
+        Mesh3d(meshes.add(atmo_mesh)),
         MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(0.35, 0.55, 1.0),
-            emissive: LinearRgba::rgb(0.35, 0.55, 1.0),
+            base_color: Color::WHITE, // vertex colors carry the day-biased blue glow
             unlit: true,
             alpha_mode: AlphaMode::Add,
             cull_mode: Some(bevy::render::render_resource::Face::Front),
