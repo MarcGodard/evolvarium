@@ -397,6 +397,17 @@ pub const FERT_GROWTH: f32 = 0.6; // max growth-rate bonus from saturated soil
 pub const FERT_CAP: f32 = 1.5; // fertility level at which growth bonus saturates
 pub const PLANT_REPRO_FRAC: f32 = 0.5; // fraction of mass kept after budding off a child
 
+// --- land wear / soil compaction: trampling carves dirt trails (SOIL_RES grid, shared with Soil) ---
+// Grounded creatures ADD wear at their position each tick (heavier = more); ground RELAXES toward 0 slowly, so
+// busy paths/niches compact + go bare while idle ground heals. High wear REDUCES plant+grass growth and CULLS
+// grass tufts -> emergent dirt trails + grazing-pressure feedback (overused ground degrades, herds must roam).
+pub const WEAR_GAIN: f32 = 0.12;          // wear/sec a unit-size grounded creature deposits where it stands (x 0.5+size). Sized w/ WEAR_RELAX so a cell w/ ~1-2 resident creatures reaches the bare/cull range (wear_eq ~= flux x GAIN x 0.9 x DT / RELAX), idle ground stays green.
+pub const WEAR_RELAX: f32 = 0.004;        // per-tick relaxation toward 0 (slow heal; ~250-tick half-life so trails persist)
+pub const WEAR_CAP: f32 = 1.0;            // wear clamp (1 = fully compacted bare ground)
+pub const WEAR_GROWTH_PENALTY: f32 = 0.6; // max growth-rate cut from full wear (trampled ground grows less)
+pub const WEAR_GRASS_CULL: f32 = 0.55;    // wear above this kills grass tufts outright (visible bare trail). Per-tick cull prob below.
+pub const WEAR_CULL_PROB: f32 = 0.04;     // per-tick chance a tuft on over-worn ground dies (gradual baring, not instant)
+
 // --- nutrients + regulatory diet genome (Phase C, see 14/05) ---
 // 10 nutrients. Plants produce sparse profile (x soil fertility); meat balanced. Creatures absorb per
 // uptake genes into reserves, which deplete with use. Master expression gene (reserves vs uptake demand)

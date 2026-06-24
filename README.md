@@ -23,7 +23,7 @@ fixed height above the terrain: **WASD** move, arrows or right-drag to look, **S
 time-of-day, **\\** jump to noon. **Left-click** a creature/plant to inspect it; **F** follows the selection.
 Real sun shadows render in walk mode; **H** opens a legend of every control and HUD field. **M** cycles a
 corner minimap globe through field overlays (biome / heat / moisture / elevation, plus live soil / groundwater
-/ fire / creature-density); **Y** opens a live phylogeny (a species tree of the population). God controls:
+/ fire / creature-density / wear); **Y** opens a live phylogeny (a species tree of the population). God controls:
 **B** seed creatures, **P** populate the whole planet, **L** lightning, **K** cull.
 
 ### Headless + flags
@@ -53,6 +53,8 @@ cargo run -- --headless --shots=planet --shot-tick=4000   # CPU-render PNG views
 - **Food web**: plants, fruit trees (reach-gated, seed-dispersed when eaten, dropping fallen fruit),
   evergreens, fermenting fruit/detritus, carrion that rots to poison, and a soil-fertility loop where
   fertility follows water (poor dry interior, rich wetlands/coasts) and spikes where life dies and decomposes.
+- **Land wear**: grounded creatures trample the ground they cross; heavily trodden cells compact, grow less,
+  and shed their grass, so busy niches wear visible bare clearings while idle ground slowly heals.
 
 ## The genome (every trait is a trade-off)
 

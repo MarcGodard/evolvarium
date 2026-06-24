@@ -176,6 +176,35 @@ impl GroundWater {
     }
 }
 
+// Land-wear / compaction grid: per-cell trampling 0..WEAR_CAP. Grounded creatures ADD as they move; relaxes
+// toward 0 slowly (ground heals). High wear cuts plant/grass growth + culls grass -> emergent dirt trails.
+#[derive(Resource)]
+pub struct Wear {
+    pub cell: Vec<f32>,
+}
+
+impl Wear {
+    pub fn new() -> Self {
+        Wear { cell: vec![0.0; SOIL_RES * SOIL_RES] }
+    }
+    fn add(&mut self, pos: Vec3, amt: f32) {
+        let i = grid_cell(pos);
+        self.cell[i] = (self.cell[i] + amt).min(WEAR_CAP);
+    }
+    pub fn get(&self, pos: Vec3) -> f32 {
+        self.cell[grid_cell(pos)]
+    }
+    // slow heal toward 0 (geometric); busy cells stay worn because creatures re-add faster than this relaxes.
+    fn decay(&mut self) {
+        for c in &mut self.cell {
+            *c -= *c * WEAR_RELAX;
+        }
+    }
+    pub fn avg(&self) -> f32 {
+        self.cell.iter().sum::<f32>() / self.cell.len() as f32
+    }
+}
+
 // Slow climate-memory grid (geological): per-cell long-term moisture 0..1. GroundWater is fast (wets on rain,
 // dries in hours); Climate low-pass-filters the drifting rain-propensity target over MONTHS, so persistently
 // dry regions drift to desert + wet ones to lush, wet belt migrates over years. Drives plant growth/mortality
@@ -1409,6 +1438,7 @@ pub fn grass_step(
     mut soil: ResMut<Soil>,
     gw: Res<GroundWater>,
     fire: Res<Fire>,
+    wear: Res<Wear>,
     mut q: Query<(Entity, &mut PlantState, &PlantGenome, &Transform), (With<Grass>, Without<Rot>)>,
 ) {
     let _g = crate::profile::scope("grass");
@@ -1430,6 +1460,7 @@ pub fn grass_step(
     let soil_r: &Soil = &soil;
     let gw_r: &GroundWater = &gw;
     let fire_r: &Fire = &fire;
+    let wear_r: &Wear = &wear;
     // DECIDE (parallel): each tuft updates its OWN mass/age in place; dying tufts push a death intent into a
     // per-thread queue. Mortality roll draws a per-entity deterministic RNG -> order-independent. PARALLELIZATION.md.
     let mut deaths: bevy::utils::Parallel<Vec<GrassDeath>> = bevy::utils::Parallel::default();
@@ -1465,10 +1496,19 @@ pub fn grass_step(
                 out.push(GrassDeath { index: e.index().index(), entity: e, ash: 0.0, pos: ppos });
                 return;
             }
+            // trampled ground: over-worn cells go bare (tuft culled), and surviving turf grows slower.
+            let wear_here = wear_r.get(ppos);
+            if wear_here > WEAR_GRASS_CULL
+                && crate::rng::Rng::for_entity(seed, e.index().index() ^ 0x5EAD, tick).f32() < WEAR_CULL_PROB
+            {
+                out.push(GrassDeath { index: e.index().index(), entity: e, ash: 0.0, pos: ppos });
+                return;
+            }
             // grow/regrow: soil fertility + rain + light match, capped at maturity.
             let light = crate::sphere::daylight_at(pdir, tick);
             let fert = soil_r.get(ppos);
-            let boost = (1.0 + FERT_GROWTH * (fert / FERT_CAP).min(1.0)) * (1.0 + WET_GROWTH * water);
+            let trample = 1.0 - WEAR_GROWTH_PENALTY * wear_here;
+            let boost = (1.0 + FERT_GROWTH * (fert / FERT_CAP).min(1.0)) * (1.0 + WET_GROWTH * water) * trample;
             let lf = 0.35 + 0.65 * (1.0 - (light - g.light_pref).abs());
             st.mass = (st.mass + g.growth_rate() * boost * hab * lf * DT).min(g.maturity);
             st.age += 1;
@@ -1580,6 +1620,7 @@ pub fn plant_step(
     gw: Res<GroundWater>,
     climate: Res<Climate>,
     fire: Res<Fire>,
+    wear: Res<Wear>,
     mut tree_bites: ResMut<TreeBites>,
     mut bank: ResMut<SeedBank>,
     // scenario tuning harness: present ONLY under --scenario. Its presence disables reseed floor (isolated cohort
@@ -1623,6 +1664,7 @@ pub fn plant_step(
     let gw_r: &GroundWater = &gw;
     let climate_r: &Climate = &climate;
     let fire_r: &Fire = &fire;
+    let wear_r: &Wear = &wear;
     let bites_r: &TreeBites = &tree_bites;
     let tpos_r: &[Vec3] = &tree_positions;
     let pool_r: &[(Entity, Vec3, bool, PlantGenome)] = &mate_pool;
@@ -1658,7 +1700,8 @@ pub fn plant_step(
             let light = crate::sphere::daylight_at(pdir, tick);
             let fert = soil_r.get(ppos);
             let water = gw_r.get(ppos);
-            let boost = (1.0 + FERT_GROWTH * (fert / FERT_CAP).min(1.0)) * (1.0 + WET_GROWTH * water);
+            let trample = 1.0 - WEAR_GROWTH_PENALTY * wear_r.get(ppos); // trampled ground grows less (shared with tree below)
+            let boost = (1.0 + FERT_GROWTH * (fert / FERT_CAP).min(1.0)) * (1.0 + WET_GROWTH * water) * trample;
             let lf = 0.35 + 0.65 * (1.0 - (light - g.light_pref).abs());
             if let Some(tree) = tree {
                 // trees land-only: a tree in water drowns fast (no kelp/mangrove forests).
@@ -1689,7 +1732,7 @@ pub fn plant_step(
                 let moist_q = (1.0 - (m - TREE_WET_OPT).abs() / TREE_WET_TOL).clamp(0.0, 1.0);
                 let fert_q = (fert / FERT_CAP).min(1.0);
                 let soil_q = moist_q * (0.4 + 0.6 * fert_q);
-                let grow_mult = (1.0 + FERT_GROWTH * fert_q) * (TREE_WET_FLOOR + (1.0 - TREE_WET_FLOOR) * moist_q);
+                let grow_mult = (1.0 + FERT_GROWTH * fert_q) * (TREE_WET_FLOOR + (1.0 - TREE_WET_FLOOR) * moist_q) * trample;
                 let full_size = g.maturity * (1.0 + TREE_SOIL_SIZE * soil_q);
                 st.mass = (st.mass + g.growth_rate() * grow_mult * lf * temp_grow * TREE_GROWTH_SCALE * DT).min(full_size);
                 st.age += 1;
@@ -2084,6 +2127,7 @@ struct LiveBatch {
     food_despawns: Vec<(u32, Entity)>,        // idx, food eaten WHOLE (carrion/detritus/fruit) -> dedup despawn in apply
     tree_bites: Vec<(u32, Entity, f32)>,      // idx, food grazed, mass damage -> summed into TreeBites (trees + living plants)
     soil_adds: Vec<(u32, Vec3, f32)>,         // idx, pos, death-fert (deferred ResMut<Soil> write)
+    wear_adds: Vec<(u32, Vec3, f32)>,         // idx, pos, trampling (grounded land creatures -> deferred ResMut<Wear> write)
     plant_births: Vec<(u32, PlantGenome, Vec3)>, // idx, endozoochory-dispersed offspring (already mutated+placed)
     carrion: Vec<(u32, Vec3, f32, f32)>,      // idx, pos, mass, fattiness -> spawn_carrion
     self_despawns: Vec<(u32, Entity)>,        // idx, dead creature entity (continuous mode -> becomes carrion, body gone)
@@ -2127,6 +2171,7 @@ pub fn live_step(
     mut commands: Commands,
     mut tree_bites: ResMut<TreeBites>,
     mut soil: ResMut<Soil>,
+    mut wear: ResMut<Wear>,
     fire: Res<Fire>,
     fq: Query<(Entity, &Transform, &PlantState, &PlantGenome, Option<&Rot>, Option<&Tree>, Option<&Ferment>, Option<&Seed>), (With<Food>, Without<Creature>)>,
 ) {
@@ -2389,6 +2434,11 @@ pub fn live_step(
         }
         loco.path += np.distance(pos); // accumulate 3D distance walked (diagnostic)
         ct.translation = np;
+        // land wear: a grounded creature on dry land tramples the ground here (heavier body -> more). Fliers
+        // aloft + swimmers in water don't compact soil. Deferred -> applied + decayed in the serial apply.
+        if loco.alt < GROUND_EPS && !crate::sphere::is_ocean(nd) {
+            bat.wear_adds.push((idx, np, WEAR_GAIN * (0.5 + genome.size) * dt));
+        }
         // orient body: local +Y = surface normal (upright), local +Z = travel dir (head/eyes at +Z) -> creature
         // FACES where it walks instead of yawing arbitrarily.
         let up = nd; // outward surface normal (unit)
@@ -2889,6 +2939,7 @@ pub fn live_step(
     let mut food_despawns: Vec<(u32, Entity)> = Vec::new();
     let mut bites: Vec<(u32, Entity, f32)> = Vec::new();
     let mut soil_adds: Vec<(u32, Vec3, f32)> = Vec::new();
+    let mut wear_adds: Vec<(u32, Vec3, f32)> = Vec::new();
     let mut plant_births: Vec<(u32, PlantGenome, Vec3)> = Vec::new();
     let mut carrion: Vec<(u32, Vec3, f32, f32)> = Vec::new();
     let mut self_despawns: Vec<(u32, Entity)> = Vec::new();
@@ -2897,6 +2948,7 @@ pub fn live_step(
         food_despawns.append(&mut b.food_despawns);
         bites.append(&mut b.tree_bites);
         soil_adds.append(&mut b.soil_adds);
+        wear_adds.append(&mut b.wear_adds);
         plant_births.append(&mut b.plant_births);
         carrion.append(&mut b.carrion);
         self_despawns.append(&mut b.self_despawns);
@@ -2905,6 +2957,7 @@ pub fn live_step(
     food_despawns.sort_by_key(|d| d.0);
     bites.sort_by_key(|d| d.0);
     soil_adds.sort_by_key(|d| d.0);
+    wear_adds.sort_by_key(|d| d.0);
     plant_births.sort_by_key(|d| d.0);
     carrion.sort_by_key(|d| d.0);
     self_despawns.sort_by_key(|d| d.0);
@@ -2930,6 +2983,11 @@ pub fn live_step(
     for (_, pos, amt) in &soil_adds {
         soil.add(*pos, *amt);
     }
+    // land wear: apply this tick's trampling (sorted -> deterministic), then heal the whole grid one step.
+    for (_, pos, amt) in &wear_adds {
+        wear.add(*pos, *amt);
+    }
+    wear.decay();
     // carrion from this tick's deaths (sorted -> deterministic new entity indices)
     for (_, pos, mass, fat) in &carrion {
         spawn_carrion(&mut commands, *pos, *mass, *fat);
@@ -3016,6 +3074,7 @@ pub fn generation_step(
     gw: Res<GroundWater>,
     climate: Res<Climate>,
     fire: Res<Fire>,
+    wear: Res<Wear>,
     weather: Res<Weather>,
     mut exit: MessageWriter<AppExit>,
     niche: Res<crate::niche::NicheTracker>, // --until-sustain stop: all niches quiet for a full window
@@ -3090,8 +3149,8 @@ pub fn generation_step(
             let avg_qual: f32 = pq.iter().map(|(g, _)| g.quality).sum::<f32>() / plant_n as f32;
             let avg_wet: f32 = pq.iter().map(|(g, _)| g.wet).sum::<f32>() / plant_n as f32;
             info!(
-                "t {:>6} | pop {:>3} | energy {:.1} [f{:.1}/s{:.1}/F{:.1}] adp {:.2} | mast {:.2} brd {:.1} | life-fit {:.1} | age {:.0} | sens {:.1} | bite {:.2} | rig {:.2} | temp {:.2} lng {:.2} met {:.2} par {:.2} lat {:.2} | swim {:.2} alp {:.2} aq {} hi {} | def {:.2} nut {:.2} qual {:.2} wet {:.2} | plants {} | soil {:.2} | rain {:.2} fire {:.3}",
-                gen.tick, pop, e / n, fa / n, su / n, ft / n, adp / n, mast / n, brd / n, f / n, age / n, sens / n, bite / n, rig / n, temp / n, lng / n, met / n, par / n, abslat / n, sw / n, alp / n, aq, hi, avg_def, avg_nut, avg_qual, avg_wet, plant_n, soil.avg(), weather.rain, fire.avg()
+                "t {:>6} | pop {:>3} | energy {:.1} [f{:.1}/s{:.1}/F{:.1}] adp {:.2} | mast {:.2} brd {:.1} | life-fit {:.1} | age {:.0} | sens {:.1} | bite {:.2} | rig {:.2} | temp {:.2} lng {:.2} met {:.2} par {:.2} lat {:.2} | swim {:.2} alp {:.2} aq {} hi {} | def {:.2} nut {:.2} qual {:.2} wet {:.2} | plants {} | soil {:.2} | rain {:.2} fire {:.3} | wear {:.3} bare {}",
+                gen.tick, pop, e / n, fa / n, su / n, ft / n, adp / n, mast / n, brd / n, f / n, age / n, sens / n, bite / n, rig / n, temp / n, lng / n, met / n, par / n, abslat / n, sw / n, alp / n, aq, hi, avg_def, avg_nut, avg_qual, avg_wet, plant_n, soil.avg(), weather.rain, fire.avg(), wear.avg(), wear.cell.iter().filter(|&&w| w > WEAR_GRASS_CULL).count()
             );
             // Track best healthy snapshot for --save. Score = pop, gated on well-fed (avg energy >= 30) so we never
             // bank a starving crowd. Captured only when saving (snapshot clone not free).
@@ -3214,7 +3273,7 @@ pub fn generation_step(
     let avg_wet: f32 = pq.iter().map(|(g, _)| g.wet).sum::<f32>() / plant_n as f32;
     if gen.diet {
         let avg_rig: f32 = scored.iter().map(|(_, g)| g.rigidity).sum::<f32>() / n as f32;
-        info!("gen {:>3} | nutri {:>6.2} | sens {:.1} r{:.0} | rig {:.2} | bite {:.2} vs def {:.2} | light {:.2} sz {:.2} sw {:.2} so {:.2} brain {:.1} | plant-nut {:.2} qual {:.2} wet {:.2} | roam {:.2} elev {:.1} | plants {} soil {:.2} gw {:.2} clim {:.2}[{:.2}-{:.2}] desert {:.0}% fire {:.3} | trees {} h{:.2} b{:.2}", gen.generation, avg, avg_sensors, avg_range, avg_rig, avg_bite, avg_def, avg_light, avg_size, avg_swim, avg_social, avg_hidden, avg_nut, avg_qual, avg_wet, avg_roam, avg_elev, plant_n, soil.avg(), gw.avg(), climate.avg(), climate.range().0, climate.range().1, climate.land_arid_frac(0.25) * 100.0, fire.avg(), tree_n, avg_tree_h, avg_tree_b);
+        info!("gen {:>3} | nutri {:>6.2} | sens {:.1} r{:.0} | rig {:.2} | bite {:.2} vs def {:.2} | light {:.2} sz {:.2} sw {:.2} so {:.2} brain {:.1} | plant-nut {:.2} qual {:.2} wet {:.2} | roam {:.2} elev {:.1} | plants {} soil {:.2} gw {:.2} clim {:.2}[{:.2}-{:.2}] desert {:.0}% fire {:.3} wear {:.3} | trees {} h{:.2} b{:.2}", gen.generation, avg, avg_sensors, avg_range, avg_rig, avg_bite, avg_def, avg_light, avg_size, avg_swim, avg_social, avg_hidden, avg_nut, avg_qual, avg_wet, avg_roam, avg_elev, plant_n, soil.avg(), gw.avg(), climate.avg(), climate.range().0, climate.range().1, climate.land_arid_frac(0.25) * 100.0, fire.avg(), wear.avg(), tree_n, avg_tree_h, avg_tree_b);
     } else {
         info!("gen {:>3} | food {:>6.2} | sens {:.1} r{:.0} | bite {:.2} vs def {:.2} | plant-nut {:.2} qual {:.2} wet {:.2} | roam {:.2} elev {:.1} | plants {} soil {:.2} gw {:.2}", gen.generation, avg, avg_sensors, avg_range, avg_bite, avg_def, avg_nut, avg_qual, avg_wet, avg_roam, avg_elev, plant_n, soil.avg(), gw.avg());
     }

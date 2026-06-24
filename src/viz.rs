@@ -126,7 +126,7 @@ impl Plugin for VizPlugin {
 // Fields 0..MM_STATIC are STATIC (position-only -> sampled once per switch). Fields >= MM_STATIC are
 // DYNAMIC live overlays (soil fertility / groundwater / fire / creature density) -> rebuilt each frame from
 // sim resources so the minimap shows the world changing in real time.
-const MM_FIELDS: [&str; 8] = ["biome", "heat", "moisture", "elevation", "soil", "water", "fire", "life"];
+const MM_FIELDS: [&str; 9] = ["biome", "heat", "moisture", "elevation", "soil", "water", "fire", "life", "wear"];
 const MM_STATIC: usize = 4; // first dynamic field index
 const MM_RES: usize = 64; // globe lat bands (small: minimap is tiny)
 const MM_SIZE: f32 = 200.0; // viewport square, logical px
@@ -182,7 +182,8 @@ fn minimap_dynamic_color(field: usize, d: Vec3, v: f32) -> [f32; 3] {
         4 => [0.25, 0.95, 0.25], // soil fertility: barren -> lush green
         5 => [0.15, 0.45, 1.0],  // groundwater: dry -> blue
         6 => [1.0, 0.55, 0.1],   // fire: dark -> burning orange
-        _ => [1.0, 0.95, 0.3],   // life (creature density): empty -> bright yellow
+        7 => [1.0, 0.95, 0.3],   // life (creature density): empty -> bright yellow
+        _ => [0.62, 0.42, 0.24], // wear: untrodden -> bare dirt-brown trail
     };
     let t = v.clamp(0.0, 1.0);
     [dim[0] + (hot[0] - dim[0]) * t, dim[1] + (hot[1] - dim[1]) * t, dim[2] + (hot[2] - dim[2]) * t]
@@ -289,6 +290,7 @@ fn minimap_dynamic(
     soil: Res<crate::sim::Soil>,
     gw: Res<crate::sim::GroundWater>,
     fire: Res<crate::sim::Fire>,
+    wear: Res<crate::sim::Wear>,
     creatures: Query<&Transform, With<Creature>>,
 ) {
     let field = mm.field;
@@ -300,6 +302,7 @@ fn minimap_dynamic(
         4 => soil.cell.iter().map(|&f| (f / MM_SOIL_MAX).clamp(0.0, 1.0)).collect(), // fertility 0..MM_SOIL_MAX (past FERT_CAP so death spikes show)
         5 => gw.cell.iter().map(|&w| w.clamp(0.0, 1.0)).collect(),                                // groundwater already 0..1
         6 => fire.cell.iter().map(|&f| f.clamp(0.0, 1.0)).collect(),                              // fire already 0..1
+        8 => wear.cell.iter().map(|&w| w.clamp(0.0, 1.0)).collect(),                              // wear already 0..WEAR_CAP(=1)
         _ => {
             let mut d = vec![0.0f32; n]; // creature density: count per cell / MM_DENSITY_FULL
             for t in creatures.iter() {

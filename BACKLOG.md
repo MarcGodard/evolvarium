@@ -267,13 +267,14 @@ live in `config.rs`; the live conversion plan is `SPHERE-PLAN.md`.
         + 4 LIVE (soil fertility / groundwater / fire / creature-density), rebuilt each frame from sim
         resources via grid_cell sampling + build_globe_colored. viz::minimap_dynamic.
   - [ ] Follow-up: walk-mode could aim the minimap at the walker instead of OrbitCam.
-- [ ] **Land wear / soil compaction**: creatures walking compacts the ground -> where animals tread most,
-      plants grow less. A per-cell wear field (like Soil/GroundWater, SOIL_RES grid) that creatures ADD to as
-      they move (accumulate along the path in live_step), decays slowly, and REDUCES plant/grass growth +
-      habitability where high. HIGH wear also CULLS existing grass tufts (grass_step kills tufts on heavily
-      trodden cells), so busy paths go visibly BARE -> emergent dirt trails, not just slower regrowth. Plus
-      grazing-pressure feedback (overused ground degrades -> herds must roam). Pairs with the minimap (a "wear"
-      overlay). Balance-phase: tune wear gain/decay so it shapes movement without desertifying popular niches.
+- [x] **Land wear / soil compaction (2026-06-23)**: `Wear` grid (SOIL_RES, mirrors Soil/GroundWater).
+      Grounded LAND creatures add wear along their path (`bat.wear_adds` in live_step decide, x 0.5+size;
+      fliers aloft + swimmers in water don't trample), applied + decayed (slow heal, ~250-tick half-life) in
+      the serial apply. High wear CUTS plant/grass/tree growth (`trample = 1 - WEAR_GROWTH_PENALTY*wear`) and
+      CULLS grass tufts on over-worn cells (WEAR_GRASS_CULL + per-tick WEAR_CULL_PROB) -> busy niches go
+      visibly BARE (emergent dirt clearings) + grazing-pressure feedback. New minimap field 'wear' (dirt-brown
+      overlay, 9 fields now). Verified at full pop (`--load --gens=3-4`): pop steady 1100, plants ~4230,
+      ~25-30 land cells trail-level bare + self-limiting (no desertification). Continuous log adds `wear`/`bare`.
 - [ ] **Dead-tree logs + hideouts**: when a tree dies it drops a fallen TRUNK/LOG on the ground (a new
       ground-prop entity, not standing), with a VERY long rot time (logs persist for ages vs normal carrion/
       detritus). Small creatures (size below a threshold) can HIDE in/behind a log -> predation cover (a hidden

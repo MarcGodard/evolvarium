@@ -148,6 +148,7 @@ fn main() {
     app.insert_resource(sim::GroundWater::new()); // rain-fed ground-water grid
     app.insert_resource(sim::Climate::new()); // slow climate-memory grid (geological desert/rainforest drift)
     app.insert_resource(sim::Fire::new()); // lightning-ignited wildfire grid
+    app.insert_resource(sim::Wear::new()); // trampling/compaction grid: creatures wear paths, ground heals slowly
     app.init_resource::<sim::Weather>(); // rainfall intensity (storm onset + decay)
     app.init_resource::<sim::TreeBites>(); // per-tick fruit-tree grazing accumulator
     app.init_resource::<sim::SeedBank>(); // dormancy seed bank: buried seeds germinate later (plant_step)
