@@ -96,17 +96,9 @@ impl Plugin for CapturePlugin {
 
 // Aim camera at homeland from fixed side+elevated vantage, ignoring walk/orbit. Deterministic so test
 // objects + shadows always framed.
-fn force_cam(cfg: Res<CaptureCfg>, focus: Res<crate::orrery_view::OrreryFocus>, mut q: Query<&mut Transform, (With<Camera3d>, With<crate::camera::OrbitCam>)>) {
+fn force_cam(cfg: Res<CaptureCfg>, mut q: Query<&mut Transform, (With<Camera3d>, With<crate::camera::OrbitCam>)>) {
     if cfg.orrery {
-        // orrery view: orbit the focus point (Evolvarium by default). cap-yaw/pitch aim, cap-dist zooms.
-        let center = focus.0;
-        let pitch = if cfg.pitch != 0.0 { cfg.pitch } else { 0.45 };
-        let dist = if cfg.dist > 500.0 { cfg.dist } else { 1800.0 };
-        let dir = Vec3::new(pitch.cos() * cfg.yaw.cos(), pitch.sin(), pitch.cos() * cfg.yaw.sin());
-        if let Ok(mut t) = q.single_mut() {
-            *t = Transform::from_translation(center + dir * dist).looking_at(center, Vec3::Y);
-        }
-        return;
+        return; // OrreryCam set in setup_capture_view; apply_orrery frames it from the focus point
     }
     if cfg.orbit {
         // --cap-lat: aim orbit cam straight down at chosen latitude on homeland meridian, top-down pole view.
@@ -154,9 +146,16 @@ fn setup_capture_view(
     mut offset: ResMut<SunOffset>,
     mut q: Query<&mut WalkCam>,
     mut orbit_q: Query<&mut crate::camera::OrbitCam>,
+    mut orrery_q: Query<&mut crate::camera::OrreryCam>,
 ) {
     if cfg.orrery {
-        *mode = CameraMode::Orrery; // bodies positioned by orrery_view; force_cam owns the camera transform
+        *mode = CameraMode::Orrery;
+        // drive the OrreryCam from cfg so apply_orrery frames it AND body sizing (reads dist) matches
+        if let Ok(mut o) = orrery_q.single_mut() {
+            o.yaw = cfg.yaw;
+            o.pitch = if cfg.pitch != 0.0 { cfg.pitch } else { 0.45 };
+            o.dist = if cfg.dist > 1.0 { cfg.dist } else { 1500.0 };
+        }
         return;
     }
     let home = crate::sim::homeland_center();

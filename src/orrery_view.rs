@@ -310,7 +310,10 @@ fn update_sky_labels(
     let r = STAR_SHELL * 0.9;
     for (label, mut node, mut vis) in &mut q {
         let (world, show) = match label {
-            SkyLabel::Body(i) => (ORRERY_CENTER + positions.get(*i).copied().unwrap_or(Vec3::ZERO), on && ov.labels),
+            SkyLabel::Body(i) => {
+                let p = if *i < positions.len() { body_render_pos(*i, &positions) } else { Vec3::ZERO };
+                (ORRERY_CENTER + p, on && ov.labels)
+            }
             SkyLabel::Zodiac(k) => {
                 let lon = TAU * *k as f32 / 12.0 + TAU / 24.0; // center of each 30-deg sign
                 (ORRERY_CENTER + Vec3::new(lon.cos(), 0.0, lon.sin()) * r, on && ov.zodiac)
@@ -520,11 +523,26 @@ fn size_sirius(mode: Res<CameraMode>, cam: Query<&crate::camera::OrreryCam>, mut
     }
 }
 
-// Render radius for a body: CONSTANT angular size (scales with camera distance) so every body, even the tiny
-// moon/asteroids, stays a visible dot at any zoom. Because it shrinks as you zoom in, close pairs (moon next
-// to Earth, Phobos/Deimos at Mars) separate out when you fly in close.
+// Render radius for a body. Two regimes blended by max():
+//  - far: a constant-ANGULAR floor (scales with distance) so even the tiny moon/asteroids stay visible dots;
+//  - close: clamped to the body's TRUE size, so flying in makes it GROW on screen (real geometry) -> you can
+//    actually zoom into Evolvarium until it fills the view, instead of it staying a fixed speck.
 fn body_render_radius(size: f32, cam_dist: f32) -> f32 {
-    cam_dist * 0.0026 * size.clamp(0.25, 8.0).sqrt()
+    let angular_floor = cam_dist * 0.0026 * size.clamp(0.25, 8.0).sqrt();
+    angular_floor.max(size)
+}
+
+// The Moon's true orbit (0.255) is tiny vs body render sizes, so it would sit INSIDE Evolvarium. For the
+// orrery VIEW we push it out so you can watch it circle the planet (render-only; the sky's moon direction
+// in sim/planet views is unchanged). Earth-relative offset is scaled, keeping the orbital phase.
+const MOON_VIS_EXAG: f32 = 40.0;
+fn body_render_pos(idx: usize, pos: &[Vec3]) -> Vec3 {
+    if idx == crate::orrery::MOON {
+        let earth = pos[crate::orrery::EARTH];
+        earth + (pos[idx] - earth) * MOON_VIS_EXAG
+    } else {
+        pos[idx]
+    }
 }
 
 // Click-to-identify in the orrery: a body (precise sphere hit), else Sirius / nearest star (angular).
@@ -557,7 +575,7 @@ fn pick_orrery(
     for b in &bodies {
         let (_, size, _) = crate::orrery::body_meta(b.idx);
         let r = body_render_radius(size, dist).max(dist * 0.012); // generous pick disk
-        if let Some(t) = crate::viz::ray_hit(o, d, ORRERY_CENTER + pos[b.idx], r) {
+        if let Some(t) = crate::viz::ray_hit(o, d, ORRERY_CENTER + body_render_pos(b.idx, &pos), r) {
             if best_body.is_none_or(|(bt, _)| t < bt) {
                 best_body = Some((t, b.idx));
             }
@@ -600,7 +618,7 @@ fn position_orrery_bodies(
     let pos = crate::orrery::body_positions(orrery_tau(gen.tick));
     let dist = cam.single().map(|c| c.dist).unwrap_or(1800.0);
     for (b, mut tf) in &mut q {
-        tf.translation = ORRERY_CENTER + pos[b.idx];
+        tf.translation = ORRERY_CENTER + body_render_pos(b.idx, &pos);
         let (_, size, _) = crate::orrery::body_meta(b.idx);
         tf.scale = Vec3::splat(body_render_radius(size, dist));
     }

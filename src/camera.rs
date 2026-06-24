@@ -223,9 +223,10 @@ fn zoom(
         *mode = CameraMode::Walk;
         info!("camera: WALK (zoomed onto the surface)");
     } else if new > MAX_DIST {
-        // zoom OUT past the farthest orbit -> back up to the ORRERY, zoomed in on Evolvarium.
+        // zoom OUT past the farthest orbit -> back up to the ORRERY, just outside the land threshold (so it
+        // does not immediately re-trigger the land switch) with Evolvarium still framed.
         if let Ok(mut o) = orrery.single_mut() {
-            o.dist = ORRERY_MIN_DIST * 6.0;
+            o.dist = ORRERY_LAND_DIST * 1.2;
         }
         *mode = CameraMode::Orrery;
         info!("camera: ORRERY (zoomed out from Evolvarium)");
@@ -247,8 +248,11 @@ fn apply_orbit(mode: Res<CameraMode>, selected: Res<Selected>, mut q: Query<(&mu
 
 // --- orrery mode (TSN solar system at the far ORRERY_CENTER) ---
 
-const ORRERY_MIN_DIST: f32 = 6.0;    // fly right in to resolve close pairs (moon by Earth, Mars' moons)
+const ORRERY_MIN_DIST: f32 = 6.0;    // hard floor (the land switch fires first)
 const ORRERY_MAX_DIST: f32 = 8000.0; // whole system incl. outer planets (kept under the 12k far clip)
+// Zoom-in past this distance-to-focus drops into the planet ORBIT view. ~90 puts Evolvarium (render radius
+// ~4) at ~11% of the screen height (FOV ~PI/4) just before the switch -- the planet is clearly there first.
+const ORRERY_LAND_DIST: f32 = 90.0;
 
 fn orrery_drag(
     mode: Res<CameraMode>,
@@ -285,15 +289,15 @@ fn orrery_zoom(mut mode: ResMut<CameraMode>, scroll: Res<AccumulatedMouseScroll>
     let Ok(mut cam) = q.single_mut() else { return };
     // scroll zoom proportional to distance -> smooth from inner bodies out to Pluto
     let new = cam.dist * (1.0 - scroll.delta.y * 0.1);
-    if new < ORRERY_MIN_DIST {
-        // zoomed all the way into Evolvarium -> continue seamlessly into the planet ORBIT view (far out)
+    if new < ORRERY_LAND_DIST {
+        // zoomed in until Evolvarium fills ~11% of the screen -> continue into the planet ORBIT view (far out)
         if let Ok(mut o) = orbit.single_mut() {
             o.dist = MAX_DIST;
         }
         *mode = CameraMode::Orbit;
         info!("camera: ORBIT (zoomed into Evolvarium)");
     } else {
-        cam.dist = new.min(ORRERY_MAX_DIST);
+        cam.dist = new.clamp(ORRERY_LAND_DIST, ORRERY_MAX_DIST);
     }
 }
 
