@@ -173,9 +173,19 @@ pholmq/TSN (GPL-2.0) @ commit 49fd49c (pinned in `orrery.rs` + `stars.rs` commen
         `evolved-morph.json` -> loaded -> body graphs develop + render (novel bodies, e.g. radial-spiked).
         Seed gitignored (41MB full-world save; reflects UNTUNED balance) + DEFAULT_SEED swap DEFERRED until
         after P2 balance retune, then commit the tuned showcase seed.
-      - [ ] **P2** physics gym (`avian3d`, `--gym`): actuated joints from the graph, brain learns gaits;
-        bake locomotion stats back; harness creature arm + tune/audit-morphology workflows.
+      - [x] **P2.1** avian3d gym (`--gym`): body drops into an isolated physics arena, deterministic fixed
+        step, settles. (avian 0.6 = bevy 0.18; 0.7 needs bevy 0.19.)
+      - [x] **P2.2** articulated body: per-part rigid bodies + joints from JointSpec; hinge limbs driven by an
+        AngularMotor CPG; self-collision filtered; horizontal-COM locomotion score.
+      - [x] **P2.3** gym evolution loop (`--gym-evolve`): evolvable gait genes (phase/amp per joint), GA selects
+        for locomotion (elitism), best mover saved. Reward-hacking guard: cull divergent bodies.
+      - [x] **P2.4** harness + tuned showcase: `--gym-evolve --save` exports a planet-loadable cohort;
+        `--merge-snap` folds cohorts into a creature seed; `tools/tune-locomotion.workflow.js` (agent per
+        body-niche). Showcase = gym-evolved COMPLEX movers -> seed planet -> short ecological tuning (8 gens,
+        bodies stay rich: sz 0.42 vs 0.20 for pure-30-gen) -> `evolved-morph.json`, now the DEFAULT_SEED. Pop
+        sustains healthy (~1043); creatures render varied + complex (limbs, eyes, herding).
       - [ ] **P3** HyperNEAT-style CPPN brain scaling controller to body; optional live spotlight physics.
+        (Deferred: not needed for working tuned creatures; the planet is kinematic + uses geometry stats.)
       NOTE (user 2026-06-24): "as much if not more variety than earth", "go full out". Merge to `main` only
       after P1 verified green + user sign-off.
 

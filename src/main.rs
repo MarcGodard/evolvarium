@@ -72,7 +72,7 @@ fn main() {
     // Render mode + no explicit --load: auto-load showcase seed if present so `cargo run` opens into
     // full breeding world (loaded continuous skips warm-up). --no-load forces fresh warm-up start.
     // Headless never auto-loads.
-    const DEFAULT_SEED: &str = "evolved-continuous.json";
+    const DEFAULT_SEED: &str = "evolved-morph.json"; // morphology branch: gym-evolved complex bodies + ecological tuning
     if !headless && load.is_none() && !flag(&args, "--no-load") && std::path::Path::new(DEFAULT_SEED).exists() {
         load = Some(DEFAULT_SEED.to_string());
     }
