@@ -41,6 +41,11 @@ pholmq/TSN (GPL-2.0) @ commit 49fd49c (pinned in `orrery.rs` + `stars.rs` commen
   (`stars::build_milky_way`, galactic->equatorial transform). Moon got a procedural cratered texture
   (`stars::moon_texture`) on a UV sphere, tidally locked toward the planet, SUN-LIT for real phases (lit
   crescent + dark-side ghost; reads as a silhouette when transiting the sun). Sun disc brightened/whiter.
+- [x] **Sun glow + night-cloud fix (2026-06-24)**: real soft sun halo via a camera-facing additive
+  radial-gradient billboard (`stars::sun_glow_texture` + `viz::SunGlow`/`update_sun_glow`) that blooms warm
+  at dawn/dusk and dims during eclipses, replacing the removed solid corona shells (which dwarfed the planet
+  in orbit). Cloud night side no longer paints brown discs from orbit: warmth now gates to the lit hemisphere
+  only and night clouds fade to dim cool grey + more transparent.
 - [x] **Bodies visible at any zoom**: constant-angular-size rendering so the moon/Phobos/Deimos/asteroids
   stay visible; orrery min-zoom 6 so you can fly in and resolve the moon by Evolvarium.
 - [x] **Sirius as a body** on the precession apsidal line (bright blue-white), labeled + click-identifiable.

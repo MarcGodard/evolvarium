@@ -318,6 +318,43 @@ pub fn moon_texture() -> Image {
     )
 }
 
+/// Soft radial sun-glow sprite for an additive camera-facing billboard (a real halo, not the flat solid
+/// shells that dwarfed the planet in orbit). Falloff baked into RGB so the transparent rim ADDS ~nothing;
+/// tight hot core + long warm skirt. Warm white core -> amber skirt. Premultiplied look for AlphaMode::Add.
+pub fn sun_glow_texture() -> Image {
+    const S: usize = 192;
+    let c = (S as f32 - 1.0) * 0.5;
+    let mut data = vec![0u8; S * S * 4];
+    for y in 0..S {
+        for x in 0..S {
+            let dx = (x as f32 - c) / c;
+            let dy = (y as f32 - c) / c;
+            let d = (dx * dx + dy * dy).sqrt().min(1.0); // 0 center .. 1 edge
+            // two-lobe falloff: hot near-white core (tight) + broad amber skirt (soft) -> sun-like bloom.
+            let core = (1.0 - (d / 0.32).min(1.0)).powf(2.0);
+            let skirt = (1.0 - d).powf(2.6);
+            let g = (core + 0.55 * skirt).clamp(0.0, 1.0);
+            // warm white at center, shift amber outward
+            let warm = (d - 0.25).clamp(0.0, 1.0);
+            let r = g;
+            let gr = g * (1.0 - 0.20 * warm);
+            let b = g * (1.0 - 0.55 * warm);
+            let i = (y * S + x) * 4;
+            data[i] = (r * 255.0) as u8;
+            data[i + 1] = (gr * 255.0) as u8;
+            data[i + 2] = (b * 255.0) as u8;
+            data[i + 3] = (g * 255.0) as u8;
+        }
+    }
+    Image::new(
+        Extent3d { width: S as u32, height: S as u32, depth_or_array_layers: 1 },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::RENDER_WORLD,
+    )
+}
+
 /// Build constellation lines as a single LineList mesh from TSN constellations.json (polylines of HIP ids),
 /// looked up in `hip_dir`. Lines sit just inside the star shell (`r`). None if nothing resolved.
 pub fn build_constellation_lines(hip_dir: &HashMap<u32, Vec3>, r: f32) -> Option<Mesh> {

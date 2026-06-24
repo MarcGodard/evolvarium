@@ -78,6 +78,8 @@ pub struct Moon;
 #[derive(Component)]
 pub struct SunDisc; // visible glowing sun (follows light direction)
 #[derive(Component)]
+pub struct SunGlow; // camera-facing additive halo around the sun disc (soft radial bloom)
+#[derive(Component)]
 pub struct SkyStars; // real BSC starfield shell; wheels with the day (rotate_sky_stars)
 #[derive(Component)]
 pub struct SkyPlanet {
@@ -124,7 +126,7 @@ impl Plugin for VizPlugin {
                     toggle_sensors,
                     draw_sensors,
                     (add_plant_visuals, size_plants, add_grass_visuals, add_seaweed_visuals, size_creatures, flap_wings),
-                    (day_night_lighting, time_of_day, toggle_shadows, walk_ambient, update_daycycle, track_underwater, update_sky, toggle_underwater_tint, animate_ocean, update_globe_climate, update_aurora_curtains, rotate_sky_stars, position_sky_planets, fade_sky_stars),
+                    (day_night_lighting, update_sun_glow, time_of_day, toggle_shadows, walk_ambient, update_daycycle, track_underwater, update_sky, toggle_underwater_tint, animate_ocean, update_globe_climate, update_aurora_curtains, rotate_sky_stars, position_sky_planets, fade_sky_stars),
                     rain_visuals,
                     fire_visuals,
                     meteor_visuals,
@@ -1582,6 +1584,37 @@ fn day_night_lighting(
     }
 }
 
+// Sun-glow billboard: sit on the sun direction (just inside the disc), face the main camera, scale down in
+// daylight (the bright sky already washes the halo out; full bloom only reads at dawn/dusk/night/orbit) and
+// dim toward an eclipse. Camera-facing keeps the round bloom round from every angle; planet depth-occludes it
+// when the sun is below the horizon (additive keeps depth-test, drops depth-write).
+fn update_sun_glow(
+    gen: Res<GenState>,
+    offset: Res<SunOffset>,
+    cam: Query<&Transform, (With<crate::camera::OrbitCam>, Without<SunGlow>)>,
+    mut glow: Query<(&mut Transform, &MeshMaterial3d<StandardMaterial>), With<SunGlow>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    let Ok(cam_tf) = cam.single() else { return };
+    let vtick = (gen.tick as i64 + offset.0).max(0) as u32;
+    let sd = crate::sphere::sun_dir(vtick);
+    let md = crate::sphere::moon_dir(vtick);
+    // eclipse dim: reuse the solar-coverage geometry (moon over sun) -> fade the corona during totality.
+    let ar = crate::sphere::MOON_R / crate::sphere::MOON_ORBIT;
+    let sep = sd.dot(md).clamp(-1.0, 1.0).acos();
+    let solar = ((2.0 * ar - sep) / (2.0 * ar)).clamp(0.0, 1.0);
+    for (mut tf, mat) in &mut glow {
+        tf.translation = sd * (crate::sphere::SUN_DIST * 0.985);
+        // billboard: rotate quad normal (+Z) toward camera.
+        let to_cam = (cam_tf.translation - tf.translation).normalize_or_zero();
+        tf.rotation = Quat::from_rotation_arc(Vec3::Z, to_cam);
+        if let Some(m) = materials.get_mut(&mat.0) {
+            let b = (1.0 - 0.92 * solar).max(0.05);
+            m.base_color = Color::srgb(b, b * 0.96, b * 0.86); // dim warm-white during eclipse
+        }
+    }
+}
+
 // Wheel the real starfield with the planet's daily spin. Equatorial coords -> rotate about +Y (celestial
 // pole). FULL tick keeps it in step with sun/moon/planets (which carry the obliquity via ecliptic_to_sky).
 fn rotate_sky_stars(gen: Res<GenState>, offset: Res<SunOffset>, mut q: Query<&mut Transform, With<SkyStars>>) {
@@ -1913,10 +1946,18 @@ fn update_clouds(
             // the sun grazes the cloud (sunrise/sunset), grey underside when thick. Faint emissive floor keeps
             // night-side clouds as dim moonlit ghosts instead of going pure black.
             let lit = dir.dot(sun); // -1 anti-sun .. 1 sub-solar
-            let warm = (1.0 - lit.max(0.0) / 0.45).clamp(0.0, 1.0); // 1 at grazing/low sun .. 0 overhead
+            // warmth peaks at the terminator on the LIT side only (grazing dawn/dusk gold). GOTCHA: keying off
+            // lit.max(0) painted the WHOLE anti-sun hemisphere full-warm -> from orbit every night cloud read as
+            // a brown disc. Gate warm to lit>0; the night side fades cool+dim instead.
+            let warm = if lit > 0.0 { (1.0 - lit / 0.45).clamp(0.0, 1.0) } else { 0.0 };
+            let night = (-lit / 0.30).clamp(0.0, 1.0); // 0 at terminator .. 1 deep night
             let shade = 1.0 - 0.30 * cov; // thick cloud = greyer
-            let albedo = Vec3::new(0.97, 0.98, 1.0).lerp(Vec3::new(1.0, 0.72, 0.5), warm * 0.8) * shade;
-            m.base_color = Color::srgba(albedo.x, albedo.y, albedo.z, (0.5 * puff.grow).min(0.55));
+            let mut albedo = Vec3::new(0.97, 0.98, 1.0).lerp(Vec3::new(1.0, 0.72, 0.5), warm * 0.8) * shade;
+            // night side: fade to a dim cool grey (moonlit), not golden -> no brown blobs from orbit.
+            albedo = albedo.lerp(Vec3::new(0.13, 0.14, 0.18), night);
+            // night clouds also go more transparent so they recede against the dark planet from orbit.
+            let alpha = (0.5 * puff.grow).min(0.55) * (1.0 - 0.45 * night);
+            m.base_color = Color::srgba(albedo.x, albedo.y, albedo.z, alpha);
             // Soft grey scatter floor so the SHADED side (anti-sun lobes, limb clouds seen from orbit) reads as
             // a cloud, not a dark floating rock. Small vs full sun on the lit side, so day clouds stay bright.
             m.emissive = LinearRgba::rgb(0.09, 0.095, 0.11) * puff.grow;

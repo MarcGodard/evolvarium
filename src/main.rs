@@ -433,8 +433,9 @@ fn setup_scene(
     ));
     // visible sun disc: bright emissive sphere far out along sun direction (moved each frame). Sized so
     // on-sky size ~matches the moon (real Earth coincidence + the eclipse geometry depends on it -> do NOT
-    // enlarge). Bright warm-white emissive reads as a hot sun. (Corona/glow needs a radial-gradient billboard,
-    // not solid additive shells -- those render as flat discs that dwarf the planet in orbit; removed.)
+    // enlarge). Bright warm-white emissive reads as a hot sun. Soft halo = the SunGlow billboard below (a
+    // radial-gradient additive sprite), NOT solid additive shells (those render as flat discs that dwarf the
+    // planet in orbit).
     commands.spawn((
         Mesh3d(meshes.add(Sphere::new(sphere::SUN_R).mesh().ico(3).unwrap())),
         MeshMaterial3d(materials.add(StandardMaterial {
@@ -449,6 +450,24 @@ fn setup_scene(
         // drop shadows). NotShadowCaster makes ground shadows work.
         bevy::light::NotShadowCaster,
         viz::SunDisc,
+    ));
+    // sun glow: camera-facing additive billboard (soft radial bloom) centered on the disc. Big quad, but the
+    // texture's baked falloff keeps the transparent rim adding ~nothing -> a real halo, no flat-disc dwarfing.
+    // Oriented + positioned each frame by viz::update_sun_glow. Quad lies in XY, normal +Z (billboarded there).
+    let glow_tex = images.add(stars::sun_glow_texture());
+    commands.spawn((
+        Mesh3d(meshes.add(Rectangle::new(sphere::SUN_R * 11.0, sphere::SUN_R * 11.0))),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::WHITE,
+            base_color_texture: Some(glow_tex),
+            unlit: true,
+            alpha_mode: AlphaMode::Add, // additive bloom: brightens sky around sun, rim adds nothing
+            cull_mode: None,
+            ..default()
+        })),
+        Transform::from_translation(sphere::sun_dir(0) * (sphere::SUN_DIST * 0.985)),
+        bevy::light::NotShadowCaster,
+        viz::SunGlow,
     ));
     // starfield: the REAL Bright Star Catalog sky (same data as the orrery view), on a far shell. One mesh,
     // rotated each frame about the spin axis by viz::rotate_sky_stars so constellations wheel with the day.
