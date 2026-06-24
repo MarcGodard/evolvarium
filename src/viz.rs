@@ -2192,9 +2192,9 @@ fn update_identity_panel(
             return;
         }
         Identified::Body(i) | Identified::SkyPlanet(i) => body(*i),
-        Identified::Sun => "Sun\nthe star (Tychos: Sun orbits Earth, 1 rev/yr)".to_string(),
+        Identified::Sun => "Sun\nthe star (Tychos: Sun orbits Evolvarium, 1 rev/yr)".to_string(),
         Identified::Moon => "Moon\n~monthly orbit; eclipses the Sun at new moon".to_string(),
-        Identified::Sirius => "Sirius\nEarth's binary companion; drives the 24,000-yr precession".to_string(),
+        Identified::Sirius => "Sirius\nEvolvarium's binary companion; drives the 24,000-yr precession".to_string(),
         Identified::Star(i) => catalog
             .as_ref()
             .and_then(|c| c.0.get(*i))

@@ -47,8 +47,8 @@ pholmq/TSN (GPL-2.0) @ commit 49fd49c (pinned in `orrery.rs` + `stars.rs` commen
 - [x] **Geocentric by default**: orrery centers on the home planet, renamed **Evolvarium** (display only);
   C toggles to the system center.
 - [x] **Orrery time = sim time** so orrery, planet sky, and calendar agree on the moment.
-- [ ] **Open polish**: free-look/pan in the orrery (vs orbit-locked); name the home planet across the rest
-  of the UI; richer identity panels (constellation membership, distance).
+- [ ] **Open polish**: free-look/pan in the orrery (vs orbit-locked); richer identity panels (constellation
+  membership, distance). (Home planet now reads "Evolvarium" in the identity panel too, not just the orrery.)
 
 ### The planet (spherical world)
 - [x] Spherical sim: great-circle movement, localized homeland start that spreads, lon/lat spatial grids,
