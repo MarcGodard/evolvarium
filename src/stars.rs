@@ -27,6 +27,58 @@ fn u32_field(o: &serde_json::Value, key: &str) -> Option<u32> {
     v.as_u64().map(|x| x as u32).or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
 }
 
+/// A catalog star with identity fields, for click-to-identify. `dir` is the equatorial unit direction.
+pub struct StarInfo {
+    pub dir: Vec3,
+    pub hr: String,
+    pub hip: Option<u32>,
+    pub name: Option<String>,        // proper name (N)
+    pub bayer: Option<String>,       // Bayer/Flamsteed designation (B)
+    pub constellation: Option<String>, // 3-letter abbr (C)
+    pub mag: f32,
+    pub temp: f32,
+}
+
+impl StarInfo {
+    /// Human label: proper name if any, else Bayer+constellation, else HR number.
+    pub fn label(&self) -> String {
+        if let Some(n) = &self.name {
+            n.clone()
+        } else if let (Some(b), Some(c)) = (&self.bayer, &self.constellation) {
+            format!("{b} {c}")
+        } else if let Some(c) = &self.constellation {
+            format!("HR {} ({c})", self.hr)
+        } else {
+            format!("HR {}", self.hr)
+        }
+    }
+}
+
+fn str_field(o: &serde_json::Value, key: &str) -> Option<String> {
+    o.get(key).and_then(|v| v.as_str()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+/// Parse the BSC catalog into queryable star records (for picking). Equatorial dirs (celestial pole +Y).
+pub fn star_catalog() -> Vec<StarInfo> {
+    let raw: Vec<serde_json::Value> = serde_json::from_str(BSC_JSON).unwrap_or_default();
+    let mut out = Vec::with_capacity(raw.len());
+    for st in &raw {
+        let (Some(ras), Some(decs)) = (st.get("RA").and_then(|x| x.as_str()), st.get("Dec").and_then(|x| x.as_str())) else { continue };
+        let (Some(ra), Some(dec)) = (parse_ra(ras), parse_dec(decs)) else { continue };
+        out.push(StarInfo {
+            dir: radec_to_dir(ra, dec),
+            hr: str_field(st, "HR").unwrap_or_default(),
+            hip: u32_field(st, "HIP"),
+            name: str_field(st, "N"),
+            bayer: str_field(st, "B"),
+            constellation: str_field(st, "C"),
+            mag: f32_field(st, "V").unwrap_or(6.0),
+            temp: f32_field(st, "K").unwrap_or(5500.0),
+        });
+    }
+    out
+}
+
 // "00h 05m 03.8s" -> radians (hours*15 deg). Tolerant: strip unit letters, take up to 3 numbers.
 fn parse_ra(s: &str) -> Option<f32> {
     let cleaned: String = s.chars().map(|c| if c.is_ascii_digit() || c == '.' || c == '-' { c } else { ' ' }).collect();
@@ -178,6 +230,19 @@ mod tests {
         let (_m, hip) = build_starfield(9000.0);
         let lines = build_constellation_lines(&hip, 9000.0);
         assert!(lines.is_some(), "constellation lines should resolve from HIP map");
+    }
+
+    #[test]
+    fn catalog_has_named_stars() {
+        let cat = star_catalog();
+        assert!(cat.len() > 3000, "catalog size {}", cat.len());
+        let named = cat.iter().filter(|s| s.name.is_some()).count();
+        assert!(named > 10, "expected proper-named stars, got {named}");
+        // every record has a usable label + unit direction
+        for s in cat.iter().take(50) {
+            assert!(!s.label().is_empty());
+            assert!((s.dir.length() - 1.0).abs() < 1e-3);
+        }
     }
 
     #[test]

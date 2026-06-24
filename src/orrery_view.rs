@@ -12,6 +12,7 @@ use crate::camera::CameraMode;
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::PrimitiveTopology;
 use bevy::prelude::*;
+use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use std::f32::consts::TAU;
 
 // Far parking spot for the orrery scene (30k units from the planet at origin). Camera far clip ~12k, so the
@@ -30,6 +31,7 @@ impl Plugin for OrreryViewPlugin {
                 Update,
                 (
                     position_orrery_bodies,
+                    pick_orrery,
                     toggle_constellations,
                     orrery_scene_visibility,
                     constellation_visibility,
@@ -422,6 +424,67 @@ fn spawn_orrery_bodies(
 // to Earth, Phobos/Deimos at Mars) separate out when you fly in close.
 fn body_render_radius(size: f32, cam_dist: f32) -> f32 {
     cam_dist * 0.0026 * size.clamp(0.25, 8.0).sqrt()
+}
+
+// Click-to-identify in the orrery: a body (precise sphere hit), else Sirius / nearest star (angular).
+#[allow(clippy::too_many_arguments)]
+fn pick_orrery(
+    mouse: Res<ButtonInput<MouseButton>>,
+    mode: Res<CameraMode>,
+    gen: Res<crate::sim::GenState>,
+    windows: Query<(&Window, &CursorOptions), With<PrimaryWindow>>,
+    cam: Query<(&Camera, &GlobalTransform), With<crate::camera::OrreryCam>>,
+    camd: Query<&crate::camera::OrreryCam>,
+    bodies: Query<&OrreryBody>,
+    catalog: Option<Res<crate::viz::StarCatalog>>,
+    mut id: ResMut<crate::viz::Identified>,
+) {
+    if *mode != CameraMode::Orrery || !mouse.just_pressed(MouseButton::Left) {
+        return;
+    }
+    let Ok((window, cursor_opts)) = windows.single() else { return };
+    if cursor_opts.grab_mode != CursorGrabMode::None {
+        return;
+    }
+    let Some(cursor) = window.cursor_position() else { return };
+    let Ok((camera, cam_tf)) = cam.single() else { return };
+    let Ok(ray) = camera.viewport_to_world(cam_tf, cursor) else { return };
+    let (o, d) = (ray.origin, *ray.direction);
+    let pos = crate::orrery::body_positions(orrery_tau(gen.tick));
+    let dist = camd.single().map(|c| c.dist).unwrap_or(1800.0);
+    let mut best_body: Option<(f32, usize)> = None;
+    for b in &bodies {
+        let (_, size, _) = crate::orrery::body_meta(b.idx);
+        let r = body_render_radius(size, dist).max(dist * 0.012); // generous pick disk
+        if let Some(t) = crate::viz::ray_hit(o, d, ORRERY_CENTER + pos[b.idx], r) {
+            if best_body.is_none_or(|(bt, _)| t < bt) {
+                best_body = Some((t, b.idx));
+            }
+        }
+    }
+    if let Some((_, idx)) = best_body {
+        *id = crate::viz::Identified::Body(idx);
+        return;
+    }
+    // Sirius (usize::MAX sentinel) + nearest catalog star by angular proximity.
+    let mut top = (d.dot((ORRERY_CENTER + crate::orrery::sirius_dir() * STAR_SHELL - o).normalize_or_zero()), usize::MAX);
+    if let Some(cat) = &catalog {
+        for (i, st) in cat.0.iter().enumerate() {
+            let dot = d.dot((ORRERY_CENTER + st.dir * STAR_SHELL - o).normalize_or_zero());
+            if dot > top.0 {
+                top = (dot, i);
+            }
+        }
+    }
+    *id = if top.0 > 0.9994 {
+        if top.1 == usize::MAX {
+            crate::viz::Identified::Sirius
+        } else {
+            crate::viz::Identified::Star(top.1)
+        }
+    } else {
+        crate::viz::Identified::None
+    };
 }
 
 fn position_orrery_bodies(

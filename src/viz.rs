@@ -97,7 +97,8 @@ impl Plugin for VizPlugin {
             .init_resource::<Phylogeny>()
             .init_resource::<ShowPhylo>()
             .insert_resource(ShowShadows(true)) // shadows on by default (O toggles)
-            .add_systems(Startup, (log_viz_help, spawn_stats_ui, spawn_world_stats_ui, spawn_legend_ui, spawn_daycycle_ui, spawn_underwater_tint, spawn_clouds, set_initial_speed, spawn_minimap, spawn_phylo_ui))
+            .init_resource::<Identified>()
+            .add_systems(Startup, (log_viz_help, spawn_stats_ui, spawn_world_stats_ui, spawn_legend_ui, spawn_daycycle_ui, spawn_underwater_tint, spawn_clouds, set_initial_speed, spawn_minimap, spawn_phylo_ui, load_star_catalog, spawn_identity_ui))
             .add_systems(
                 Update,
                 (
@@ -112,9 +113,7 @@ impl Plugin for VizPlugin {
                     update_clouds,
                     hide_dead,
                     color_carrion,
-                    pick_on_click,
-                    update_stats,
-                    update_world_stats,
+                    (pick_on_click, update_identity_panel, update_stats, update_world_stats),
                     time_controls,
                     toggle_legend,
                     (god_disturbances, crate::sim::save_world_key, crate::sim::save_on_window_close),
@@ -2027,6 +2026,74 @@ pub struct Selected {
     pub follow_offset: Vec3, // camera offset from target, captured when follow engaged
 }
 
+// Click-to-identify for SKY objects (bodies/sun/moon/Sirius/stars). Ground creatures/plants use Selected +
+// the inspector; this drives a separate identity panel. Set by pick_on_click (planet) + pick_orrery (orrery).
+#[derive(Resource, Default, Clone, PartialEq)]
+pub enum Identified {
+    #[default]
+    None,
+    Body(usize),     // orrery body index (orrery view)
+    SkyPlanet(usize), // orrery body index seen in the planet sky
+    Sun,
+    Moon,
+    Sirius,
+    Star(usize), // index into StarCatalog.0
+}
+
+// Parsed BSC catalog (built once), for identifying clicked stars.
+#[derive(Resource)]
+pub struct StarCatalog(pub Vec<crate::stars::StarInfo>);
+
+fn load_star_catalog(mut commands: Commands) {
+    commands.insert_resource(StarCatalog(crate::stars::star_catalog()));
+}
+
+#[derive(Component)]
+struct IdentityText;
+
+fn spawn_identity_ui(mut commands: Commands) {
+    commands.spawn((
+        IdentityText,
+        Text::new(""),
+        TextFont { font_size: 15.0, ..default() },
+        TextColor(Color::srgb(0.9, 0.95, 1.0)),
+        Node { position_type: PositionType::Absolute, top: Val::Px(46.0), left: Val::Px(10.0), ..default() },
+        Visibility::Hidden,
+    ));
+}
+
+// Identity panel content from whatever sky object was last clicked.
+fn update_identity_panel(
+    id: Res<Identified>,
+    catalog: Option<Res<StarCatalog>>,
+    mut q: Query<(&mut Text, &mut Visibility), With<IdentityText>>,
+) {
+    let Ok((mut text, mut vis)) = q.single_mut() else { return };
+    let body = |i: usize| {
+        let (name, size, _) = crate::orrery::body_meta(i);
+        format!("{name}\nTSN body  -  display size {size:.1}")
+    };
+    let s = match &*id {
+        Identified::None => {
+            if *vis != Visibility::Hidden {
+                *vis = Visibility::Hidden;
+            }
+            return;
+        }
+        Identified::Body(i) | Identified::SkyPlanet(i) => body(*i),
+        Identified::Sun => "Sun\nthe star (Tychos: Sun orbits Earth, 1 rev/yr)".to_string(),
+        Identified::Moon => "Moon\n~monthly orbit; eclipses the Sun at new moon".to_string(),
+        Identified::Sirius => "Sirius\nEarth's binary companion; drives the 24,000-yr precession".to_string(),
+        Identified::Star(i) => catalog
+            .as_ref()
+            .and_then(|c| c.0.get(*i))
+            .map(|st| format!("{}\nHR {}  mag {:.2}  {:.0} K", st.label(), st.hr, st.mag, st.temp))
+            .unwrap_or_default(),
+    };
+    text.0 = format!("IDENTIFIED\n{s}");
+    *vis = Visibility::Inherited;
+}
+
 #[derive(Component)]
 struct StatsText;
 
@@ -2698,7 +2765,7 @@ fn spawn_stats_ui(mut commands: Commands) {
 }
 
 // Ray-sphere hit: nearest positive t along (origin + t*dir) intersecting sphere, else None.
-fn ray_hit(origin: Vec3, dir: Vec3, center: Vec3, r: f32) -> Option<f32> {
+pub fn ray_hit(origin: Vec3, dir: Vec3, center: Vec3, r: f32) -> Option<f32> {
     let oc = origin - center;
     let b = oc.dot(dir);
     let disc = b * b - (oc.dot(oc) - r * r);
@@ -2716,16 +2783,23 @@ fn ray_hit(origin: Vec3, dir: Vec3, center: Vec3, r: f32) -> Option<f32> {
 }
 
 // Left-click picks nearest creature/plant under cursor (only when not in look mode).
+#[allow(clippy::too_many_arguments)]
 fn pick_on_click(
     mouse: Res<ButtonInput<MouseButton>>,
+    mode: Res<crate::camera::CameraMode>,
+    gen: Res<GenState>,
+    offset: Res<SunOffset>,
     windows: Query<(&Window, &CursorOptions), With<PrimaryWindow>>,
     cam: Query<(&Camera, &GlobalTransform), Without<MinimapCam>>, // main cam only (minimap is a 2nd camera)
     creatures: Query<(Entity, &GlobalTransform), With<Creature>>,
     foods: Query<(Entity, &GlobalTransform, Option<&Tree>), With<Food>>,
+    sky_planets: Query<(&SkyPlanet, &GlobalTransform)>,
+    catalog: Option<Res<StarCatalog>>,
     mut selected: ResMut<Selected>,
+    mut id: ResMut<Identified>,
 ) {
-    if !mouse.just_pressed(MouseButton::Left) {
-        return;
+    if !mouse.just_pressed(MouseButton::Left) || *mode == crate::camera::CameraMode::Orrery {
+        return; // orrery handled by pick_orrery
     }
     let Ok((window, cursor_opts)) = windows.single() else { return };
     if cursor_opts.grab_mode != CursorGrabMode::None {
@@ -2752,9 +2826,33 @@ fn pick_on_click(
         consider(e, t.translation(), r, &mut best);
     }
     if let Some((_, e)) = best {
-        selected.entity = Some(e);
+        selected.entity = Some(e); // ground hit: creature/plant inspector
+        *id = Identified::None;
+        return;
     }
-    // miss keeps current selection (so follow not lost by stray click)
+    // no ground hit -> identify a SKY object by angular proximity to the click ray.
+    let vtick = (gen.tick as i64 + offset.0).max(0) as u32;
+    let mut top = (-2.0f32, Identified::None);
+    let take = |dot: f32, which: Identified, top: &mut (f32, Identified)| {
+        if dot > top.0 {
+            *top = (dot, which);
+        }
+    };
+    take(d.dot(crate::sphere::sun_dir(vtick)), Identified::Sun, &mut top);
+    take(d.dot(crate::sphere::moon_dir(vtick)), Identified::Moon, &mut top);
+    for (p, gt) in &sky_planets {
+        take(d.dot((gt.translation() - o).normalize_or_zero()), Identified::SkyPlanet(p.idx), &mut top);
+    }
+    // stars wheel with the day (rotate_sky_stars) -> rotate catalog dirs by the same daily spin
+    if let Some(cat) = &catalog {
+        let daily = (vtick as f32 / crate::sphere::DAY_TICKS as f32) * std::f32::consts::TAU;
+        let rot = Quat::from_rotation_y(daily);
+        for (i, st) in cat.0.iter().enumerate() {
+            take(d.dot(rot * st.dir), Identified::Star(i), &mut top);
+        }
+    }
+    // accept only a close-enough hit (~2 deg); else clear.
+    *id = if top.0 > 0.9994 { top.1 } else { Identified::None };
 }
 
 // Draw yellow ring around selected entity each frame -> shows what's picked.
