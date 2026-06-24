@@ -14,6 +14,7 @@ mod camera;
 mod components;
 mod config;
 mod genome;
+mod morph;
 mod niche;
 mod orrery;
 mod orrery_view;
