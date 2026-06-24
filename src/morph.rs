@@ -104,6 +104,7 @@ pub struct PlacedPart {
     pub color: [f32; 3],
     pub joint: JointSpec,
     pub depth: u8, // graph depth (0 = root); render/metrics hints
+    pub parent: Option<usize>, // index into Phenotype.parts of the part this hangs off (None = root). Gym joints.
 }
 
 pub struct Phenotype {
@@ -145,16 +146,17 @@ pub fn develop(g: &BodyGraph) -> Phenotype {
     }
     let root = g.root.min(g.nodes.len() - 1);
     let remaining: Vec<u8> = g.edges.iter().map(|e| e.recurse).collect();
-    expand(g, root, Transform::IDENTITY, 1.0, 1.0, 0, &remaining, &mut parts);
+    expand(g, root, Transform::IDENTITY, 1.0, 1.0, 0, None, &remaining, &mut parts);
     Phenotype { parts }
 }
 
 #[allow(clippy::too_many_arguments)]
-fn expand(g: &BodyGraph, node: usize, world: Transform, scale: f32, chirality: f32, depth: u8, remaining: &[u8], parts: &mut Vec<PlacedPart>) {
+fn expand(g: &BodyGraph, node: usize, world: Transform, scale: f32, chirality: f32, depth: u8, parent: Option<usize>, remaining: &[u8], parts: &mut Vec<PlacedPart>) {
     if parts.len() >= MAX_PARTS || node >= g.nodes.len() {
         return;
     }
     let n = &g.nodes[node];
+    let my_idx = parts.len();
     parts.push(PlacedPart {
         tf: world,
         shape: n.shape,
@@ -164,6 +166,7 @@ fn expand(g: &BodyGraph, node: usize, world: Transform, scale: f32, chirality: f
         color: [n.r, n.g, n.b],
         joint: JointSpec::default(), // overwritten below for non-root by the incoming edge's joint
         depth,
+        parent,
     });
     let plen = (n.length * scale).max(0.02);
     let prad = (n.radius * scale).max(0.02);
@@ -184,7 +187,7 @@ fn expand(g: &BodyGraph, node: usize, world: Transform, scale: f32, chirality: f
             let ch = chirality * s;
             let cworld = world.mul_transform(child_local(plen, prad, n.taper, e, ch));
             let before = parts.len();
-            expand(g, e.to, cworld, scale * e.scale.clamp(0.2, 1.0), ch, depth.saturating_add(1), &rem2, parts);
+            expand(g, e.to, cworld, scale * e.scale.clamp(0.2, 1.0), ch, depth.saturating_add(1), Some(my_idx), &rem2, parts);
             if before < parts.len() {
                 parts[before].joint = e.joint; // the child just placed carries its incoming joint
             }
