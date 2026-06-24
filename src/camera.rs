@@ -195,12 +195,43 @@ fn orbit_keys(mode: Res<CameraMode>, keys: Res<ButtonInput<KeyCode>>, time: Res<
     if keys.pressed(KeyCode::KeyS) { cam.dist = (cam.dist + 60.0 * dt * boost).clamp(MIN_DIST, MAX_DIST); }
 }
 
-fn zoom(mode: Res<CameraMode>, scroll: Res<AccumulatedMouseScroll>, selected: Res<Selected>, mut q: Query<&mut OrbitCam>) {
+#[allow(clippy::too_many_arguments)]
+fn zoom(
+    mut mode: ResMut<CameraMode>,
+    scroll: Res<AccumulatedMouseScroll>,
+    selected: Res<Selected>,
+    mut sun_offset: ResMut<SunOffset>,
+    mut q: Query<&mut OrbitCam>,
+    mut orrery: Query<&mut OrreryCam>,
+    mut walk: Query<&mut WalkCam>,
+) {
     if *mode != CameraMode::Orbit || selected.follow || scroll.delta.y == 0.0 {
         return;
     }
     let Ok(mut cam) = q.single_mut() else { return };
-    cam.dist = (cam.dist - scroll.delta.y * 12.0).clamp(MIN_DIST, MAX_DIST);
+    let new = cam.dist - scroll.delta.y * 12.0;
+    if new < MIN_DIST {
+        // zoom IN past the closest orbit -> drop onto the surface under the camera (WALK; no zoom there).
+        let dir = Vec3::new(cam.pitch.cos() * cam.yaw.cos(), cam.pitch.sin(), cam.pitch.cos() * cam.yaw.sin());
+        if let Ok(mut w) = walk.single_mut() {
+            w.dir = dir.normalize_or_zero();
+            w.yaw = 0.0;
+            w.pitch = 0.0;
+            w.eye_alt = WALK_EYE;
+        }
+        sun_offset.0 = 0;
+        *mode = CameraMode::Walk;
+        info!("camera: WALK (zoomed onto the surface)");
+    } else if new > MAX_DIST {
+        // zoom OUT past the farthest orbit -> back up to the ORRERY, zoomed in on Evolvarium.
+        if let Ok(mut o) = orrery.single_mut() {
+            o.dist = ORRERY_MIN_DIST * 6.0;
+        }
+        *mode = CameraMode::Orrery;
+        info!("camera: ORRERY (zoomed out from Evolvarium)");
+    } else {
+        cam.dist = new;
+    }
 }
 
 // Place camera from (yaw, pitch, dist) around planet center, looking inward.
@@ -247,13 +278,23 @@ fn orrery_drag(
     if keys.pressed(KeyCode::KeyS) { cam.dist = (cam.dist + zk).clamp(ORRERY_MIN_DIST, ORRERY_MAX_DIST); }
 }
 
-fn orrery_zoom(mode: Res<CameraMode>, scroll: Res<AccumulatedMouseScroll>, mut q: Query<&mut OrreryCam>) {
+fn orrery_zoom(mut mode: ResMut<CameraMode>, scroll: Res<AccumulatedMouseScroll>, mut q: Query<&mut OrreryCam>, mut orbit: Query<&mut OrbitCam>) {
     if *mode != CameraMode::Orrery || scroll.delta.y == 0.0 {
         return;
     }
     let Ok(mut cam) = q.single_mut() else { return };
     // scroll zoom proportional to distance -> smooth from inner bodies out to Pluto
-    cam.dist = (cam.dist * (1.0 - scroll.delta.y * 0.1)).clamp(ORRERY_MIN_DIST, ORRERY_MAX_DIST);
+    let new = cam.dist * (1.0 - scroll.delta.y * 0.1);
+    if new < ORRERY_MIN_DIST {
+        // zoomed all the way into Evolvarium -> continue seamlessly into the planet ORBIT view (far out)
+        if let Ok(mut o) = orbit.single_mut() {
+            o.dist = MAX_DIST;
+        }
+        *mode = CameraMode::Orbit;
+        info!("camera: ORBIT (zoomed into Evolvarium)");
+    } else {
+        cam.dist = new.min(ORRERY_MAX_DIST);
+    }
 }
 
 // Place camera around the focus point (Evolvarium by default, else system center), looking inward.
