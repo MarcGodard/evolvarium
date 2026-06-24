@@ -15,6 +15,7 @@ mod components;
 mod config;
 mod genome;
 mod niche;
+mod orrery;
 mod persist;
 mod capture;
 mod plant;
