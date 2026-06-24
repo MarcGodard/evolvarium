@@ -525,6 +525,21 @@ impl PartSdf {
             color: part.color,
         }
     }
+    // Thin connector capsule a->b (a round-cone w/ equal end radii). Guarantees parent/child stay one skin
+    // even across a real gap or a sub-cell-thin neck the marching grid would otherwise step over.
+    fn bridge(a: Vec3, b: Vec3, r: f32, color: [f32; 3]) -> Self {
+        let d = b - a;
+        let len = d.length().max(1e-4);
+        PartSdf {
+            inv_rot: Quat::from_rotation_arc(Vec3::Y, d / len).inverse(),
+            origin: a,
+            shape: ShapeKind::Segment,
+            len,
+            r0: r,
+            r1: r,
+            color,
+        }
+    }
     // signed distance from world point p to this part's surface
     fn dist(&self, p: Vec3) -> f32 {
         let lp = self.inv_rot * (p - self.origin); // part-local, base at origin, axis +Y
@@ -605,7 +620,7 @@ pub fn build_body_mesh(p: &Phenotype, center_y: f32) -> Mesh {
     let mut col: Vec<[f32; 4]> = Vec::new();
     let mut idx: Vec<u32> = Vec::new();
 
-    let parts: Vec<PartSdf> = p.parts.iter().map(PartSdf::of).collect();
+    let mut parts: Vec<PartSdf> = p.parts.iter().map(PartSdf::of).collect();
     if parts.is_empty() {
         let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
         mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, pos);
@@ -643,6 +658,23 @@ pub fn build_body_mesh(p: &Phenotype, center_y: f32) -> Mesh {
     let nz = ((dim.z / cell).ceil() as usize).clamp(SKIN_CELLS_MIN, SKIN_CELLS_MAX);
     let step = Vec3::new(dim.x / nx as f32, dim.y / ny as f32, dim.z / nz as f32);
     let gpos = |i: usize, j: usize, l: usize| lo + Vec3::new(i as f32 * step.x, j as f32 * step.y, l as f32 * step.z);
+
+    // Connect every part to its parent so the skin is one piece (smin alone leaves far/thin-necked parts as
+    // separate blobs). Connector goes from the child base into the parent center (overlaps parent solid ->
+    // guaranteed union). Radius floored to ~grid step so a thin neck never falls between samples + vanishes.
+    let bridge_r = (0.7 * step.max_element()).max(0.05);
+    let n_real = parts.len();
+    for part in p.parts.iter().take(n_real) {
+        let Some(pi) = part.parent else { continue };
+        if pi >= n_real {
+            continue;
+        }
+        let a = part.tf.translation; // child base (already on parent surface by construction)
+        let parent = &p.parts[pi];
+        let b = parent.tf.translation + (parent.tf.rotation * Vec3::Y) * (parent.length * 0.5); // parent mid-axis
+        let r = (part.radius.min(parent.radius) * 0.7).max(bridge_r);
+        parts.push(PartSdf::bridge(a, b, r, part.color));
+    }
 
     // sample the field on every grid corner once
     let stride_y = nx + 1;
