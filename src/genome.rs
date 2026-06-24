@@ -660,15 +660,9 @@ fn sigmoid(x: f32) -> f32 {
     1.0 / (1.0 + (-x).exp())
 }
 
+// Wrap angle to [-PI, PI). rem_euclid keeps result in [0, TAU).
 fn wrap_pi(a: f32) -> f32 {
-    let mut a = a;
-    while a > std::f32::consts::PI {
-        a -= std::f32::consts::TAU;
-    }
-    while a < -std::f32::consts::PI {
-        a += std::f32::consts::TAU;
-    }
-    a
+    (a + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI
 }
 
 #[cfg(test)]

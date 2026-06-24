@@ -173,6 +173,76 @@ pub fn build_starfield(r: f32) -> (Mesh, HashMap<u32, Vec3>) {
     (mesh, hip_dir)
 }
 
+// Galactic (l,b) -> equatorial unit dir matching radec_to_dir convention. Bakes J2000 galactic->equatorial
+// rotation so the band lands on the real RA/Dec (galactic center in Sagittarius, NGP in Coma). Lets the
+// Milky Way sit correctly against the BSC stars. Matrix rows = standard equatorial (Z=NCP) basis; we recover
+// RA/Dec then reuse radec_to_dir so axis convention matches the catalog exactly.
+fn gal_to_dir(l: f32, b: f32) -> Vec3 {
+    let (sl, cl) = l.sin_cos();
+    let (sb, cb) = b.sin_cos();
+    let g = [cb * cl, cb * sl, sb]; // galactic: x->center, z->NGP
+    // J2000 galactic->equatorial rotation (standard, Z=NCP).
+    let ex = -0.054_875_56 * g[0] + 0.494_109_43 * g[1] - 0.867_666_15 * g[2];
+    let ey = -0.873_437_10 * g[0] - 0.444_829_63 * g[1] - 0.198_076_37 * g[2];
+    let ez = -0.483_835_02 * g[0] + 0.746_982_25 * g[1] + 0.455_983_78 * g[2];
+    let ra = ey.atan2(ex);
+    let dec = ez.clamp(-1.0, 1.0).asin();
+    radec_to_dir(ra, dec)
+}
+
+// Tiny deterministic LCG -> uniforms in 0..1. No std::rand dep; reproducible band per build.
+fn lcg(state: &mut u64) -> f32 {
+    *state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+    ((*state >> 40) as f32) / ((1u64 << 24) as f32)
+}
+
+/// Build a faint Milky Way band on a shell of radius `r`: thousands of soft additive patches scattered along
+/// the galactic plane (Gaussian falloff in galactic latitude), brightened toward the galactic center and the
+/// bulge. Positioned via real galactic->equatorial transform so it aligns with the catalog stars and wheels
+/// with them. Use an ADDITIVE material so it glows over the dark sky and vanishes against bright day sky.
+pub fn build_milky_way(r: f32) -> Mesh {
+    const N: usize = 5000;
+    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(N * 4);
+    let mut colors: Vec<[f32; 4]> = Vec::with_capacity(N * 4);
+    let mut indices: Vec<u32> = Vec::with_capacity(N * 6);
+    let mut rng: u64 = 0x5EED_1234_ABCD_0001;
+    for _ in 0..N {
+        let l = lcg(&mut rng) * std::f32::consts::TAU;
+        // galactic latitude: Box-Muller Gaussian, sigma wider toward the central bulge (l near 0).
+        let center = ((l + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI).abs(); // 0 at GC..PI at anticenter
+        let centerness = (1.0 - center / std::f32::consts::PI).powf(1.5); // bright bulge near GC
+        let sigma = 0.06 + 0.10 * centerness; // rad: ~3.5deg disk, ~9deg bulge
+        let u1 = lcg(&mut rng).max(1e-6);
+        let u2 = lcg(&mut rng);
+        let b = sigma * (-2.0 * u1.ln()).sqrt() * (std::f32::consts::TAU * u2).cos();
+        let dir = gal_to_dir(l, b);
+
+        // faint patch: brighter near plane + center; jittered so the band looks mottled, not uniform.
+        let lat_fall = (-(b / sigma) * (b / sigma) * 0.5).exp();
+        let mottle = 0.4 + 0.6 * lcg(&mut rng);
+        let bright = (0.05 + 0.13 * centerness) * lat_fall * mottle;
+        let col = [bright * 0.82, bright * 0.84, bright, 1.0]; // pale blue-white
+
+        let s = (34.0 + 30.0 * lcg(&mut rng)) * (r / 9000.0); // big soft patches; overlap -> smooth glow
+        let pos = dir * r;
+        let up_ref = if dir.y.abs() > 0.95 { Vec3::X } else { Vec3::Y };
+        let right = dir.cross(up_ref).normalize_or_zero();
+        let up = dir.cross(right).normalize_or_zero();
+        let base = positions.len() as u32;
+        for (du, dv) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+            let p = pos + right * (du * s) + up * (dv * s);
+            positions.push([p.x, p.y, p.z]);
+            colors.push(col);
+        }
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
+    mesh.insert_indices(Indices::U32(indices));
+    mesh
+}
+
 /// Build constellation lines as a single LineList mesh from TSN constellations.json (polylines of HIP ids),
 /// looked up in `hip_dir`. Lines sit just inside the star shell (`r`). None if nothing resolved.
 pub fn build_constellation_lines(hip_dir: &HashMap<u32, Vec3>, r: f32) -> Option<Mesh> {

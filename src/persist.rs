@@ -95,20 +95,20 @@ pub struct WorldState {
     pub plants: Vec<SavedPlantEntity>,
 }
 
+// Write any serializable as pretty JSON. Logs on failure, never panics mid-run. `what` = success-log subject.
+fn write_pretty<T: Serialize>(path: &str, val: &T, what: &str) {
+    match serde_json::to_string_pretty(val) {
+        Ok(s) => match std::fs::write(path, s) {
+            Ok(()) => bevy::log::info!("saved {} -> {}", what, path),
+            Err(e) => bevy::log::error!("{} write failed ({}): {}", what, path, e),
+        },
+        Err(e) => bevy::log::error!("{} serialize failed: {}", what, e),
+    }
+}
+
 // Write snapshot as pretty JSON. Logs on failure, never panics mid-run.
 pub fn save_snapshot(path: &str, snap: &Snapshot) {
-    match serde_json::to_string_pretty(snap) {
-        Ok(s) => match std::fs::write(path, s) {
-            Ok(()) => bevy::log::info!(
-                "saved {} creatures + {} plants -> {}",
-                snap.creatures.len(),
-                snap.plants.len(),
-                path
-            ),
-            Err(e) => bevy::log::error!("save write failed ({}): {}", path, e),
-        },
-        Err(e) => bevy::log::error!("save serialize failed: {}", e),
-    }
+    write_pretty(path, snap, &format!("{} creatures + {} plants", snap.creatures.len(), snap.plants.len()));
 }
 
 // Load snapshot. Returns None (+logs) on missing/corrupt file -> caller falls back to random spawn.
@@ -162,13 +162,7 @@ pub struct PlantLibrary {
 }
 
 pub fn save_plant_library(path: &str, lib: &PlantLibrary) {
-    match serde_json::to_string_pretty(lib) {
-        Ok(s) => match std::fs::write(path, s) {
-            Ok(()) => bevy::log::info!("saved {} library entries -> {}", lib.entries.len(), path),
-            Err(e) => bevy::log::error!("library write failed ({}): {}", path, e),
-        },
-        Err(e) => bevy::log::error!("library serialize failed: {}", e),
-    }
+    write_pretty(path, lib, &format!("{} library entries", lib.entries.len()));
 }
 
 // Load plant library. Returns None (+logs) on missing/corrupt OR empty file -> caller falls back to

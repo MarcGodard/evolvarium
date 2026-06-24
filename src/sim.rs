@@ -73,11 +73,7 @@ impl Soil {
         Soil { cell: base.clone(), base } // start AT baseline (no cold-start shock)
     }
     fn index(pos: Vec3) -> usize {
-        let (u, v) = grid_uv(pos);
-        let to_cell = |w: f32| {
-            (((w + WORLD_HALF) / (2.0 * WORLD_HALF)) * SOIL_RES as f32).clamp(0.0, (SOIL_RES - 1) as f32) as usize
-        };
-        to_cell(v) * SOIL_RES + to_cell(u)
+        grid_cell(pos)
     }
     fn add(&mut self, pos: Vec3, amt: f32) {
         self.cell[Self::index(pos)] += amt;
@@ -162,11 +158,7 @@ impl GroundWater {
         GroundWater { cell: vec![0.0; SOIL_RES * SOIL_RES] }
     }
     fn index(pos: Vec3) -> usize {
-        let (u, v) = grid_uv(pos);
-        let to_cell = |w: f32| {
-            (((w + WORLD_HALF) / (2.0 * WORLD_HALF)) * SOIL_RES as f32).clamp(0.0, (SOIL_RES - 1) as f32) as usize
-        };
-        to_cell(v) * SOIL_RES + to_cell(u)
+        grid_cell(pos)
     }
     pub fn get(&self, pos: Vec3) -> f32 {
         self.cell[Self::index(pos)]

@@ -34,108 +34,113 @@ use bevy::app::ScheduleRunnerPlugin;
 use bevy::prelude::*;
 use std::time::Duration;
 
+// CLI parse helpers. flag = bare `--name` present. val = raw str after `--key=`. parse_or = parsed w/ default.
+fn flag(args: &[String], name: &str) -> bool {
+    args.iter().any(|a| a == name)
+}
+fn val<'a>(args: &'a [String], pfx: &str) -> Option<&'a str> {
+    args.iter().find_map(|a| a.strip_prefix(pfx))
+}
+fn parse_or<T: std::str::FromStr>(args: &[String], pfx: &str, default: T) -> T {
+    val(args, pfx).and_then(|s| s.parse().ok()).unwrap_or(default)
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let headless = args.iter().any(|a| a == "--headless");
+    let headless = flag(&args, "--headless");
     // --profile: time each hot system over the run, print cumulative ranking periodically (Phase 0,
     // PARALLELIZATION.md). Headless only (perf target). Near-free otherwise (scope() = atomic load when off).
-    if args.iter().any(|a| a == "--profile") {
+    if flag(&args, "--profile") {
         profile::ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);
     }
-    let learn = !args.iter().any(|a| a == "--nolearn"); // lifetime learning default ON
-    let poison = args.iter().any(|a| a == "--poison"); // legacy: 2 food types (ntypes=2)
+    let learn = !flag(&args, "--nolearn"); // lifetime learning default ON
+    let poison = flag(&args, "--poison"); // legacy: 2 food types (ntypes=2)
     // Epigenetic diet (NFOOD types + instincts) default ON. --no-diet = simple single-food world.
     // --poison forces legacy 2-type mode when --no-diet set.
-    let diet = !args.iter().any(|a| a == "--no-diet") && !poison;
+    let diet = !flag(&args, "--no-diet") && !poison;
     // Continuous reproduction (self-sustaining birth/death past warm-up) is DEFAULT.
     // --generational opts into discrete-generation GA instead.
-    let continuous = !args.iter().any(|a| a == "--generational");
-    let seed = args
-        .iter()
-        .find_map(|a| a.strip_prefix("--seed=").and_then(|s| s.parse::<u64>().ok()))
-        .unwrap_or(1);
+    let continuous = !flag(&args, "--generational");
+    let seed = parse_or(&args, "--seed=", 1u64);
     // --gens=N: headless run length in generations (default MAX_GEN_HEADLESS). Pair w/ --save for deep state.
-    let max_gens = args
-        .iter()
-        .find_map(|a| a.strip_prefix("--gens=").and_then(|s| s.parse::<u32>().ok()))
-        .unwrap_or(sim::MAX_GEN_HEADLESS);
+    let max_gens = parse_or(&args, "--gens=", sim::MAX_GEN_HEADLESS);
     // --save=PATH writes survivors at run end. --load=PATH resumes saved population.
-    let save = args.iter().find_map(|a| a.strip_prefix("--save=").map(String::from));
-    let mut load = args.iter().find_map(|a| a.strip_prefix("--load=").map(String::from));
+    let save = val(&args, "--save=").map(String::from);
+    let mut load = val(&args, "--load=").map(String::from);
     // Render mode + no explicit --load: auto-load showcase seed if present so `cargo run` opens into
     // full breeding world (loaded continuous skips warm-up). --no-load forces fresh warm-up start.
     // Headless never auto-loads.
     const DEFAULT_SEED: &str = "evolved-continuous.json";
-    if !headless && load.is_none() && !args.iter().any(|a| a == "--no-load") && std::path::Path::new(DEFAULT_SEED).exists() {
+    if !headless && load.is_none() && !flag(&args, "--no-load") && std::path::Path::new(DEFAULT_SEED).exists() {
         load = Some(DEFAULT_SEED.to_string());
     }
     // --shots[=PREFIX]: headless CPU snapshot of planet (several views -> PNG) then exit. Auto-loads
     // showcase seed if no --load. --shot-tick=N picks capture tick.
-    let shots = args.iter().any(|a| a == "--shots" || a.starts_with("--shots="));
-    let shot_prefix = args.iter().find_map(|a| a.strip_prefix("--shots=").map(String::from)).unwrap_or_else(|| "shot".into());
-    let shot_tick = args.iter().find_map(|a| a.strip_prefix("--shot-tick=").and_then(|s| s.parse::<u32>().ok())).unwrap_or(3000);
+    let shots = flag(&args, "--shots") || args.iter().any(|a| a.starts_with("--shots="));
+    let shot_prefix = val(&args, "--shots=").map(String::from).unwrap_or_else(|| "shot".into());
+    let shot_tick = parse_or(&args, "--shot-tick=", 3000u32);
     if shots && headless && load.is_none() && std::path::Path::new(DEFAULT_SEED).exists() {
         load = Some(DEFAULT_SEED.to_string());
     }
     // --diverse: hand-seed multi-niche showcase (swimmers/cold/warm/browsers in matching regions).
     // Auto-loads showcase seed for competent brains, then overrides trait genes + placement per niche.
-    let diverse = args.iter().any(|a| a == "--diverse");
+    let diverse = flag(&args, "--diverse");
     // --capture=PREFIX: GPU screenshot of walk view -> PREFIX.png then exit. --cap-when = hour,
     // --cap-yaw = heading. Render mode, needs GPU. Inspect real lighting/shadows offline.
-    let capture = args.iter().find_map(|a| a.strip_prefix("--capture=").map(String::from));
-    let cap_when = match args.iter().find_map(|a| a.strip_prefix("--cap-when=")).unwrap_or("morning") {
+    let capture = val(&args, "--capture=").map(String::from);
+    let cap_when = match val(&args, "--cap-when=").unwrap_or("morning") {
         "noon" => capture::CapWhen::Noon,
         "dusk" => capture::CapWhen::Dusk,
         "night" => capture::CapWhen::Night,
         _ => capture::CapWhen::Morning,
     };
-    let cap_yaw = args.iter().find_map(|a| a.strip_prefix("--cap-yaw=").and_then(|s| s.parse::<f32>().ok())).unwrap_or(0.0);
-    let cap_off = args.iter().find_map(|a| a.strip_prefix("--cap-off=").and_then(|s| s.parse::<i64>().ok())).unwrap_or(0);
-    let cap_pitch = args.iter().find_map(|a| a.strip_prefix("--cap-pitch=").and_then(|s| s.parse::<f32>().ok())).unwrap_or(-0.35);
+    let cap_yaw = parse_or(&args, "--cap-yaw=", 0.0f32);
+    let cap_off = parse_or(&args, "--cap-off=", 0i64);
+    let cap_pitch = parse_or(&args, "--cap-pitch=", -0.35f32);
     // --cap-lat=DEG: aim orbit camera straight down at this latitude (deg, + = north pole, - = south)
     // for top-down pole view. Implies orbit. Pair w/ --cap-dist to frame whole cap.
-    let cap_lat = args.iter().find_map(|a| a.strip_prefix("--cap-lat=").and_then(|s| s.parse::<f32>().ok()));
-    let cap_orbit = args.iter().any(|a| a == "--cap-orbit") || cap_lat.is_some();
-    let cap_dist = args.iter().find_map(|a| a.strip_prefix("--cap-dist=").and_then(|s| s.parse::<f32>().ok())).unwrap_or(140.0);
+    let cap_lat = val(&args, "--cap-lat=").and_then(|s| s.parse::<f32>().ok());
+    let cap_orbit = flag(&args, "--cap-orbit") || cap_lat.is_some();
+    let cap_dist = parse_or(&args, "--cap-dist=", 140.0f32);
     // --cap-water: submerge capture camera in deep ocean (verify swim view + underwater tint).
-    let cap_water = args.iter().any(|a| a == "--cap-water");
+    let cap_water = flag(&args, "--cap-water");
     // --cap-orrery: capture the TSN solar-system (orrery) view instead of the planet.
-    let cap_orrery = args.iter().any(|a| a == "--cap-orrery");
+    let cap_orrery = flag(&args, "--cap-orrery");
     // --cap-warmup=N: sim frames before snapping (default 50). Raise for slow effects (fliers reaching cruise
     // altitude, land-wear trails forming). --cap-mmfield=N: open the minimap on overlay N (8 = wear) so a slow
     // live field can be screenshotted.
-    let cap_warmup = args.iter().find_map(|a| a.strip_prefix("--cap-warmup=").and_then(|s| s.parse::<u32>().ok())).unwrap_or(capture::WARMUP);
-    let cap_mmfield = args.iter().find_map(|a| a.strip_prefix("--cap-mmfield=").and_then(|s| s.parse::<usize>().ok()));
+    let cap_warmup = parse_or(&args, "--cap-warmup=", capture::WARMUP);
+    let cap_mmfield = val(&args, "--cap-mmfield=").and_then(|s| s.parse::<usize>().ok());
     if diverse && load.is_none() && std::path::Path::new(DEFAULT_SEED).exists() {
         load = Some(DEFAULT_SEED.to_string());
     }
     // --scenario=PATH / --out=PATH: tuning-harness mini-world runner (Layer 1). Runs one isolated cohort in
     // controlled env band, headless, writes result JSON + exits. See scenario.rs.
-    let scenario_path = args.iter().find_map(|a| a.strip_prefix("--scenario=").map(String::from));
-    let out_path = args.iter().find_map(|a| a.strip_prefix("--out=").map(String::from)).unwrap_or_else(|| "result.json".into());
+    let scenario_path = val(&args, "--scenario=").map(String::from);
+    let out_path = val(&args, "--out=").map(String::from).unwrap_or_else(|| "result.json".into());
     // Plant seed-bank library: normal run seeds planet biome-matched FROM it when file exists.
     // --plant-lib=PATH overrides default path. --no-plant-lib forces archetype seeding.
     const DEFAULT_PLANT_LIB: &str = "plant-library.json";
-    let plant_lib = if args.iter().any(|a| a == "--no-plant-lib") {
+    let plant_lib = if flag(&args, "--no-plant-lib") {
         None
     } else {
-        Some(args.iter().find_map(|a| a.strip_prefix("--plant-lib=").map(String::from)).unwrap_or_else(|| DEFAULT_PLANT_LIB.into()))
+        Some(val(&args, "--plant-lib=").map(String::from).unwrap_or_else(|| DEFAULT_PLANT_LIB.into()))
     };
     let seed_given = args.iter().any(|a| a.starts_with("--seed="));
     // --merge=result.json --niche=NAME: fold scenario result's best genomes into plant library, then
     // exit (no sim). Harness synthesize stage calls this per tuned cohort. --lib-cap caps per-niche.
-    if let Some(rp) = args.iter().find_map(|a| a.strip_prefix("--merge=").map(String::from)) {
-        let niche = args.iter().find_map(|a| a.strip_prefix("--niche=").map(String::from)).unwrap_or_else(|| "default".into());
-        let cap = args.iter().find_map(|a| a.strip_prefix("--lib-cap=").and_then(|s| s.parse::<usize>().ok())).unwrap_or(8);
+    if let Some(rp) = val(&args, "--merge=").map(String::from) {
+        let niche = val(&args, "--niche=").map(String::from).unwrap_or_else(|| "default".into());
+        let cap = parse_or(&args, "--lib-cap=", 8usize);
         let lib_path = plant_lib.clone().unwrap_or_else(|| DEFAULT_PLANT_LIB.into());
         scenario::merge_result_into_library(&rp, &niche, &lib_path, cap);
         return;
     }
     // --merge-snapshot=run.json: harvest whole-planet co-evolution run's surviving plants into library,
     // biome-labeled (+ --niche-suffix, default "-coevo"), then exit. Pairs w/ --headless --save run.
-    if let Some(sp) = args.iter().find_map(|a| a.strip_prefix("--merge-snapshot=").map(String::from)) {
-        let cap = args.iter().find_map(|a| a.strip_prefix("--lib-cap=").and_then(|s| s.parse::<usize>().ok())).unwrap_or(8);
-        let suffix = args.iter().find_map(|a| a.strip_prefix("--niche-suffix=").map(String::from)).unwrap_or_else(|| "-coevo".into());
+    if let Some(sp) = val(&args, "--merge-snapshot=").map(String::from) {
+        let cap = parse_or(&args, "--lib-cap=", 8usize);
+        let suffix = val(&args, "--niche-suffix=").map(String::from).unwrap_or_else(|| "-coevo".into());
         let lib_path = plant_lib.clone().unwrap_or_else(|| DEFAULT_PLANT_LIB.into());
         scenario::merge_snapshot_into_library(&sp, &lib_path, cap, &suffix);
         return;
@@ -143,9 +148,9 @@ fn main() {
     // --merge-creatures=result.json --snap=PATH: harvest creature scenario result's best survivors into
     // population snapshot (showcase seed), accumulating across runs (--cap caps total), then exit.
     // Creature tuning workflow calls this per niche to build fresh evolved-continuous.json.
-    if let Some(rp) = args.iter().find_map(|a| a.strip_prefix("--merge-creatures=").map(String::from)) {
-        let snap_out = args.iter().find_map(|a| a.strip_prefix("--snap=").map(String::from)).unwrap_or_else(|| "evolved-continuous.json".into());
-        let cap = args.iter().find_map(|a| a.strip_prefix("--cap=").and_then(|s| s.parse::<usize>().ok())).unwrap_or(90);
+    if let Some(rp) = val(&args, "--merge-creatures=").map(String::from) {
+        let snap_out = val(&args, "--snap=").map(String::from).unwrap_or_else(|| "evolved-continuous.json".into());
+        let cap = parse_or(&args, "--cap=", 90usize);
         scenario::merge_creatures_into_snapshot(&rp, &snap_out, cap);
         return;
     }
@@ -179,16 +184,16 @@ fn main() {
         // Two-parent breeding (assortative mate choice + crossover) for creatures AND plants is DEFAULT.
         // --no-mating opts out (single-parent budding, e.g. clean generational runs). --mating / --sexual
         // are no-op back-compat aliases (feature already on).
-        mating: !args.iter().any(|a| a == "--no-mating"),
+        mating: !flag(&args, "--no-mating"),
         // --garden: seed botanical showcase (one of every species in grid at homeland) to inspect flora.
         // Pair w/ --capture or `cargo run -- --garden` to walk garden.
-        garden: args.iter().any(|a| a == "--garden"),
+        garden: flag(&args, "--garden"),
         plant_lib: plant_lib.clone(),
         // --until-sustain: run continuous headless until every niche holds itself up (no rescue for a window),
         // then save best snapshot + exit. Evolves a balanced, self-sustaining world to load in the visualizer.
-        until_sustain: args.iter().any(|a| a == "--until-sustain"),
+        until_sustain: flag(&args, "--until-sustain"),
         // --metrics=PATH: write niche balance result JSON at run end (the balance harness scores config tweaks from it)
-        metrics: args.iter().find_map(|a| a.strip_prefix("--metrics=").map(String::from)),
+        metrics: val(&args, "--metrics=").map(String::from),
     });
     app.init_resource::<niche::NicheBanks>();
     app.init_resource::<niche::NicheTracker>();
