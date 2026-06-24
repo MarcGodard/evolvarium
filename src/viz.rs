@@ -117,6 +117,7 @@ impl Plugin for VizPlugin {
             .insert_resource(ShowShadows(true)) // shadows on by default (O toggles)
             .init_resource::<Identified>()
             .init_resource::<TreePositions>()
+            .init_resource::<BodyMeshCache>()
             .add_systems(Startup, (log_viz_help, spawn_stats_ui, spawn_world_stats_ui, spawn_legend_ui, spawn_daycycle_ui, spawn_underwater_tint, spawn_clouds, set_initial_speed, spawn_minimap, spawn_phylo_ui, load_star_catalog, spawn_identity_ui))
             .add_systems(
                 Update,
@@ -482,6 +483,46 @@ pub struct PlantForms {
 #[derive(Resource)]
 pub struct CreatureMesh(pub Handle<Mesh>);
 
+// M5: cache of generative body meshes keyed by body-graph hash. Newborns are parent-clone+mutation so many
+// genomes repeat (cache hit); identical graphs reuse one mesh asset. LRU-capped: evicting a cache entry
+// drops only OUR handle (entities keep their clone alive, ref-counted) -> just means future identical graphs
+// rebuild. Bounds GPU mesh count regardless of births.
+const BODY_CACHE_CAP: usize = 512;
+#[derive(Resource, Default)]
+pub struct BodyMeshCache {
+    map: std::collections::HashMap<u64, Handle<Mesh>>,
+    order: std::collections::VecDeque<u64>,
+}
+impl BodyMeshCache {
+    // Generative mesh for this genome's body (built once per unique graph). center_y vertically centers the
+    // body on the entity origin (so feet hang below + head above, like the old centered capsule).
+    fn get_or_build(&mut self, g: &Genome, meshes: &mut Assets<Mesh>) -> Handle<Mesh> {
+        let key = crate::morph::body_hash(&g.body);
+        if let Some(h) = self.map.get(&key) {
+            return h.clone();
+        }
+        let pheno = crate::morph::develop(&g.body);
+        let m = crate::morph::Morphometrics::from_phenotype(&pheno);
+        let center_y = (m.bbox_min.y + m.bbox_max.y) * 0.5;
+        let h = meshes.add(crate::morph::build_body_mesh(&pheno, center_y));
+        self.map.insert(key, h.clone());
+        self.order.push_back(key);
+        if self.order.len() > BODY_CACHE_CAP {
+            if let Some(old) = self.order.pop_front() {
+                self.map.remove(&old);
+            }
+        }
+        h
+    }
+}
+
+// Overall world-scale of a generative body. Body-graph units (~2-3 tall) -> ~1.5 world units, modulated by
+// the size gene so big-genome creatures read bigger. Juvenile growth multiplies this (size_creatures).
+fn body_scale(g: &Genome) -> f32 {
+    BODY_RENDER * (0.7 + 0.6 * g.size)
+}
+const BODY_RENDER: f32 = 0.5; // graph-units -> world-units normalization (tune by capture)
+
 // Genetic body-part meshes (M4): head + eyes + legs as child entities -> head size, eye count, leg
 // count visible. Base sizes ~unit; add_creature_visuals scales per genome.
 #[derive(Resource)]
@@ -522,7 +563,7 @@ const CREATURE_MATURE_TICKS: f32 = 220.0; // grow to full size by this age (tick
 fn size_creatures(mut q: Query<(&DietState, &Genome, &mut Transform), With<Creature>>) {
     for (diet, g, mut tf) in &mut q {
         let grow = (CREATURE_BORN_SCALE + (1.0 - CREATURE_BORN_SCALE) * diet.age as f32 / CREATURE_MATURE_TICKS).min(1.0);
-        tf.scale = creature_look(g).1 * grow;
+        tf.scale = Vec3::splat(body_scale(g) * grow); // uniform: generative body carries the shape
     }
 }
 
@@ -544,206 +585,46 @@ fn flap_wings(time: Res<Time>, mut q: Query<(&Wing, &mut Transform)>) {
 // only once dead (carrion gets own mesh).
 fn add_creature_visuals(
     mut commands: Commands,
-    mesh: Option<Res<CreatureMesh>>,
     parts: Option<Res<CreatureParts>>,
+    mut cache: ResMut<BodyMeshCache>,
+    mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut q: Query<(Entity, &Genome, &mut Transform), (With<Creature>, Without<Mesh3d>)>,
 ) {
-    let (Some(mesh), Some(parts)) = (mesh, parts) else { return };
+    let Some(parts) = parts else { return };
     for (e, g, mut tf) in &mut q {
-        let (color, scale) = creature_look(g);
-        tf.scale = scale;
-        // children inherit parent non-uniform body scale; cancel per-part so head/eyes/legs not distorted.
-        // part_tf places part at WORLD offset `wo` with WORLD dims `dim` (base meshes ~unit).
-        let inv = Vec3::new(1.0 / scale.x.max(0.01), 1.0 / scale.y.max(0.01), 1.0 / scale.z.max(0.01));
-        let part_tf = |wo: Vec3, dim: Vec3| Transform { translation: wo * inv, scale: dim * inv, ..default() };
-        let body = 0.6 + 0.9 * g.size; // overall build factor
-        let srgb = |c: Color, k: f32| {
-            let s = c.to_srgba();
-            Color::srgb(s.red * k, s.green * k, s.blue * k)
-        };
+        // GENERATIVE BODY: one merged mesh grown from the body-graph (morph.rs). Genome hue rides the
+        // entity material base_color; the mesh's per-part vertex colors shade it (limbs darker, belly lighter).
+        let (color, _) = creature_look(g);
+        tf.scale = Vec3::splat(body_scale(g));
+        let body_mesh = cache.get_or_build(g, &mut meshes);
+        commands.entity(e).insert((Mesh3d(body_mesh), MeshMaterial3d(materials.add(color))));
 
-        commands.entity(e).insert((Mesh3d(mesh.0.clone()), MeshMaterial3d(materials.add(color))));
-
-        // HEAD: sphere up front + on top (local +Z, +Y), two-toned by pattern gene (marking).
-        let head_d = (0.45 + 0.55 * g.head) * body;
-        let head_y = 0.7 * scale.y;
-        let head_z = 0.35 * scale.z + 0.45 * head_d;
-        let head = commands
-            .spawn((
-                Mesh3d(parts.head.clone()),
-                MeshMaterial3d(materials.add(srgb(color, 1.0 - 0.45 * g.pattern))),
-                part_tf(Vec3::new(0.0, head_y, head_z), Vec3::splat(head_d)),
-            ))
-            .id();
-        commands.entity(e).add_child(head);
-
-        // EYES: 1..6 bright spheres proud of head front face (second row above 3 eyes).
+        // EYES: emissive spheres at the front-top of the developed body so creatures read at distance (eyes
+        // aren't part of the body graph). Positioned from the body's bounding box (body-local, centered like
+        // the mesh); inherit the parent's uniform scale.
+        let m = crate::morph::Morphometrics::of(&g.body);
+        let center_y = (m.bbox_min.y + m.bbox_max.y) * 0.5;
+        let top = (m.bbox_max.y - center_y).max(0.2); // head height above center
+        let front = m.bbox_max.z.max(0.2); // forward face
+        let half_w = ((m.bbox_max.x - m.bbox_min.x) * 0.5).max(0.15);
         let n_eyes = (EYE_MIN + EYE_SPAN * g.eyes).round().clamp(1.0, 6.0) as usize;
+        let eye_d = (0.18 + 0.18 * g.head) * (0.4 + half_w); // sphere mesh radius 0.5 -> scale*0.5 = world r
         let eye_mat = materials.add(StandardMaterial {
             base_color: Color::srgb(0.97, 0.98, 1.0),
             emissive: LinearRgba::rgb(0.5, 0.52, 0.6), // glow -> eyes read at distance
             ..default()
         });
-        let eye_d = 0.34 * head_d;
         for k in 0..n_eyes {
             let frac = if n_eyes <= 1 { 0.0 } else { (k as f32 / (n_eyes - 1) as f32) * 2.0 - 1.0 };
             let row = if k >= 3 { 1.0 } else { 0.0 };
-            let ex = frac * 0.30 * head_d;
-            let ey = head_y + 0.10 * head_d + row * 0.26 * head_d;
-            let ez = head_z + 0.46 * head_d; // proud on front of head sphere
+            let ex = frac * half_w * 0.7;
+            let ey = top * 0.8 - row * eye_d * 0.5;
+            let ez = front * 0.9 + eye_d * 0.4; // proud of the front face
             let eye = commands
-                .spawn((Mesh3d(parts.eye.clone()), MeshMaterial3d(eye_mat.clone()), part_tf(Vec3::new(ex, ey, ez), Vec3::splat(eye_d))))
+                .spawn((Mesh3d(parts.eye.clone()), MeshMaterial3d(eye_mat.clone()), Transform { translation: Vec3::new(ex, ey, ez), scale: Vec3::splat(eye_d), ..default() }))
                 .id();
             commands.entity(e).add_child(eye);
-        }
-
-        // BEAK/SNOUT: forward cone off the head front, length from g.beak. Reads as a beak on birds, a snout on
-        // others. Cone apex is +Y, so rotate +Y -> +Z (from_rotation_x(PI/2)) to point it forward.
-        if g.beak > 0.3 {
-            let beak_len = (0.35 + 0.75 * g.beak) * head_d;
-            let beak_r = 0.22 * head_d;
-            let beak = commands
-                .spawn((Mesh3d(parts.fin.clone()), MeshMaterial3d(materials.add(srgb(color, 0.7))), Transform {
-                    translation: (Vec3::new(0.0, head_y + 0.02 * head_d, head_z + 0.5 * head_d + 0.45 * beak_len)) * inv,
-                    rotation: Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
-                    scale: (Vec3::new(beak_r, beak_len, beak_r)) * inv,
-                }))
-                .id();
-            commands.entity(e).add_child(beak);
-        }
-
-        // LIMBS: body local axes -> +Y up, +Z forward (facing), creature stands vertical on surface. Limb FORM
-        // forks on body plan so aquatics stop looking like land animals:
-        //   land     -> 2..8 legs poking down (current).
-        //   swimmer + many limbs (>=6) -> octopus: long thin tentacles drooping from front-under the mantle.
-        //   swimmer + few limbs        -> fish: flat pectoral side-fins (tail fin does the propulsion read).
-        //   very elongate (snake/eel)  -> legless: body + tail carry it, no limbs at all.
-        let n_legs = (LIMB_MIN + LIMB_SPAN * g.limbs).round().clamp(2.0, 8.0) as usize;
-        let swimmer = g.swim > 0.45;
-        let flyer = g.flight > 0.5; // bird silhouette wins over swim/land fork
-        let legless = g.elongate > 0.75; // serpent: limbs vanish
-        let leg_mat = materials.add(srgb(color, 0.55));
-        let fin_mat = materials.add(srgb(color, 0.85));
-        if flyer {
-            // BIRD: a pair of swept tapered wings that FLAP (flap_wings rotates them about the shoulder root).
-            // Wing root sits at x=0 in the mesh and extends outward; placing the entity at the shoulder + scaling
-            // by span makes rotation pivot at the shoulder. scale.x sign mirrors the mesh for the left wing.
-            // Wider span at higher flight gene; flap FREQ from size -> hummingbird (small) flutters, hawk (big) beats.
-            let span = (1.0 + 0.9 * g.flight) * body; // wing reach (each side)
-            let flap_freq = 6.0 + 16.0 * (1.0 - g.size.clamp(0.0, 1.0)); // small = fast flutter, big = slow beats
-            let wing_mat = double_sided_mat(&mut materials, srgb(color, 0.9), Some(0.95));
-            for side in [1.0f32, -1.0] {
-                let shoulder = Vec3::new(side * 0.35 * scale.x, 0.22 * scale.y, -0.05 * scale.z);
-                let rest = Transform {
-                    translation: shoulder * inv,
-                    rotation: Quat::IDENTITY,
-                    scale: Vec3::new(side * span, 0.04 * body, 0.85 * span) * inv, // thin Y, span out X, chord Z
-                };
-                let wing = commands
-                    .spawn((Mesh3d(parts.wing.clone()), MeshMaterial3d(wing_mat.clone()), rest, Wing { side, freq: flap_freq, amp: 0.6, rest }))
-                    .id();
-                commands.entity(e).add_child(wing);
-            }
-            // small pair of tucked legs under the body (perch/landing read)
-            let leg_len = 0.3 * body;
-            for side in [1.0f32, -1.0] {
-                let leg = commands
-                    .spawn((Mesh3d(parts.leg.clone()), MeshMaterial3d(leg_mat.clone()), part_tf(Vec3::new(side * 0.2 * scale.x, -0.35 * scale.y - 0.5 * leg_len, 0.0), Vec3::new(0.08 * body, leg_len, 0.08 * body))))
-                    .id();
-                commands.entity(e).add_child(leg);
-            }
-            // tail fan at the rear: flat horizontal plate, spread wide in X, extends back in Z (steering fan).
-            let tl = (0.4 + 0.7 * g.tail) * body;
-            let tail = commands
-                .spawn((Mesh3d(parts.seg.clone()), MeshMaterial3d(wing_mat.clone()), part_tf(Vec3::new(0.0, 0.05 * scale.y, -(0.45 * scale.z + 0.5 * tl)), Vec3::new(1.0 * tl, 0.04 * body, tl))))
-                .id();
-            commands.entity(e).add_child(tail);
-        } else if legless {
-            // no limbs
-        } else if swimmer && n_legs >= 6 {
-            // OCTOPUS: tentacles ring the front-lower body, hang down + slightly splayed, long + thin.
-            let t_len = 1.5 * body;
-            let t_r = 0.07 * body;
-            for k in 0..n_legs {
-                let a = (k as f32 / n_legs as f32) * std::f32::consts::TAU;
-                let tx = a.cos() * 0.42 * scale.x;
-                let tz = 0.2 * scale.z + a.sin() * 0.42 * scale.z; // biased forward (under the mantle)
-                let cy = -0.3 * scale.y - 0.5 * t_len;
-                let tent = commands
-                    .spawn((Mesh3d(parts.leg.clone()), MeshMaterial3d(leg_mat.clone()), part_tf(Vec3::new(tx, cy, tz), Vec3::new(t_r, t_len, t_r))))
-                    .id();
-                commands.entity(e).add_child(tent);
-            }
-        } else if swimmer {
-            // FISH: a pair (up to 4) of flat pectoral fins out the lower sides, swept slightly back.
-            let n_fins = n_legs.min(4);
-            let fw = 0.55 * body; // fin reach out from body
-            for k in 0..n_fins {
-                let side = if k % 2 == 0 { 1.0 } else { -1.0 };
-                let fx = side * (0.5 * scale.x + 0.5 * fw);
-                let fz = 0.05 * scale.z - (k / 2) as f32 * 0.25 * scale.z; // pairs march toward the tail
-                let fy = -0.15 * scale.y;
-                let fin = commands
-                    .spawn((Mesh3d(parts.seg.clone()), MeshMaterial3d(fin_mat.clone()), part_tf(Vec3::new(fx, fy, fz), Vec3::new(fw, 0.05 * body, 0.42 * body))))
-                    .id();
-                commands.entity(e).add_child(fin);
-            }
-        } else {
-            // LAND LEGS: 2..8 thin legs ringed around lower body sides, poking down. Longer for climbers.
-            let leg_len = (0.45 + 0.45 * g.climb) * body;
-            let leg_r = 0.10 * body;
-            for k in 0..n_legs {
-                let a = (k as f32 / n_legs as f32) * std::f32::consts::TAU;
-                let lx = a.cos() * 0.52 * scale.x; // just outside body silhouette
-                let lz = a.sin() * 0.52 * scale.z;
-                let cy = -0.35 * scale.y - 0.5 * leg_len; // hang from lower body
-                let leg = commands
-                    .spawn((Mesh3d(parts.leg.clone()), MeshMaterial3d(leg_mat.clone()), part_tf(Vec3::new(lx, cy, lz), Vec3::new(leg_r, leg_len, leg_r)))).id();
-                commands.entity(e).add_child(leg);
-            }
-        }
-
-        // TAIL: at rear (-Z), size from g.tail. Form by body plan: swimmer -> vertical caudal fan (cone);
-        // furry land -> bushy upswept tail (box, lighter); else -> thin rod tail (box). Lizard/rat/squirrel/fish.
-        // Fliers handled above (tail fan) -> skip here so no double tail.
-        if g.tail > 0.12 && !flyer {
-            let tl = (0.3 + 0.9 * g.tail) * body; // tail length
-            if swimmer {
-                // caudal fin: vertical fan, thin in X, tall in Y, short Z, at the very back
-                let cf_y = 0.0;
-                let cf_z = -(0.45 * scale.z + 0.4 * tl);
-                let caudal = commands
-                    .spawn((Mesh3d(parts.fin.clone()), MeshMaterial3d(fin_mat.clone()), part_tf(Vec3::new(0.0, cf_y, cf_z), Vec3::new(0.08 * body, 1.3 * tl, 0.7 * tl))))
-                    .id();
-                commands.entity(e).add_child(caudal);
-            } else if g.pelt > 0.45 {
-                // bushy upswept tail (squirrel): fat soft ellipsoid box, raised, lighter (fur)
-                let bush_mat = materials.add(srgb(color, 1.15));
-                let bz = -(0.4 * scale.z + 0.4 * tl);
-                let by = 0.25 * scale.y + 0.3 * tl; // arcs up
-                let bush = commands
-                    .spawn((Mesh3d(parts.seg.clone()), MeshMaterial3d(bush_mat), part_tf(Vec3::new(0.0, by, bz), Vec3::new(0.5 * body, 0.9 * tl, 0.5 * body))))
-                    .id();
-                commands.entity(e).add_child(bush);
-            } else {
-                // rod tail (rat/lizard/snake tip): thin box pointing back
-                let rz = -(0.45 * scale.z + 0.5 * tl);
-                let rod = commands
-                    .spawn((Mesh3d(parts.seg.clone()), MeshMaterial3d(leg_mat.clone()), part_tf(Vec3::new(0.0, -0.1 * scale.y, rz), Vec3::new(0.12 * body, 0.12 * body, tl))))
-                    .id();
-                commands.entity(e).add_child(rod);
-            }
-        }
-
-        // DORSAL FIN: triangular ridge along the spine (top +Y, mid body), thin in X, swept in Z. Sailfin/shark.
-        // Skip on fliers (a spine sail on a bird reads wrong).
-        if g.fin > 0.45 && !flyer {
-            let df = (0.3 + 0.7 * g.fin) * body;
-            let dorsal = commands
-                .spawn((Mesh3d(parts.fin.clone()), MeshMaterial3d(fin_mat.clone()), part_tf(Vec3::new(0.0, 0.45 * scale.y + 0.4 * df, 0.0), Vec3::new(0.07 * body, df, 0.9 * df))))
-                .id();
-            commands.entity(e).add_child(dorsal);
         }
     }
 }
@@ -2219,11 +2100,11 @@ fn restyle_creatures(
     mut q: Query<(&Genome, &MeshMaterial3d<StandardMaterial>, &mut Transform), Changed<Genome>>,
 ) {
     for (g, mm, mut tf) in &mut q {
-        let (color, scale) = creature_look(g); // skin_hue/sat, venom warning, fur/armor, fish body plan
+        let (color, _) = creature_look(g); // skin_hue/sat, venom warning, fur/armor tint (multiplies vertex colors)
         if let Some(m) = mats.get_mut(&mm.0) {
             m.base_color = color;
         }
-        tf.scale = scale;
+        tf.scale = Vec3::splat(body_scale(g));
     }
 }
 

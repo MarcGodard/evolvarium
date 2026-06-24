@@ -316,13 +316,16 @@ impl BodyGraph {
     // A varied-but-viable founder body: torso root + head + a reflected appendage set (legs/fins/wings) +
     // optional tail. Random params span body plans so selection has morphological variation from gen 0.
     pub fn random(rng: &mut Rng) -> Self {
-        let hue = rng.f32();
-        let (r, gc, b) = hsl_rgb(hue, 0.5, 0.5);
+        // part colors are per-part SHADES (grey multipliers); the genome hue comes from the entity material,
+        // so vertex color just darkens/lightens each part (belly lighter, limbs darker, etc.).
+        let torso_sh = rng.range(0.85, 1.0);
+        let head_sh = rng.range(0.78, 0.95);
+        let app_sh = rng.range(0.7, 0.92);
         let mut nodes = vec![
             // 0: torso
-            PartGene { shape: ShapeKind::Segment, length: rng.range(1.0, 2.2), radius: rng.range(0.4, 0.75), taper: rng.range(0.6, 0.95), r, g: gc, b },
+            PartGene { shape: ShapeKind::Segment, length: rng.range(1.0, 2.2), radius: rng.range(0.4, 0.75), taper: rng.range(0.6, 0.95), r: torso_sh, g: torso_sh, b: torso_sh },
             // 1: head
-            PartGene { shape: ShapeKind::Sphere, length: rng.range(0.4, 0.8), radius: rng.range(0.3, 0.55), taper: 1.0, r: r * 0.9, g: gc * 0.9, b: b * 0.9 },
+            PartGene { shape: ShapeKind::Sphere, length: rng.range(0.4, 0.8), radius: rng.range(0.3, 0.55), taper: 1.0, r: head_sh, g: head_sh, b: head_sh },
         ];
         let mut edges = vec![
             // head on the front-top of the torso
@@ -338,7 +341,7 @@ impl BodyGraph {
             (ShapeKind::Plate, rng.range(0.3, 0.9), false) // wings (upper plates)
         };
         let app = nodes.len();
-        nodes.push(PartGene { shape, length: rng.range(0.6, 1.4), radius: rng.range(0.12, 0.4), taper: rng.range(0.4, 0.9), r: r * 0.8, g: gc * 0.8, b: b * 0.8 });
+        nodes.push(PartGene { shape, length: rng.range(0.6, 1.4), radius: rng.range(0.12, 0.4), taper: rng.range(0.4, 0.9), r: app_sh, g: app_sh, b: app_sh });
         let pairs = 1 + (rng.f32() * 2.5) as usize; // 1..3 reflected pairs
         for k in 0..pairs {
             let along = if count_along { 0.2 + 0.6 * (k as f32 / pairs.max(1) as f32) } else { rng.range(0.3, 0.7) };
@@ -358,7 +361,7 @@ impl BodyGraph {
         // optional tail
         if rng.f32() < 0.5 {
             let tail = nodes.len();
-            nodes.push(PartGene { shape: ShapeKind::Segment, length: rng.range(0.5, 1.5), radius: rng.range(0.1, 0.3), taper: rng.range(0.2, 0.6), r: r * 0.8, g: gc * 0.8, b: b * 0.8 });
+            nodes.push(PartGene { shape: ShapeKind::Segment, length: rng.range(0.5, 1.5), radius: rng.range(0.1, 0.3), taper: rng.range(0.2, 0.6), r: app_sh, g: app_sh, b: app_sh });
             edges.push(EdgeGene { from: 0, to: tail, along: 0.0, around: std::f32::consts::PI, pitch: rng.range(-0.3, 0.3), roll: 0.0, scale: 0.9, reflect: false, recurse: 1 + (rng.f32() * 2.0) as u8, joint: JointSpec::default() });
         }
         BodyGraph { nodes, edges, root: 0 }
@@ -448,26 +451,196 @@ impl BodyGraph {
     }
 }
 
-// Minimal HSL->RGB (founder coloring); h,s,l in 0..1. Mirrors the look used by viz.
-fn hsl_rgb(h: f32, s: f32, l: f32) -> (f32, f32, f32) {
-    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
-    let hp = (h * 6.0).rem_euclid(6.0);
-    let x = c * (1.0 - (hp % 2.0 - 1.0).abs());
-    let (r1, g1, b1) = match hp as u8 {
-        0 => (c, x, 0.0),
-        1 => (x, c, 0.0),
-        2 => (0.0, c, x),
-        3 => (0.0, x, c),
-        4 => (x, 0.0, c),
-        _ => (c, 0.0, x),
+// ---- generative mesh: one merged, vertex-colored mesh per developed body ----
+
+use bevy::asset::RenderAssetUsages;
+use bevy::mesh::{Indices, PrimitiveTopology};
+
+const RADIAL: usize = 8; // radial segments for tubes/spheres (low = cheap; bodies are small on screen)
+
+struct MeshBuf {
+    pos: Vec<[f32; 3]>,
+    nrm: Vec<[f32; 3]>,
+    col: Vec<[f32; 4]>,
+    idx: Vec<u32>,
+    y_off: f32, // shift all verts down by this so the body is vertically centered on the entity origin
+}
+impl MeshBuf {
+    fn new() -> Self {
+        MeshBuf { pos: vec![], nrm: vec![], col: vec![], idx: vec![], y_off: 0.0 }
+    }
+    fn vert(&mut self, tf: &Transform, p: Vec3, n: Vec3, c: [f32; 4]) -> u32 {
+        let mut wp = tf.transform_point(p);
+        wp.y -= self.y_off;
+        let wn = (tf.rotation * n).normalize_or_zero();
+        let i = self.pos.len() as u32;
+        self.pos.push([wp.x, wp.y, wp.z]);
+        self.nrm.push([wn.x, wn.y, wn.z]);
+        self.col.push(c);
+        i
+    }
+    fn tri(&mut self, a: u32, b: u32, c: u32) {
+        self.idx.extend_from_slice(&[a, b, c]);
+    }
+}
+
+// Build ONE merged mesh for a whole developed body. Each part emits a parametric primitive in its local
+// frame (base at origin, +Y axis), transformed by its placement, with the part color as vertex color (the
+// StandardMaterial base_color multiplies it -> genome-level tints still apply).
+pub fn build_body_mesh(p: &Phenotype, center_y: f32) -> Mesh {
+    let mut b = MeshBuf::new();
+    b.y_off = center_y;
+    for part in &p.parts {
+        let c = [part.color[0], part.color[1], part.color[2], 1.0];
+        match part.shape {
+            ShapeKind::Segment => push_frustum(&mut b, &part.tf, part.radius, part.radius * part.taper, part.length, c),
+            ShapeKind::Sphere => push_sphere(&mut b, &part.tf, part.radius, part.length, c),
+            ShapeKind::Plate => push_plate(&mut b, &part.tf, part.radius, part.length, c),
+        }
+    }
+    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, b.pos);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, b.nrm);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, b.col);
+    mesh.insert_indices(Indices::U32(b.idx));
+    mesh
+}
+
+// Tapered tube along +Y from y=0 (radius r0) to y=len (radius r1), with end caps. Side normals ~radial.
+fn push_frustum(b: &mut MeshBuf, tf: &Transform, r0: f32, r1: f32, len: f32, c: [f32; 4]) {
+    let tau = std::f32::consts::TAU;
+    let mut ring0 = [0u32; RADIAL];
+    let mut ring1 = [0u32; RADIAL];
+    for k in 0..RADIAL {
+        let a = tau * k as f32 / RADIAL as f32;
+        let (s, co) = a.sin_cos();
+        let n = Vec3::new(s, 0.0, co);
+        ring0[k] = b.vert(tf, Vec3::new(s * r0, 0.0, co * r0), n, c);
+        ring1[k] = b.vert(tf, Vec3::new(s * r1, len, co * r1), n, c);
+    }
+    for k in 0..RADIAL {
+        let kn = (k + 1) % RADIAL;
+        b.tri(ring0[k], ring0[kn], ring1[kn]);
+        b.tri(ring0[k], ring1[kn], ring1[k]);
+    }
+    // caps (fans)
+    let cap0 = b.vert(tf, Vec3::ZERO, Vec3::NEG_Y, c);
+    let cap1 = b.vert(tf, Vec3::Y * len, Vec3::Y, c);
+    for k in 0..RADIAL {
+        let kn = (k + 1) % RADIAL;
+        b.tri(cap0, ring0[kn], ring0[k]);
+        b.tri(cap1, ring1[k], ring1[kn]);
+    }
+}
+
+// UV sphere of radius r, centered at y=r (rests on the attach). `len` unused except to keep the call uniform.
+fn push_sphere(b: &mut MeshBuf, tf: &Transform, r: f32, _len: f32, c: [f32; 4]) {
+    let stacks = RADIAL.max(6);
+    let slices = RADIAL;
+    let center = Vec3::Y * r;
+    let pi = std::f32::consts::PI;
+    let tau = std::f32::consts::TAU;
+    let mut grid = vec![0u32; (stacks + 1) * (slices + 1)];
+    for i in 0..=stacks {
+        let phi = pi * i as f32 / stacks as f32; // 0..pi
+        let (sp, cp) = phi.sin_cos();
+        for j in 0..=slices {
+            let th = tau * j as f32 / slices as f32;
+            let (st, ct) = th.sin_cos();
+            let n = Vec3::new(sp * st, cp, sp * ct);
+            grid[i * (slices + 1) + j] = b.vert(tf, center + n * r, n, c);
+        }
+    }
+    for i in 0..stacks {
+        for j in 0..slices {
+            let a = grid[i * (slices + 1) + j];
+            let d = grid[i * (slices + 1) + j + 1];
+            let e = grid[(i + 1) * (slices + 1) + j];
+            let f = grid[(i + 1) * (slices + 1) + j + 1];
+            b.tri(a, e, f);
+            b.tri(a, f, d);
+        }
+    }
+}
+
+// Flat plate (fin/wing): spans Y in [0,len], X in [-hw,hw], thin Z. hw = r (half-width).
+fn push_plate(b: &mut MeshBuf, tf: &Transform, r: f32, len: f32, c: [f32; 4]) {
+    let hw = r;
+    let hz = (PLATE_THICK * r).max(0.01);
+    let corners = [
+        // (x, y, z, nx, ny, nz) faces: front/back dominate
+        Vec3::new(-hw, 0.0, hz),
+        Vec3::new(hw, 0.0, hz),
+        Vec3::new(hw, len, hz),
+        Vec3::new(-hw, len, hz),
+        Vec3::new(-hw, 0.0, -hz),
+        Vec3::new(hw, 0.0, -hz),
+        Vec3::new(hw, len, -hz),
+        Vec3::new(-hw, len, -hz),
+    ];
+    let face = |b: &mut MeshBuf, q: [usize; 4], n: Vec3| {
+        let v0 = b.vert(tf, corners[q[0]], n, c);
+        let v1 = b.vert(tf, corners[q[1]], n, c);
+        let v2 = b.vert(tf, corners[q[2]], n, c);
+        let v3 = b.vert(tf, corners[q[3]], n, c);
+        b.tri(v0, v1, v2);
+        b.tri(v0, v2, v3);
     };
-    let m = l - c * 0.5;
-    (r1 + m, g1 + m, b1 + m)
+    face(b, [0, 1, 2, 3], Vec3::Z); // front
+    face(b, [5, 4, 7, 6], Vec3::NEG_Z); // back
+    face(b, [4, 0, 3, 7], Vec3::NEG_X); // left
+    face(b, [1, 5, 6, 2], Vec3::X); // right
+    face(b, [3, 2, 6, 7], Vec3::Y); // top
+    face(b, [4, 5, 1, 0], Vec3::NEG_Y); // bottom
+}
+
+// Stable hash of a body graph for the render mesh cache (f32 bit patterns + enum tags + indices, FNV-1a).
+pub fn body_hash(g: &BodyGraph) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut mix = |x: u64| {
+        h ^= x;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    };
+    let f = |v: f32| v.to_bits() as u64;
+    mix(g.root as u64);
+    for n in &g.nodes {
+        mix(n.shape as u64);
+        mix(f(n.length));
+        mix(f(n.radius));
+        mix(f(n.taper));
+        mix(f(n.r) ^ (f(n.g) << 1) ^ (f(n.b) << 2));
+    }
+    for e in &g.edges {
+        mix((e.from as u64) ^ ((e.to as u64) << 8) ^ ((e.recurse as u64) << 16) ^ ((e.reflect as u64) << 24));
+        mix(f(e.along) ^ (f(e.around) << 1));
+        mix(f(e.pitch) ^ (f(e.roll) << 1) ^ (f(e.scale) << 2));
+    }
+    h
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn body_mesh_is_nonempty_and_finite() {
+        let mut rng = Rng::seed(5);
+        let g = BodyGraph::random(&mut rng);
+        let mesh = build_body_mesh(&develop(&g), 0.0);
+        let n = mesh.count_vertices();
+        assert!(n > 0, "mesh has vertices");
+        assert!(mesh.indices().map(|i| i.len() > 0).unwrap_or(false), "mesh has indices");
+    }
+
+    #[test]
+    fn body_hash_stable_and_sensitive() {
+        let mut rng = Rng::seed(11);
+        let g = BodyGraph::random(&mut rng);
+        assert_eq!(body_hash(&g), body_hash(&g.clone()), "same graph -> same hash");
+        let mut g2 = g.clone();
+        g2.nodes[0].length += 0.5;
+        assert_ne!(body_hash(&g), body_hash(&g2), "changed graph -> different hash");
+    }
 
     #[test]
     fn default_body_is_one_capsule() {
