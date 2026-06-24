@@ -381,7 +381,8 @@ pholmq/TSN (GPL-2.0) @ commit 49fd49c (pinned in `orrery.rs` + `stars.rs` commen
   - [x] DYNAMIC overlays (2026-06-23): 'M' now cycles 8 fields = 4 static (biome/heat/moisture/elevation)
         + 4 LIVE (soil fertility / groundwater / fire / creature-density), rebuilt each frame from sim
         resources via grid_cell sampling + build_globe_colored. viz::minimap_dynamic.
-  - [ ] Follow-up: walk-mode could aim the minimap at the walker instead of OrbitCam.
+  - [x] Follow-up (2026-06-24): walk-mode aims the minimap at the walker (centers on `WalkCam.dir`)
+        instead of OrbitCam; minimap now shows in Orbit + Walk, hidden only in the orrery.
 - [x] **Land wear / soil compaction (2026-06-23)**: `Wear` grid (SOIL_RES, mirrors Soil/GroundWater).
       Grounded LAND creatures add wear along their path (`bat.wear_adds` in live_step decide, x 0.5+size;
       fliers aloft + swimmers in water don't trample), applied + decayed (slow heal, ~250-tick half-life) in

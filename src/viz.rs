@@ -129,7 +129,7 @@ impl Plugin for VizPlugin {
                     toggle_legend,
                     (god_disturbances, crate::sim::save_world_key, crate::sim::save_on_window_close),
                     draw_selection,
-                    (minimap_sync_cam, minimap_visibility, toggle_hud, hud_visibility, planet_sky_visibility, atmosphere_visibility, update_atmosphere, minimap_input, minimap_rebuild, minimap_dynamic),
+                    (minimap_sync_cam, minimap_visibility, minimap_marker, toggle_hud, hud_visibility, planet_sky_visibility, atmosphere_visibility, update_atmosphere, minimap_input, minimap_rebuild, minimap_dynamic),
                     (phylogeny_classify, toggle_phylo, update_phylo_panel),
                 ),
             );
@@ -168,6 +168,9 @@ pub struct MinimapInitField(pub usize);
 struct MinimapCam;
 #[derive(Component)]
 struct MinimapLabel;
+// "you are here" dot on the minimap globe (walk mode). On RenderLayers 1, sits on the globe at WalkCam.dir.
+#[derive(Component)]
+struct MinimapMarker;
 
 // field value at a UNIT surface dir -> linear RGB. Ramps chosen for legibility (cold=blue/hot=red, dry=tan/wet=blue).
 fn minimap_color(field: usize, d: Vec3) -> [f32; 3] {
@@ -240,6 +243,17 @@ fn spawn_minimap(
         RenderLayers::layer(1),
         MinimapCam,
     ));
+    // "you are here" marker: small bright sphere on layer 1, hidden until walk mode positions it (minimap_marker)
+    let marker_mesh = meshes.add(Sphere::new(2.6).mesh().uv(12, 8));
+    let marker_mat = materials.add(StandardMaterial { base_color: Color::srgb(0.95, 0.08, 0.08), unlit: true, ..default() });
+    commands.spawn((
+        Mesh3d(marker_mesh),
+        MeshMaterial3d(marker_mat),
+        Transform::default(),
+        Visibility::Hidden,
+        RenderLayers::layer(1),
+        MinimapMarker,
+    ));
     commands.insert_resource(Minimap { field: field0, dirty: true, mesh }); // dirty -> frame 1 syncs label to field
     commands
         .spawn(Node {
@@ -307,6 +321,25 @@ fn minimap_visibility(
     if let Ok(mut v) = label.single_mut() {
         *v = if show { Visibility::Inherited } else { Visibility::Hidden };
     }
+}
+
+// "You are here" dot: in walk mode, park the marker on the minimap globe at the walker's surface point; hide
+// it elsewhere (orbit/orrery have no on-ground "you"). Globe radius = PLANET_R + elevation (matches build_globe_colored).
+fn minimap_marker(
+    mode: Res<crate::camera::CameraMode>,
+    walk: Query<&crate::camera::WalkCam>,
+    mut marker: Query<(&mut Transform, &mut Visibility), With<MinimapMarker>>,
+) {
+    let Ok((mut tf, mut vis)) = marker.single_mut() else { return };
+    if *mode == crate::camera::CameraMode::Walk {
+        if let Ok(w) = walk.single() {
+            let d = w.dir.normalize_or_zero();
+            tf.translation = d * (crate::sphere::PLANET_R + crate::sphere::elevation(d) + 1.5);
+            *vis = Visibility::Inherited;
+            return;
+        }
+    }
+    *vis = Visibility::Hidden;
 }
 
 // Master HUD toggle (H). The planet HUD (world stats, inspector hint, day cycle) is hidden when toggled off
