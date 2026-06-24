@@ -21,8 +21,42 @@ pub struct OrreryViewPlugin;
 impl Plugin for OrreryViewPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<OrreryClock>()
+            .init_resource::<ShowConstellations>()
             .add_systems(Startup, (spawn_orrery_bodies, spawn_starfield))
-            .add_systems(Update, (advance_clock, position_orrery_bodies, toggle_constellations));
+            .add_systems(
+                Update,
+                (advance_clock, position_orrery_bodies, toggle_constellations, orrery_scene_visibility, constellation_visibility),
+            );
+    }
+}
+
+// All orrery scenery (bodies + starfield). Visible ONLY in Orrery mode so the far solar-system scene never
+// bleeds into the planet's orbit/walk sky (the camera far clip alone does not separate them reliably).
+#[derive(Component)]
+struct OrreryScenery;
+
+#[derive(Resource, Default)]
+struct ShowConstellations(bool); // L toggles; only meaningful in Orrery mode
+
+fn orrery_scene_visibility(mode: Res<CameraMode>, mut q: Query<&mut Visibility, With<OrreryScenery>>) {
+    let want = if *mode == CameraMode::Orrery { Visibility::Visible } else { Visibility::Hidden };
+    for mut v in &mut q {
+        if *v != want {
+            *v = want;
+        }
+    }
+}
+
+fn constellation_visibility(
+    mode: Res<CameraMode>,
+    show: Res<ShowConstellations>,
+    mut q: Query<&mut Visibility, With<ConstellationLines>>,
+) {
+    let want = if *mode == CameraMode::Orrery && show.0 { Visibility::Visible } else { Visibility::Hidden };
+    for mut v in &mut q {
+        if *v != want {
+            *v = want;
+        }
     }
 }
 
@@ -35,6 +69,7 @@ fn spawn_starfield(
     let (star_mesh, hip_dir) = crate::stars::build_starfield(STAR_SHELL);
     let n_stars = star_mesh.count_vertices() / 4;
     commands.spawn((
+        OrreryScenery,
         Mesh3d(meshes.add(star_mesh)),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::WHITE, // vertex colors carry per-star temperature
@@ -43,6 +78,7 @@ fn spawn_starfield(
             ..default()
         })),
         Transform::from_translation(ORRERY_CENTER),
+        Visibility::Hidden, // shown only in Orrery mode (orrery_scene_visibility)
         bevy::light::NotShadowCaster,
     ));
     if let Some(lines) = crate::stars::build_constellation_lines(&hip_dir, STAR_SHELL) {
@@ -76,12 +112,10 @@ pub struct OrreryBody {
 #[derive(Component)]
 struct ConstellationLines;
 
-// Toggle constellation lines with L (off by default). Works regardless of camera mode.
-fn toggle_constellations(keys: Res<ButtonInput<KeyCode>>, mut q: Query<&mut Visibility, With<ConstellationLines>>) {
+// Toggle constellation lines with L (off by default); constellation_visibility applies it (orrery only).
+fn toggle_constellations(keys: Res<ButtonInput<KeyCode>>, mut show: ResMut<ShowConstellations>) {
     if keys.just_pressed(KeyCode::KeyL) {
-        for mut v in &mut q {
-            *v = if *v == Visibility::Hidden { Visibility::Visible } else { Visibility::Hidden };
-        }
+        show.0 = !show.0;
     }
 }
 
@@ -125,6 +159,7 @@ fn spawn_orrery_bodies(
         let col = body_color(name);
         commands.spawn((
             OrreryBody { idx },
+            OrreryScenery,
             Mesh3d(unit.clone()),
             MeshMaterial3d(materials.add(StandardMaterial {
                 base_color: Color::from(col),
@@ -133,6 +168,7 @@ fn spawn_orrery_bodies(
                 ..default()
             })),
             Transform::from_translation(ORRERY_CENTER).with_scale(Vec3::splat(r)),
+            Visibility::Hidden, // shown only in Orrery mode (orrery_scene_visibility)
             bevy::light::NotShadowCaster,
         ));
     }

@@ -118,7 +118,7 @@ impl Plugin for VizPlugin {
                     toggle_legend,
                     (god_disturbances, crate::sim::save_world_key, crate::sim::save_on_window_close),
                     draw_selection,
-                    (minimap_sync_cam, minimap_visibility, minimap_input, minimap_rebuild, minimap_dynamic),
+                    (minimap_sync_cam, minimap_visibility, hud_visibility, planet_sky_visibility, minimap_input, minimap_rebuild, minimap_dynamic),
                     (phylogeny_classify, toggle_phylo, update_phylo_panel),
                 ),
             );
@@ -286,6 +286,34 @@ fn minimap_visibility(
     }
     if let Ok(mut v) = label.single_mut() {
         *v = if show { Visibility::Inherited } else { Visibility::Hidden };
+    }
+}
+
+// Planet HUD (world stats, inspector, day cycle, legend) is irrelevant in the orrery solar-system view: hide
+// it there so the sky reads clean. (Minimap handled separately by minimap_visibility.)
+fn hud_visibility(
+    mode: Res<crate::camera::CameraMode>,
+    mut q: Query<&mut Visibility, Or<(With<WorldStatsText>, With<StatsText>, With<DayCycleText>, With<LegendText>)>>,
+) {
+    let want = if *mode == crate::camera::CameraMode::Orrery { Visibility::Hidden } else { Visibility::Inherited };
+    for mut v in &mut q {
+        if *v != want {
+            *v = want;
+        }
+    }
+}
+
+// Planet sky (real starfield + wandering planets) belongs to the orbit/walk views; hide it in the orrery
+// solar-system view so the two skies never overlap (the camera far clip alone does not separate them).
+fn planet_sky_visibility(
+    mode: Res<crate::camera::CameraMode>,
+    mut q: Query<&mut Visibility, Or<(With<SkyStars>, With<SkyPlanet>)>>,
+) {
+    let want = if *mode == crate::camera::CameraMode::Orrery { Visibility::Hidden } else { Visibility::Inherited };
+    for mut v in &mut q {
+        if *v != want {
+            *v = want;
+        }
     }
 }
 
