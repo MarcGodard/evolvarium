@@ -307,6 +307,9 @@ fn main() {
             app.insert_resource(viewer::ViewerMode)
                 .insert_resource(viewer::ViewerCfg { path: val(&args, "--viewer=").map(str::to_string) })
                 .add_plugins(bevy_egui::EguiPlugin::default())
+                // Don't let bevy_egui auto-pick the primary context -> it grabs the minimap's small 2nd camera.
+                // viewer::bind_egui_to_main pins it to the main camera (full window) instead.
+                .insert_resource(bevy_egui::EguiGlobalSettings { auto_create_primary_context: false, ..default() })
                 .add_plugins(viewer::ViewerPlugin);
         }
         if let Some(field) = cap_mmfield {

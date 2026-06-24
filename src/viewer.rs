@@ -30,6 +30,12 @@ pub struct ViewerState {
     pub released: bool, // T pressed -> world seeded, sim running, normal camera takes over
 }
 
+// Set by viewer_panel (which owns the egui ctx), read by viewer_camera -> mouse over the panel never drives
+// the world camera. Kept as a resource so only ONE system touches EguiContexts (accessing egui outside the
+// EguiPrimaryContextPass in multipass mode stops the panel rendering).
+#[derive(Resource, Default)]
+pub struct PointerOverUi(pub bool);
+
 // Self-owned orbit-around-creature (close inspection). Reuses nothing from the planet orbit (tuned for
 // dist 95..420 + mode-switch zoom), so the viewer drives its own yaw/pitch/dist here.
 #[derive(Resource)]
@@ -48,11 +54,21 @@ pub struct ViewerPlugin;
 impl Plugin for ViewerPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ViewerCam>()
+            .init_resource::<PointerOverUi>()
             .add_systems(Startup, spawn_viewer_creature)
-            .add_systems(Update, (hold_pause, rebuild_on_edit, release_into_sim))
+            .add_systems(Update, (hold_pause, rebuild_on_edit, release_into_sim, bind_egui_to_main))
             .add_systems(EguiPrimaryContextPass, viewer_panel)
             // PostUpdate: run AFTER the planet camera systems so the close-orbit transform wins.
             .add_systems(PostUpdate, viewer_camera);
+    }
+}
+
+// Pin the PRIMARY egui context to the MAIN camera (full window). With auto_create_primary_context off
+// (main.rs), nothing else claims it, so the minimap's small 2nd camera can't hijack the panel rect. Runs each
+// frame until the main camera has it, then the Without<> filter makes it a no-op.
+fn bind_egui_to_main(mut commands: Commands, cam: Query<Entity, (With<crate::camera::OrbitCam>, Without<bevy_egui::PrimaryEguiContext>)>) {
+    for e in &cam {
+        commands.entity(e).insert((bevy_egui::EguiContext::default(), bevy_egui::PrimaryEguiContext));
     }
 }
 
@@ -87,9 +103,10 @@ fn hold_pause(state: Option<Res<ViewerState>>, mut vtime: ResMut<Time<Virtual>>)
 // (Slider/Checkbox .changed()) -> fires Changed<Genome> just for that edit (drives restyle + rebuild_on_edit).
 // Covers all scalar trait genes, the 10 uptake nutrients, the vision sensors, and the body-graph shape
 // (per-node primitive/size, per-edge placement/recursion). Skips only the NN weights (net/plast).
-fn viewer_panel(mut contexts: EguiContexts, state: Option<Res<ViewerState>>, mut q: Query<&mut Genome, With<Creature>>) {
+fn viewer_panel(mut contexts: EguiContexts, state: Option<Res<ViewerState>>, mut over_ui: ResMut<PointerOverUi>, mut q: Query<&mut Genome, With<Creature>>) {
     let Some(state) = state else { return };
     let Ok(ctx) = contexts.ctx_mut() else { return };
+    over_ui.0 = ctx.is_pointer_over_area() || ctx.wants_pointer_input(); // gate viewer_camera so UI scroll/drag stays in the panel
     let Ok(mut g) = q.get_mut(state.creature) else { return };
     let g = &mut *g; // edit via this &mut; each `sl!`/checkbox writes only when the value moved (keeps Changed precise)
     let pi = std::f32::consts::PI;
@@ -104,11 +121,12 @@ fn viewer_panel(mut contexts: EguiContexts, state: Option<Res<ViewerState>>, mut
         }};
     }
 
-    egui::SidePanel::left("genome_panel").resizable(true).default_width(340.0).width_range(240.0..=640.0).show(ctx, |ui| {
+    egui::SidePanel::left("genome_panel").resizable(true).default_width(360.0).width_range(320.0..=680.0).show(ctx, |ui| {
+        ui.set_min_height(ui.available_height()); // fill full window height, not shrink-wrap to content
         ui.heading("Genome");
         ui.label(if state.released { "released into sim (edits still rebuild this creature)" } else { "T = release into sim" });
         ui.separator();
-        egui::ScrollArea::vertical().show(ui, |ui| {
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             egui::CollapsingHeader::new("Body & size").default_open(true).show(ui, |ui| {
                 sl!(ui, "size", 0.0, 1.0, g.size);
                 sl!(ui, "height", 0.0, 1.0, g.height);
@@ -281,6 +299,7 @@ fn viewer_camera(
     buttons: Res<ButtonInput<MouseButton>>,
     motion: Res<AccumulatedMouseMotion>,
     scroll: Res<AccumulatedMouseScroll>,
+    over_ui: Res<PointerOverUi>,
     target: Query<&GlobalTransform, With<Creature>>,
     mut tf: Query<&mut Transform, With<crate::camera::OrbitCam>>,
 ) {
@@ -288,12 +307,16 @@ fn viewer_camera(
     if state.released {
         return;
     }
-    if buttons.pressed(MouseButton::Right) {
-        cam.yaw -= motion.delta.x * 0.006;
-        cam.pitch = (cam.pitch + motion.delta.y * 0.006).clamp(-1.4, 1.4);
-    }
-    if scroll.delta.y != 0.0 {
-        cam.dist = (cam.dist * (1.0 - scroll.delta.y * 0.12)).clamp(2.5, 60.0);
+    // skip camera input while the pointer is over the panel (set by viewer_panel) -> UI scroll/drag never moves
+    // the world.
+    if !over_ui.0 {
+        if buttons.pressed(MouseButton::Right) {
+            cam.yaw -= motion.delta.x * 0.006;
+            cam.pitch = (cam.pitch + motion.delta.y * 0.006).clamp(-1.4, 1.4);
+        }
+        if scroll.delta.y != 0.0 {
+            cam.dist = (cam.dist * (1.0 - scroll.delta.y * 0.12)).clamp(2.5, 60.0);
+        }
     }
     let Ok(focus) = target.get(state.creature).map(|g| g.translation()) else { return };
     let Ok(mut t) = tf.single_mut() else { return };
