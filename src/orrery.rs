@@ -28,6 +28,8 @@ const M0: f32 = PI; // epoch phase: tick 0 near APOAPSIS -> today reads the slow
 const SIRIUS_DIR: Vec3 = Vec3::new(0.86, 0.0, 0.51);
 
 // --- TSN body table (verbatim from TSN celestial-settings.json; parents reference earlier indices) ---
+// SOURCE: pholmq/TSN @ commit 49fd49c5f3e902b907ab3788c8fa484f88dd5937 (2026-05-27),
+// src/settings/celestial-settings.json. To refresh values, re-pull from that repo + bump this SHA.
 pub struct Body {
     pub name: &'static str,
     pub parent: i32, // -1 = SystemCenter root

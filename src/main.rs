@@ -26,6 +26,7 @@ mod scenario;
 mod sim;
 mod snapshot;
 mod sphere;
+mod stars;
 mod terrain;
 mod viz;
 

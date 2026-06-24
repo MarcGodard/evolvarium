@@ -14,14 +14,50 @@ use bevy::prelude::*;
 pub const ORRERY_CENTER: Vec3 = Vec3::new(0.0, 0.0, 30000.0);
 // View time rate: years of model time per real second. ~0.05 -> Mercury orbits in ~5 s, Earth in ~20 s.
 const VIEW_YEARS_PER_SEC: f32 = 0.05;
+// Star/constellation shell radius (units from ORRERY_CENTER). Inside the 12k far clip from a near camera.
+const STAR_SHELL: f32 = 9000.0;
 
 pub struct OrreryViewPlugin;
 impl Plugin for OrreryViewPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<OrreryClock>()
-            .add_systems(Startup, spawn_orrery_bodies)
+            .add_systems(Startup, (spawn_orrery_bodies, spawn_starfield))
             .add_systems(Update, (advance_clock, position_orrery_bodies).chain());
     }
+}
+
+// Real Bright Star Catalog sky + constellation lines on a far shell around the solar system (TSN data).
+fn spawn_starfield(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    let (star_mesh, hip_dir) = crate::stars::build_starfield(STAR_SHELL);
+    let n_stars = star_mesh.count_vertices() / 4;
+    commands.spawn((
+        Mesh3d(meshes.add(star_mesh)),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::WHITE, // vertex colors carry per-star temperature
+            unlit: true,
+            cull_mode: None, // star quads sit on a shell facing outward; camera looks out from inside -> no cull
+            ..default()
+        })),
+        Transform::from_translation(ORRERY_CENTER),
+        bevy::light::NotShadowCaster,
+    ));
+    if let Some(lines) = crate::stars::build_constellation_lines(&hip_dir, STAR_SHELL) {
+        commands.spawn((
+            Mesh3d(meshes.add(lines)),
+            MeshMaterial3d(materials.add(StandardMaterial {
+                base_color: Color::srgb(0.16, 0.22, 0.38), // faint blue constellation lines (subtle vs stars)
+                unlit: true,
+                ..default()
+            })),
+            Transform::from_translation(ORRERY_CENTER),
+            bevy::light::NotShadowCaster,
+        ));
+    }
+    info!("orrery view: starfield {} BSC stars + constellation lines on shell r={}", n_stars, STAR_SHELL);
 }
 
 /// Independent model time for the orrery view (years). Advances on real time so it runs even when sim paused.
