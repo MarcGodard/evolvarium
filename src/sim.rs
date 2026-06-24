@@ -1070,12 +1070,230 @@ fn seaweed_pos(rng: &mut Rng) -> Vec3 {
     crate::sphere::surface_pos(d, FOOD_Y)
 }
 
+// --- full world snapshot (save/restore exact state incl. dynamic field grids) ---
+
+// One creature -> saved record (pos as unit dir + alt; energy/diet/fitness; working brain re-derives from genome).
+pub(crate) fn saved_creature(
+    tf: &Transform, en: &Energy, fit: &Fitness, head: &Heading, g: &Genome, diet: &DietState, loco: &Locomotion,
+) -> crate::persist::SavedCreature {
+    let d = tf.translation.normalize_or_zero();
+    crate::persist::SavedCreature {
+        g: g.clone(),
+        dir: [d.x, d.y, d.z],
+        alt: loco.alt,
+        heading: head.0,
+        energy: [en.fast, en.sugar, en.fat],
+        fitness: fit.0,
+        reserves: diet.reserves.to_vec(),
+        diet_g: diet.g,
+        age: diet.age,
+        fatigue: diet.fatigue,
+        starve: diet.starve,
+        toxic_load: diet.toxic_load,
+    }
+}
+
+// One plant-class entity -> saved record (living plant / tree / carrion / ferment / fruit; grass+seaweed excluded).
+pub(crate) fn saved_plant_entity(
+    g: &PlantGenome, st: &PlantState, tf: &Transform, tree: Option<&Tree>, rot: Option<&Rot>, ferment: Option<&Ferment>, seed: Option<&Seed>,
+) -> crate::persist::SavedPlantEntity {
+    let d = tf.translation.normalize_or_zero();
+    crate::persist::SavedPlantEntity {
+        g: g.clone(),
+        dir: [d.x, d.y, d.z],
+        mass: st.mass,
+        age: st.age,
+        tree: tree.map(|t| t.edible),
+        rot_age: rot.map(|r| r.age),
+        ferment_toxic: ferment.map(|f| f.toxic),
+        seed: seed.map(|s| s.0.clone()),
+    }
+}
+
+pub(crate) fn saved_grids(soil: &Soil, gw: &GroundWater, climate: &Climate, fire: &Fire, wear: &Wear) -> crate::persist::Grids {
+    crate::persist::Grids {
+        soil: soil.cell.clone(),
+        groundwater: gw.cell.clone(),
+        climate: climate.cell.clone(),
+        fire: fire.cell.clone(),
+        wear: wear.cell.clone(),
+    }
+}
+
+// Spawn the full saved world: overwrite the dynamic field grids + seed bank + weather, then spawn every saved
+// creature + plant where it stood. Grass/seaweed carpets regenerate via the normal half-full seeding (caller).
+// Restores tick/generation into GenState. Mirror of the lossy legacy spawn but exact.
+pub fn restore_full_world(
+    commands: &mut Commands,
+    w: &crate::persist::WorldState,
+    soil: &mut Soil,
+    gw: &mut GroundWater,
+    climate: &mut Climate,
+    fire: &mut Fire,
+    wear: &mut Wear,
+    bank: &mut SeedBank,
+    weather: &mut Weather,
+) {
+    // fields: overwrite only when the saved grid matches the current resolution (else keep the fresh default).
+    if w.grids.soil.len() == soil.cell.len() {
+        soil.cell = w.grids.soil.clone();
+    }
+    if w.grids.groundwater.len() == gw.cell.len() {
+        gw.cell = w.grids.groundwater.clone();
+    }
+    if w.grids.climate.len() == climate.cell.len() {
+        climate.cell = w.grids.climate.clone();
+    }
+    if w.grids.fire.len() == fire.cell.len() {
+        fire.cell = w.grids.fire.clone();
+    }
+    if w.grids.wear.len() == wear.cell.len() {
+        wear.cell = w.grids.wear.clone();
+    }
+    weather.rain = w.weather_rain;
+    bank.0 = w
+        .seed_bank
+        .iter()
+        .map(|s| (s.g.clone(), crate::sphere::surface_pos(Vec3::from_array(s.dir).normalize_or_zero(), FOOD_Y), s.ticks))
+        .collect();
+    for c in &w.creatures {
+        let mut g = c.g.clone();
+        g.ensure_net_shape();
+        let d = Vec3::from_array(c.dir).normalize_or_zero();
+        let alt = c.alt.max(0.0);
+        let p = crate::sphere::surface_pos(d, CREATURE_Y + alt);
+        let brain = Brain { net: g.net.clone(), prev_dist: f32::INFINITY, attack: 0.0, defend: 0.0, fight_reward: 0.0 };
+        let mut reserves = [RESERVE_REQ; NUTRIENTS];
+        for (i, r) in c.reserves.iter().take(NUTRIENTS).enumerate() {
+            reserves[i] = *r;
+        }
+        let diet = DietState { reserves, g: c.diet_g, age: c.age, fatigue: c.fatigue, starve: c.starve, toxic_load: c.toxic_load };
+        commands.spawn((
+            Creature,
+            g,
+            brain,
+            diet,
+            Energy { fast: c.energy[0], sugar: c.energy[1], fat: c.energy[2] },
+            Fitness(c.fitness),
+            Heading(c.heading),
+            Alive(true),
+            Locomotion { start: p, path: 0.0, alt },
+            Transform::from_translation(p),
+        ));
+    }
+    for sp in &w.plants {
+        let d = Vec3::from_array(sp.dir).normalize_or_zero();
+        let p = crate::sphere::surface_pos(d, FOOD_Y);
+        let mut e = commands.spawn((Food, sp.g.clone(), PlantState { mass: sp.mass, age: sp.age }, Transform::from_translation(p)));
+        if let Some(edible) = sp.tree {
+            e.insert(Tree { edible });
+        }
+        if let Some(age) = sp.rot_age {
+            e.insert(Rot { age });
+        }
+        if let Some(toxic) = sp.ferment_toxic {
+            e.insert(Ferment { toxic });
+        }
+        if let Some(seedg) = &sp.seed {
+            e.insert(Seed(seedg.clone()));
+        }
+    }
+}
+
+// Assemble a full Snapshot from already-collected parts. Fills the legacy genome/plant-mass fields (for
+// tooling that reads them) AND the full WorldState (exact resume). Saves go through here.
+pub(crate) fn assemble_snapshot(
+    creatures: Vec<crate::persist::SavedCreature>,
+    plants: Vec<crate::persist::SavedPlantEntity>,
+    grids: crate::persist::Grids,
+    seed_bank: Vec<crate::persist::SavedSeed>,
+    weather_rain: f32,
+    tick: u32,
+) -> crate::persist::Snapshot {
+    let generation = tick / GEN_TICKS;
+    let legacy_creatures = creatures.iter().map(|c| c.g.clone()).collect();
+    // legacy plants = living plants only (skip trees/carrion/ferment), mirrors the old SavedPlant set.
+    let legacy_plants = plants
+        .iter()
+        .filter(|p| p.tree.is_none() && p.rot_age.is_none())
+        .map(|p| crate::persist::SavedPlant { g: p.g.clone(), mass: p.mass })
+        .collect();
+    crate::persist::Snapshot {
+        generation,
+        creatures: legacy_creatures,
+        plants: legacy_plants,
+        world: Some(crate::persist::WorldState { tick, generation, weather_rain, grids, seed_bank, creatures, plants }),
+    }
+}
+
+// Gather the full world from live queries + field resources into a Snapshot. Read-only (shared query borrows),
+// so callers can still mutate cq afterward. Used by every --save site.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub(crate) fn collect_full_snapshot(
+    cq: &Query<(&mut Transform, &mut Energy, &mut Fitness, &mut Heading, &mut Alive, &mut Genome, &mut Brain, &mut DietState, &mut Locomotion), With<Creature>>,
+    pf: &Query<(&PlantGenome, &PlantState, &Transform, Option<&Tree>, Option<&Rot>, Option<&Ferment>, Option<&Seed>), (Without<Grass>, Without<Seaweed>, Without<Creature>)>,
+    soil: &Soil,
+    gw: &GroundWater,
+    climate: &Climate,
+    fire: &Fire,
+    wear: &Wear,
+    weather: &Weather,
+    bank: &SeedBank,
+    tick: u32,
+) -> crate::persist::Snapshot {
+    let creatures: Vec<_> = cq
+        .iter()
+        .map(|(tf, en, fit, head, _alive, g, _brain, diet, loco)| saved_creature(tf, en, fit, head, g, diet, loco))
+        .collect();
+    let plants: Vec<_> = pf
+        .iter()
+        .map(|(g, st, tf, tree, rot, ferment, seed)| saved_plant_entity(g, st, tf, tree, rot, ferment, seed))
+        .collect();
+    let seed_bank: Vec<_> = bank
+        .0
+        .iter()
+        .map(|(g, p, t)| {
+            let d = p.normalize_or_zero();
+            crate::persist::SavedSeed { g: g.clone(), dir: [d.x, d.y, d.z], ticks: *t }
+        })
+        .collect();
+    assemble_snapshot(creatures, plants, saved_grids(soil, gw, climate, fire, wear), seed_bank, weather.rain, tick)
+}
+
 // --- spawn ---
 
 // Headless: components only, no render assets (absent under MinimalPlugins).
-pub fn spawn_world_headless(mut commands: Commands, mut rng: ResMut<Rng>, mut gen: ResMut<GenState>) {
+pub fn spawn_world_headless(
+    mut commands: Commands,
+    mut rng: ResMut<Rng>,
+    mut gen: ResMut<GenState>,
+    mut soil: ResMut<Soil>,
+    mut gw: ResMut<GroundWater>,
+    mut climate: ResMut<Climate>,
+    mut fire: ResMut<Fire>,
+    mut wear: ResMut<Wear>,
+    mut bank: ResMut<SeedBank>,
+    mut weather: ResMut<Weather>,
+) {
     // --load resumes a saved population; else random founding pop. Positions re-randomized.
     let snap = gen.load.as_deref().and_then(crate::persist::load_snapshot);
+    // FULL world present -> restore exact state (positions + dynamic field grids incl. wear), then just regrow
+    // the grass/seaweed carpets below. Skips the lossy scatter path entirely.
+    if let Some(w) = snap.as_ref().and_then(|s| s.world.as_ref()) {
+        if gen.continuous {
+            gen.generation = WARMUP_GENS;
+        }
+        gen.tick = w.tick;
+        restore_full_world(&mut commands, w, &mut soil, &mut gw, &mut climate, &mut fire, &mut wear, &mut bank, &mut weather);
+        for _ in 0..GRASS_CAP / 2 {
+            spawn_grass(&mut commands, PlantGenome::grass(&mut rng), GRASS_START_MASS, grass_pos(&mut rng, None));
+        }
+        for _ in 0..SEAWEED_CAP / 2 {
+            spawn_seaweed(&mut commands, PlantGenome::seaweed(&mut rng), SEAWEED_START_MASS, seaweed_pos(&mut rng));
+        }
+        info!("restored full world: {} creatures + {} plants @ tick {}", w.creatures.len(), w.plants.len(), w.tick);
+        return;
+    }
     let genomes: Vec<Genome> = match &snap {
         Some(s) if !s.creatures.is_empty() => s.creatures.clone(),
         _ => (0..POP).map(|_| Genome::random(&mut rng)).collect(),
@@ -1196,6 +1414,13 @@ pub fn spawn_world_render(
     mut gen: ResMut<GenState>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut soil: ResMut<Soil>,
+    mut gw: ResMut<GroundWater>,
+    mut climate: ResMut<Climate>,
+    mut fire: ResMut<Fire>,
+    mut wear: ResMut<Wear>,
+    mut bank: ResMut<SeedBank>,
+    mut weather: ResMut<Weather>,
 ) {
     let creature_mesh = meshes.add(Capsule3d::new(0.4, 0.8));
     // shared creature mesh resource so viz::add_creature_visuals can dress creatures BORN mid-sim (spawn_creature
@@ -1327,6 +1552,22 @@ pub fn spawn_world_render(
 
     // --load resumes a saved population; else random founding pop. Positions re-randomized.
     let snap = gen.load.as_deref().and_then(crate::persist::load_snapshot);
+    // FULL world present -> restore exact state (positions + dynamic field grids incl. wear), regrow carpets, done.
+    if let Some(w) = snap.as_ref().and_then(|s| s.world.as_ref()) {
+        if gen.continuous {
+            gen.generation = WARMUP_GENS;
+        }
+        gen.tick = w.tick;
+        restore_full_world(&mut commands, w, &mut soil, &mut gw, &mut climate, &mut fire, &mut wear, &mut bank, &mut weather);
+        for _ in 0..GRASS_CAP / 2 {
+            spawn_grass(&mut commands, PlantGenome::grass(&mut rng), GRASS_START_MASS, grass_pos(&mut rng, None));
+        }
+        for _ in 0..SEAWEED_CAP / 2 {
+            spawn_seaweed(&mut commands, PlantGenome::seaweed(&mut rng), SEAWEED_START_MASS, seaweed_pos(&mut rng));
+        }
+        info!("restored full world: {} creatures + {} plants @ tick {}", w.creatures.len(), w.plants.len(), w.tick);
+        return;
+    }
     let genomes: Vec<Genome> = match &snap {
         Some(s) if !s.creatures.is_empty() => s.creatures.clone(),
         _ => (0..POP).map(|_| Genome::random(&mut rng)).collect(),
@@ -3070,12 +3311,16 @@ pub fn generation_step(
     >,
     pq: Query<(&PlantGenome, &PlantState), (Without<Rot>, Without<Grass>)>, // living plants only (carrion + grass excluded from stats/save)
     tq: Query<&PlantGenome, With<Tree>>, // trees only, for the evolvable-height stat
+    // full plant-class query for the world snapshot: living plants + trees + carrion + ferment + fruit, with
+    // positions + markers. Grass/seaweed carpets excluded (regenerated on load). Without<Creature> -> disjoint from cq.
+    pf: Query<(&PlantGenome, &PlantState, &Transform, Option<&Tree>, Option<&Rot>, Option<&Ferment>, Option<&Seed>), (Without<Grass>, Without<Seaweed>, Without<Creature>)>,
     soil: Res<Soil>,
     gw: Res<GroundWater>,
     climate: Res<Climate>,
     fire: Res<Fire>,
     wear: Res<Wear>,
     weather: Res<Weather>,
+    bank: Res<SeedBank>,
     mut exit: MessageWriter<AppExit>,
     niche: Res<crate::niche::NicheTracker>, // --until-sustain stop: all niches quiet for a full window
     // Best healthy snapshot seen this run (score, snapshot). --save writes THIS, not the final-tick population:
@@ -3158,47 +3403,21 @@ pub fn generation_step(
                 let avg_e = e / n;
                 let score = if avg_e >= 30.0 { pop as f32 } else { 0.0 };
                 if score > 0.0 && best.as_ref().is_none_or(|(s, _)| score > *s) {
-                    let mut creatures: Vec<(f32, Genome)> =
-                        cq.iter().map(|(_, _, fit, _, _, g, _, _, _)| (fit.0, g.clone())).collect();
-                    creatures.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
-                    let plants: Vec<crate::persist::SavedPlant> = pq
-                        .iter()
-                        .map(|(g, st)| crate::persist::SavedPlant { g: g.clone(), mass: st.mass })
-                        .collect();
-                    *best = Some((
-                        score,
-                        crate::persist::Snapshot {
-                            generation: gen.tick / GEN_TICKS,
-                            creatures: creatures.into_iter().map(|(_, g)| g).collect(),
-                            plants,
-                        },
-                    ));
+                    // capture the FULL world (positions + dynamic field grids incl. wear) at this healthy peak.
+                    let snap = collect_full_snapshot(&cq, &pf, &soil, &gw, &climate, &fire, &wear, &weather, &bank, gen.tick);
+                    *best = Some((score, snap));
                 }
             }
         }
         if done {
             if let Some(path) = &gen.save {
-                // Prefer best healthy snapshot seen; else final state if none qualified.
-                if let Some((score, snap)) = best.take() {
-                    crate::persist::save_snapshot(path, &snap);
-                    info!("saved best snapshot: pop {} (score {:.0})", snap.creatures.len(), score);
-                } else {
-                    let mut creatures: Vec<(f32, Genome)> =
-                        cq.iter().map(|(_, _, fit, _, _, g, _, _, _)| (fit.0, g.clone())).collect();
-                    creatures.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
-                    let plants: Vec<crate::persist::SavedPlant> = pq
-                        .iter()
-                        .map(|(g, st)| crate::persist::SavedPlant { g: g.clone(), mass: st.mass })
-                        .collect();
-                    crate::persist::save_snapshot(
-                        path,
-                        &crate::persist::Snapshot {
-                            generation: gen.tick / GEN_TICKS,
-                            creatures: creatures.into_iter().map(|(_, g)| g).collect(),
-                            plants,
-                        },
-                    );
-                }
+                // Prefer best healthy snapshot seen; else the final state if none qualified.
+                let snap = best
+                    .take()
+                    .map(|(_, s)| s)
+                    .unwrap_or_else(|| collect_full_snapshot(&cq, &pf, &soil, &gw, &climate, &fire, &wear, &weather, &bank, gen.tick));
+                crate::persist::save_snapshot(path, &snap);
+                info!("saved full world: {} creatures + {} plants", snap.creatures.len(), snap.world.as_ref().map_or(0, |w| w.plants.len()));
             }
             if let Some(mpath) = &gen.metrics {
                 let avg_e = if pop > 0 { cq.iter().map(|(_, en, ..)| en.total()).sum::<f32>() / pop as f32 } else { 0.0 };
@@ -3336,7 +3555,7 @@ pub fn generation_step(
                 .collect();
             crate::persist::save_snapshot(
                 path,
-                &crate::persist::Snapshot { generation: gen.generation, creatures: ranked, plants },
+                &crate::persist::Snapshot { generation: gen.generation, creatures: ranked, plants, world: None },
             );
         }
         info!("headless run done after {} generations", gen.generation);

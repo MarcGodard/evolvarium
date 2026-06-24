@@ -142,6 +142,11 @@ struct Minimap {
     mesh: Handle<Mesh>,
 }
 
+// Optional startup override for the minimap field (--cap-mmfield): lets the capture tool open straight on a
+// chosen overlay (e.g. wear) so a slow live field can be screenshotted. Absent -> minimap starts on biome.
+#[derive(Resource, Default)]
+pub struct MinimapInitField(pub usize);
+
 #[derive(Component)]
 struct MinimapCam;
 #[derive(Component)]
@@ -193,9 +198,13 @@ fn spawn_minimap(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    init_field: Option<Res<MinimapInitField>>,
 ) {
     use bevy::camera::visibility::RenderLayers;
-    let mesh = meshes.add(crate::terrain::build_globe_colored(MM_RES, |d| minimap_color(0, d)));
+    let field0 = init_field.map_or(0, |f| f.0.min(MM_FIELDS.len() - 1));
+    // static start field renders its color; dynamic fields recolor next frame in minimap_dynamic
+    let static_field = if field0 < MM_STATIC { field0 } else { 0 };
+    let mesh = meshes.add(crate::terrain::build_globe_colored(MM_RES, |d| minimap_color(static_field, d)));
     // unlit -> vertex field colors show flat + vivid (no day/night shading on the inspector globe)
     let mat = materials.add(StandardMaterial { base_color: Color::WHITE, unlit: true, ..default() });
     // field globe at origin, ONLY on layer 1 (the main camera renders layer 0, so it never sees this copy)
@@ -214,7 +223,7 @@ fn spawn_minimap(
         RenderLayers::layer(1),
         MinimapCam,
     ));
-    commands.insert_resource(Minimap { field: 0, dirty: true, mesh }); // dirty -> frame 1 syncs label to field
+    commands.insert_resource(Minimap { field: field0, dirty: true, mesh }); // dirty -> frame 1 syncs label to field
     commands
         .spawn(Node {
             position_type: PositionType::Absolute,

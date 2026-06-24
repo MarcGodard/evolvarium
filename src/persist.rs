@@ -16,8 +16,83 @@ pub struct SavedPlant {
 #[derive(Serialize, Deserialize)]
 pub struct Snapshot {
     pub generation: u32,          // gen survivors saved at (informational)
-    pub creatures: Vec<Genome>,   // fitness-ranked, best first
-    pub plants: Vec<SavedPlant>,
+    pub creatures: Vec<Genome>,   // fitness-ranked, best first (LEGACY: genomes only, positions/state dropped)
+    pub plants: Vec<SavedPlant>,  // LEGACY: plant genome + mass, regenerated biome-matched on load
+    // Full top-to-bottom world (positions + brains-via-genome + dynamic field grids + seed bank + clock).
+    // Present in new saves -> load RESTORES the exact world (wear/soil/fire/groundwater + every creature/plant
+    // where it stood). Absent in old seeds -> load falls back to the lossy legacy path (scatter + fresh fields).
+    #[serde(default)]
+    pub world: Option<WorldState>,
+}
+
+// Dynamic per-cell field grids (SOIL_RES^2 each). Empty vec = field not saved (load keeps its fresh default).
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct Grids {
+    #[serde(default)]
+    pub soil: Vec<f32>,
+    #[serde(default)]
+    pub groundwater: Vec<f32>,
+    #[serde(default)]
+    pub climate: Vec<f32>,
+    #[serde(default)]
+    pub fire: Vec<f32>,
+    #[serde(default)]
+    pub wear: Vec<f32>,
+}
+
+// One creature, full live state. pos = surface_pos(dir, CREATURE_Y + alt). Working brain re-derives from
+// genome on load (Baldwin: genome carries the learnable priors; per-life learned net is not persisted).
+#[derive(Serialize, Deserialize, Clone)]
+pub struct SavedCreature {
+    pub g: Genome,
+    pub dir: [f32; 3],   // unit surface direction
+    pub alt: f32,        // vertical offset (flier height / swimmer water-column rise)
+    pub heading: f32,
+    pub energy: [f32; 3], // fast, sugar, fat
+    pub fitness: f32,
+    pub reserves: Vec<f32>, // diet nutrient reserves (NUTRIENTS)
+    pub diet_g: f32,
+    pub age: u32,
+    pub fatigue: f32,
+    pub starve: u16,
+    pub toxic_load: f32,
+}
+
+// One plant-class entity (living plant, tree, carrion, ferment, fallen fruit). Grass + seaweed carpets are
+// NOT saved (regenerated on load) to keep files small; the wear grid that bared them IS saved.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct SavedPlantEntity {
+    pub g: PlantGenome,
+    pub dir: [f32; 3],
+    pub mass: f32,
+    pub age: u32,
+    #[serde(default)]
+    pub tree: Option<bool>, // Some(edible) -> Tree marker
+    #[serde(default)]
+    pub rot_age: Option<u32>, // Some -> Rot clock (carrion / ferment / fruit)
+    #[serde(default)]
+    pub ferment_toxic: Option<f32>, // Some -> Ferment marker
+    #[serde(default)]
+    pub seed: Option<PlantGenome>, // Some -> Seed (fruit carrying parent genome)
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct SavedSeed {
+    pub g: PlantGenome,
+    pub dir: [f32; 3],
+    pub ticks: u32, // ticks until germination
+}
+
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct WorldState {
+    pub tick: u32,
+    pub generation: u32,
+    pub weather_rain: f32,
+    pub grids: Grids,
+    #[serde(default)]
+    pub seed_bank: Vec<SavedSeed>,
+    pub creatures: Vec<SavedCreature>,
+    pub plants: Vec<SavedPlantEntity>,
 }
 
 // Write snapshot as pretty JSON. Logs on failure, never panics mid-run.

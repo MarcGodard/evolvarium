@@ -25,6 +25,14 @@ live in `config.rs`; the live conversion plan is `SPHERE-PLAN.md`.
 - [x] Food web: plants, fruit trees (reach-gated, dispersed when eaten), evergreens, carrion->poison rot
       chain, soil-fertility nutrient loop.
 - [x] Save/load populations (`--save`/`--load`, best-healthy-snapshot); render auto-loads the showcase seed.
+- [x] **Full top-to-bottom world save/load (2026-06-23)**: `--save` now writes the EXACT world (every
+      creature + plant where it stands: pos/alt/heading/energy/diet/fitness; trees/carrion/ferment/fruit;
+      the dynamic field grids soil/groundwater/climate/fire/WEAR; seed bank; weather; tick) under a new
+      `Snapshot.world`. `--load` RESTORES it verbatim (continues from saved tick, wear/fields intact) instead
+      of the lossy scatter. Grass/seaweed carpets regenerate on load (wear re-bares trodden cells at once).
+      Backward compatible: old seeds (no `world`) fall back to the legacy scatter path. So a worn world can be
+      saved + reloaded for an instant screenshot (no long warmup). persist::WorldState + sim::{collect_full_snapshot,
+      restore_full_world}. Verified: save@tick9600 -> reload resumes @9601 with wear 0.048 (vs fresh 0.001), pop 1100 exact.
 
 ### Evolvable genes (creature)
 - [x] sensors (angle+range, add/remove), brain (weights + per-connection plasticity + hidden-layer size),

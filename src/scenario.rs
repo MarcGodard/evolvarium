@@ -510,7 +510,7 @@ pub fn merge_creatures_into_snapshot(result_path: &str, snap_path: &str, cap: us
             return;
         }
     };
-    let mut snap = crate::persist::load_snapshot(snap_path).unwrap_or(crate::persist::Snapshot { generation: 0, creatures: Vec::new(), plants: Vec::new() });
+    let mut snap = crate::persist::load_snapshot(snap_path).unwrap_or(crate::persist::Snapshot { generation: 0, creatures: Vec::new(), plants: Vec::new(), world: None });
     let added = res.best_creatures.len();
     snap.creatures.extend(res.best_creatures);
     if snap.creatures.len() > cap {

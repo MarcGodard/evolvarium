@@ -26,6 +26,7 @@ pub struct CaptureCfg {
     pub dist: f32,    // --cap-dist: orbit distance from planet center (95..420). zoom test for eclipse-disc regression
     pub underwater: bool, // --cap-water: submerge in deep ocean. verifies swim view + blue tint
     pub lat: Option<f32>, // --cap-lat: top-down orbit view at this latitude (deg, +90 = north pole, -90 = south)
+    pub warmup: u32,      // --cap-warmup: sim frames before the shot (default WARMUP). Raise to let fliers rise off the ground + land-wear trails accumulate before snapping.
 }
 
 // Deepest-ocean surface dir, found by scanning a Fibonacci sphere (2000 samples). Robust to noise seed
@@ -49,8 +50,36 @@ fn ocean_dir() -> Vec3 {
     best
 }
 
-// Frames to wait before shot so assets load + sim settles (materials, dressed entities).
-const WARMUP: u32 = 50;
+// Shallow flora-band ocean point (~5u deep): where seaweed grows + swimmers forage, vs the barren abyss
+// ocean_dir picks. Better swim view (fish + kelp in frame), still well submerged (eye 2u off floor stays
+// below the surface). Scans a Fibonacci sphere for the submerged point closest to TARGET_DEPTH.
+fn shallow_swim_dir() -> Vec3 {
+    const TARGET_DEPTH: f32 = 5.0; // below surface (flora band spans ~0..9u); deep enough to stay submerged
+    let n = 2000usize;
+    let golden = std::f32::consts::PI * (3.0 - 5.0_f32.sqrt());
+    let mut best = ocean_dir();
+    let mut best_err = f32::INFINITY;
+    for i in 0..n {
+        let y = 1.0 - (i as f32 + 0.5) / n as f32 * 2.0;
+        let r = (1.0 - y * y).max(0.0).sqrt();
+        let theta = golden * i as f32;
+        let d = Vec3::new(theta.cos() * r, y, theta.sin() * r);
+        let depth = -crate::sphere::elevation(d); // >0 in ocean
+        if depth <= 0.0 {
+            continue; // land
+        }
+        let err = (depth - TARGET_DEPTH).abs();
+        if err < best_err {
+            best_err = err;
+            best = d;
+        }
+    }
+    best
+}
+
+// Default frames to wait before shot so assets load + sim settles (materials, dressed entities). Override
+// with --cap-warmup for slow effects (fliers climbing to cruise alt, land-wear trails forming).
+pub const WARMUP: u32 = 50;
 
 pub struct CapturePlugin;
 impl Plugin for CapturePlugin {
@@ -85,9 +114,9 @@ fn force_cam(cfg: Res<CaptureCfg>, mut q: Query<&mut Transform, With<Camera3d>>)
         return; // plain orbit framing owned by apply_orbit (Update). don't override here
     }
     if cfg.underwater {
-        // submerged deep ocean: eye 2u off seafloor, level + slightly up at sunlit surface. shot shows
-        // blue tint + water from below.
-        let d = ocean_dir();
+        // submerged shallow flora band: eye 2u off seafloor, level + slightly up at sunlit surface. shot shows
+        // blue tint + kelp + foraging swimmers (vs the empty abyss).
+        let d = shallow_swim_dir();
         let eye = crate::sphere::surface_pos(d, 2.0);
         // look along heading tilted by cap-pitch (negative = down at lit seafloor through water)
         let tangent = crate::sphere::heading_tangent(d, cfg.yaw);
@@ -116,16 +145,16 @@ fn setup_capture_view(
 ) {
     let home = crate::sim::homeland_center();
     // sun anchor: overhead ocean point for --cap-water, else overhead homeland.
-    let sun_anchor = if cfg.underwater { ocean_dir() } else { home };
+    let sun_anchor = if cfg.underwater { shallow_swim_dir() } else { home };
     if cfg.underwater {
         // submerged swim view: drop walk eye into deep ocean so track_underwater flags it (tint overlay +
         // murky sky then show in shot). force_cam owns final transform.
         *mode = CameraMode::Walk;
         if let Ok(mut w) = q.single_mut() {
-            w.dir = ocean_dir();
+            w.dir = shallow_swim_dir();
             w.yaw = cfg.yaw;
             w.pitch = cfg.pitch;
-            w.eye_alt = 2.0; // 2u above seafloor. deep-ocean depth ~SEA_FLOOR_MAX -> well below surface -> underwater
+            w.eye_alt = 2.0; // 2u above seafloor. flora-band depth ~5u -> eye ~3u below surface -> underwater
         }
     } else if cfg.orbit {
         *mode = CameraMode::Orbit;
@@ -173,7 +202,7 @@ fn capture_tick(
     mut commands: Commands,
 ) {
     *frames += 1;
-    if *frames < WARMUP || *shot {
+    if *frames < cfg.warmup || *shot {
         return;
     }
     *shot = true;

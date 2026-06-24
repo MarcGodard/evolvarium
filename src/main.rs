@@ -96,6 +96,11 @@ fn main() {
     let cap_dist = args.iter().find_map(|a| a.strip_prefix("--cap-dist=").and_then(|s| s.parse::<f32>().ok())).unwrap_or(140.0);
     // --cap-water: submerge capture camera in deep ocean (verify swim view + underwater tint).
     let cap_water = args.iter().any(|a| a == "--cap-water");
+    // --cap-warmup=N: sim frames before snapping (default 50). Raise for slow effects (fliers reaching cruise
+    // altitude, land-wear trails forming). --cap-mmfield=N: open the minimap on overlay N (8 = wear) so a slow
+    // live field can be screenshotted.
+    let cap_warmup = args.iter().find_map(|a| a.strip_prefix("--cap-warmup=").and_then(|s| s.parse::<u32>().ok())).unwrap_or(capture::WARMUP);
+    let cap_mmfield = args.iter().find_map(|a| a.strip_prefix("--cap-mmfield=").and_then(|s| s.parse::<usize>().ok()));
     if diverse && load.is_none() && std::path::Path::new(DEFAULT_SEED).exists() {
         load = Some(DEFAULT_SEED.to_string());
     }
@@ -255,8 +260,11 @@ fn main() {
                 FixedUpdate,
                 (sim::weather_step, sim::fire_step, sim::live_step, sim::predation_step, sim::grass_step, sim::seaweed_step, sim::plant_step, sim::rot_step, niche::niche_step, sim::generation_step).chain(),
             );
+        if let Some(field) = cap_mmfield {
+            app.insert_resource(viz::MinimapInitField(field)); // open minimap on a chosen overlay for the shot
+        }
         if let Some(prefix) = capture {
-            app.insert_resource(capture::CaptureCfg { prefix, when: cap_when, yaw: cap_yaw, off: cap_off, pitch: cap_pitch, orbit: cap_orbit, dist: cap_dist, underwater: cap_water, lat: cap_lat })
+            app.insert_resource(capture::CaptureCfg { prefix, when: cap_when, yaw: cap_yaw, off: cap_off, pitch: cap_pitch, orbit: cap_orbit, dist: cap_dist, underwater: cap_water, lat: cap_lat, warmup: cap_warmup })
                 .add_plugins(capture::CapturePlugin);
         }
     }

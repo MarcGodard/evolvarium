@@ -64,7 +64,9 @@ cargo run -- --capture=PREFIX               # walk view at the homeland (morning
   --cap-orbit                               # capture from orbit (space) instead of walk (surface)
   --cap-dist=F                              # orbit distance from planet center (test zoom; 95..420)
   --cap-lat=DEG                             # top-down orbit view at latitude DEG (+90 = north pole, -90 = south); implies orbit, pair w/ --cap-dist
-  --cap-water                               # stand submerged in deep ocean (verify swim + blue tint)
+  --cap-water                               # stand submerged in shallow flora band (verify swim: kelp + fish + blue tint)
+  --cap-warmup=N                            # sim frames before the shot (default 50); raise for slow effects (fliers climbing, wear trails). Pair w/ --load=fullstate.json to skip warmup.
+  --cap-mmfield=N                           # open corner minimap on overlay N (4 soil, 5 water, 6 fire, 7 life, 8 wear)
 ```
 
 `--shots[=PREFIX]` is a separate CPU ray-traced snapshot (no GPU) for offline planet views.
