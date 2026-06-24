@@ -287,6 +287,46 @@ impl Morphometrics {
     }
 }
 
+// Where eyes attach: the HEAD's actual forward-surface, not the whole-body bbox (tails/fins/limbs blow the
+// bbox out so bbox-anchored eyes float in empty space ahead of a tapering body). Pick the frontmost Sphere
+// (the founder head, morph.rs random() node 1); fall back to the topmost part for headless plans (default
+// capsule). center = head center in body-LOCAL space (pre-recenter; viz subtracts center_y for y).
+pub struct EyeAnchor {
+    pub center: Vec3, // head center, body-local (NOT yet shifted by center_y)
+    pub radius: f32,  // head radius -> eye size + proud-of-face offset
+    pub half_w: f32,  // lateral spread for multi-eye rows
+}
+
+pub fn eye_anchor(p: &Phenotype) -> EyeAnchor {
+    // sphere center sits r along the part's +Y (push_sphere: centered at Y*r). score forward + a bit up so
+    // the FRONT head wins over a rump sphere.
+    let mut best: Option<(f32, Vec3, f32)> = None; // (score, center, radius)
+    for part in &p.parts {
+        if part.shape != ShapeKind::Sphere {
+            continue;
+        }
+        let c = part.tf.transform_point(Vec3::Y * part.radius);
+        let score = c.z + 0.5 * c.y;
+        if best.map_or(true, |(s, _, _)| score > s) {
+            best = Some((score, c, part.radius));
+        }
+    }
+    if let Some((_, center, radius)) = best {
+        return EyeAnchor { center, radius, half_w: radius };
+    }
+    // no sphere: anchor to the topmost part's tip (capsule head end).
+    let mut top: Option<(f32, Vec3, f32)> = None; // (y, tip, tip_radius)
+    for part in &p.parts {
+        let tip = part.tf.transform_point(Vec3::Y * part.length);
+        let r = part.radius * part.taper;
+        if top.map_or(true, |(y, _, _)| tip.y > y) {
+            top = Some((tip.y, tip, r));
+        }
+    }
+    let (_, center, radius) = top.unwrap_or((0.0, Vec3::ZERO, 0.3));
+    EyeAnchor { center, radius: radius.max(0.15), half_w: radius.max(0.15) }
+}
+
 fn part_volume(p: &PlacedPart) -> f32 {
     let l = p.length.max(0.0);
     let r = p.radius.max(0.0);

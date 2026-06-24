@@ -513,6 +513,10 @@ pub struct CreatureParts {
     pub eye: Handle<Mesh>,
 }
 
+// Tags an eye child entity so the viewer can despawn + rebuild eyes when genes change (viewer::rebuild_on_edit).
+#[derive(Component)]
+pub struct EyeVis;
+
 // Skin color + body-plan scale from genome (M4). Shared by add_creature_visuals + restyle_creatures ->
 // newborns look right immediately. Color from skin_hue/skin_sat genes; venom -> aposematic orange-red
 // warning + vivid sat; pelt (fur) mutes + lightens; armor darkens; swimmers shift cyan + fish body plan.
@@ -565,16 +569,16 @@ fn add_creature_visuals(
         let body_mesh = cache.get_or_build(g, &mut meshes);
         commands.entity(e).insert((Mesh3d(body_mesh), MeshMaterial3d(materials.add(color))));
 
-        // EYES: emissive spheres at the front-top of the developed body so creatures read at distance (eyes
-        // aren't part of the body graph). Positioned from the body's bounding box (body-local, centered like
-        // the mesh); inherit the parent's uniform scale.
-        let m = crate::morph::Morphometrics::of(&g.body);
-        let center_y = (m.bbox_min.y + m.bbox_max.y) * 0.5;
-        let top = (m.bbox_max.y - center_y).max(0.2); // head height above center
-        let front = m.bbox_max.z.max(0.2); // forward face
-        let half_w = ((m.bbox_max.x - m.bbox_min.x) * 0.5).max(0.15);
+        // EYES: emissive spheres ON the head surface (eyes aren't part of the body graph). Anchored to the
+        // actual head part (morph::eye_anchor), NOT the whole-body bbox -> they no longer float ahead of a
+        // tapering body when tails/fins/limbs blow the bbox out. Body-local, centered like the mesh; inherit
+        // the parent's uniform scale.
+        let pheno = crate::morph::develop(&g.body);
+        let m = crate::morph::Morphometrics::from_phenotype(&pheno);
+        let center_y = (m.bbox_min.y + m.bbox_max.y) * 0.5; // mesh shifts verts down by this
+        let a = crate::morph::eye_anchor(&pheno);
         let n_eyes = (EYE_MIN + EYE_SPAN * g.eyes).round().clamp(1.0, 6.0) as usize;
-        let eye_d = (0.18 + 0.18 * g.head) * (0.4 + half_w); // sphere mesh radius 0.5 -> scale*0.5 = world r
+        let eye_d = a.radius * (0.45 + 0.25 * g.head); // sized to head; sphere mesh radius 0.5 -> scale*0.5 = world r
         let eye_mat = materials.add(StandardMaterial {
             base_color: Color::srgb(0.97, 0.98, 1.0),
             emissive: LinearRgba::rgb(0.5, 0.52, 0.6), // glow -> eyes read at distance
@@ -583,11 +587,11 @@ fn add_creature_visuals(
         for k in 0..n_eyes {
             let frac = if n_eyes <= 1 { 0.0 } else { (k as f32 / (n_eyes - 1) as f32) * 2.0 - 1.0 };
             let row = if k >= 3 { 1.0 } else { 0.0 };
-            let ex = frac * half_w * 0.7;
-            let ey = top * 0.8 - row * eye_d * 0.5;
-            let ez = front * 0.9 + eye_d * 0.4; // proud of the front face
+            let ex = frac * a.half_w * 0.6;
+            let ey = (a.center.y - center_y) + a.radius * 0.35 - row * eye_d * 0.5;
+            let ez = a.center.z + a.radius * 0.85 + eye_d * 0.3; // proud of the head's front face
             let eye = commands
-                .spawn((Mesh3d(parts.eye.clone()), MeshMaterial3d(eye_mat.clone()), Transform { translation: Vec3::new(ex, ey, ez), scale: Vec3::splat(eye_d), ..default() }))
+                .spawn((Mesh3d(parts.eye.clone()), MeshMaterial3d(eye_mat.clone()), Transform { translation: Vec3::new(ex, ey, ez), scale: Vec3::splat(eye_d), ..default() }, EyeVis))
                 .id();
             commands.entity(e).add_child(eye);
         }

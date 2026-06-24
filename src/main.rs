@@ -30,6 +30,7 @@ mod snapshot;
 mod sphere;
 mod stars;
 mod terrain;
+mod viewer;
 mod viz;
 
 use bevy::app::ScheduleRunnerPlugin;
@@ -300,6 +301,14 @@ fn main() {
                 FixedUpdate,
                 (sim::weather_step, sim::fire_step, sim::live_step, sim::predation_step, sim::grass_step, sim::seaweed_step, sim::plant_step, sim::rot_step, niche::niche_step, sim::generation_step).chain(),
             );
+        // --viewer[=genome.json]: inspect ONE creature on an empty stage, edit genes live, T releases a world.
+        // ViewerMode makes spawn_world_render seed assets only (no pop/plants); ViewerPlugin owns the rest.
+        if flag(&args, "--viewer") || val(&args, "--viewer=").is_some() {
+            app.insert_resource(viewer::ViewerMode)
+                .insert_resource(viewer::ViewerCfg { path: val(&args, "--viewer=").map(str::to_string) })
+                .add_plugins(bevy_egui::EguiPlugin::default())
+                .add_plugins(viewer::ViewerPlugin);
+        }
         if let Some(field) = cap_mmfield {
             app.insert_resource(viz::MinimapInitField(field)); // open minimap on a chosen overlay for the shot
         }
