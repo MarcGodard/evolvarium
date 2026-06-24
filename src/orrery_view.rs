@@ -26,10 +26,14 @@ impl Plugin for OrreryViewPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ShowConstellations>()
             .init_resource::<Overlays>()
+            .init_resource::<OrreryFocus>()
+            .init_resource::<GeoCentric>()
             .add_systems(Startup, (spawn_orrery_bodies, spawn_starfield, spawn_overlays, spawn_sky_labels))
             .add_systems(
                 Update,
                 (
+                    update_orrery_focus,
+                    toggle_geocentric,
                     position_orrery_bodies,
                     size_sirius,
                     pick_orrery,
@@ -277,7 +281,7 @@ fn spawn_sky_labels(mut commands: Commands) {
     for idx in 0..crate::orrery::body_count() {
         let (name, _, _) = crate::orrery::body_meta(idx);
         if is_visible_body(name) {
-            mk(&mut commands, name.to_string(), SkyLabel::Body(idx));
+            mk(&mut commands, display_name(name).to_string(), SkyLabel::Body(idx));
         }
     }
     for (k, name) in ZODIAC.iter().enumerate() {
@@ -414,6 +418,48 @@ fn body_color(name: &str) -> LinearRgba {
 // Render only real bodies, not the invisible deferent/center pivots.
 fn is_visible_body(name: &str) -> bool {
     !name.contains("deferent") && name != "SystemCenter"
+}
+
+// Home planet (TSN "Earth") is displayed as "Evolvarium".
+pub fn display_name(name: &str) -> &str {
+    if name == "Earth" {
+        "Evolvarium"
+    } else {
+        name
+    }
+}
+
+// --- view focus: TSN is geocentric, so center on Evolvarium by default (C toggles to the system center) ---
+#[derive(Resource)]
+pub struct OrreryFocus(pub Vec3); // world look-at point the orrery camera orbits
+impl Default for OrreryFocus {
+    fn default() -> Self {
+        OrreryFocus(ORRERY_CENTER)
+    }
+}
+#[derive(Resource)]
+struct GeoCentric(bool);
+impl Default for GeoCentric {
+    fn default() -> Self {
+        GeoCentric(true) // Earth/Evolvarium-centered by default, like TSN
+    }
+}
+
+fn update_orrery_focus(mode: Res<CameraMode>, geo: Res<GeoCentric>, gen: Res<crate::sim::GenState>, mut focus: ResMut<OrreryFocus>) {
+    if *mode != CameraMode::Orrery {
+        return;
+    }
+    focus.0 = if geo.0 {
+        ORRERY_CENTER + crate::orrery::body_positions(orrery_tau(gen.tick))[crate::orrery::EARTH]
+    } else {
+        ORRERY_CENTER
+    };
+}
+
+fn toggle_geocentric(keys: Res<ButtonInput<KeyCode>>, mode: Res<CameraMode>, mut geo: ResMut<GeoCentric>) {
+    if *mode == CameraMode::Orrery && keys.just_pressed(KeyCode::KeyC) {
+        geo.0 = !geo.0;
+    }
 }
 
 fn spawn_orrery_bodies(

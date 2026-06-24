@@ -96,10 +96,10 @@ impl Plugin for CapturePlugin {
 
 // Aim camera at homeland from fixed side+elevated vantage, ignoring walk/orbit. Deterministic so test
 // objects + shadows always framed.
-fn force_cam(cfg: Res<CaptureCfg>, mut q: Query<&mut Transform, (With<Camera3d>, With<crate::camera::OrbitCam>)>) {
+fn force_cam(cfg: Res<CaptureCfg>, focus: Res<crate::orrery_view::OrreryFocus>, mut q: Query<&mut Transform, (With<Camera3d>, With<crate::camera::OrbitCam>)>) {
     if cfg.orrery {
-        // orrery view: orbit the solar-system center. cap-yaw/pitch aim, cap-dist zooms (default 1800).
-        let center = crate::orrery_view::ORRERY_CENTER;
+        // orrery view: orbit the focus point (Evolvarium by default). cap-yaw/pitch aim, cap-dist zooms.
+        let center = focus.0;
         let pitch = if cfg.pitch != 0.0 { cfg.pitch } else { 0.45 };
         let dist = if cfg.dist > 500.0 { cfg.dist } else { 1800.0 };
         let dir = Vec3::new(pitch.cos() * cfg.yaw.cos(), pitch.sin(), pitch.cos() * cfg.yaw.sin());

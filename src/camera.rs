@@ -130,7 +130,7 @@ fn toggle_mode(
     *mode = match *mode {
         CameraMode::Orbit => {
             selected.follow = false;
-            info!("camera: ORRERY mode (TSN solar system: right-drag rotate, scroll zoom in/out, TAB to walk). Overlays: T traces, G ecliptic grid, Z zodiac, B labels, L constellations");
+            info!("camera: ORRERY mode (TSN solar system: right-drag rotate, scroll zoom in/out, TAB to walk). C center on Evolvarium/system. Overlays: T traces, G ecliptic grid, Z zodiac, B labels, L constellations");
             CameraMode::Orrery
         }
         CameraMode::Orrery => {
@@ -256,14 +256,14 @@ fn orrery_zoom(mode: Res<CameraMode>, scroll: Res<AccumulatedMouseScroll>, mut q
     cam.dist = (cam.dist * (1.0 - scroll.delta.y * 0.1)).clamp(ORRERY_MIN_DIST, ORRERY_MAX_DIST);
 }
 
-// Place camera around ORRERY_CENTER, looking inward at the solar system.
-fn apply_orrery(mode: Res<CameraMode>, mut q: Query<(&mut Transform, &OrreryCam)>) {
+// Place camera around the focus point (Evolvarium by default, else system center), looking inward.
+fn apply_orrery(mode: Res<CameraMode>, focus: Res<crate::orrery_view::OrreryFocus>, mut q: Query<(&mut Transform, &OrreryCam)>) {
     if *mode != CameraMode::Orrery {
         return;
     }
     let Ok((mut t, cam)) = q.single_mut() else { return };
     let dir = Vec3::new(cam.pitch.cos() * cam.yaw.cos(), cam.pitch.sin(), cam.pitch.cos() * cam.yaw.sin());
-    let center = crate::orrery_view::ORRERY_CENTER;
+    let center = focus.0;
     t.translation = center + dir * cam.dist;
     t.look_at(center, Vec3::Y);
 }

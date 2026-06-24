@@ -2071,7 +2071,7 @@ fn update_identity_panel(
     let Ok((mut text, mut vis)) = q.single_mut() else { return };
     let body = |i: usize| {
         let (name, size, _) = crate::orrery::body_meta(i);
-        format!("{name}\nTSN body  -  display size {size:.1}")
+        format!("{}\nTSN body  -  display size {size:.1}", crate::orrery_view::display_name(name))
     };
     let s = match &*id {
         Identified::None => {
