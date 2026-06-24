@@ -432,22 +432,34 @@ fn setup_scene(
         viz::Moon,
     ));
     // visible sun disc: bright emissive sphere far out along sun direction (moved each frame). Sized so
-    // on-sky size ~matches moon (real Earth coincidence). Light source made visible.
-    commands.spawn((
-        Mesh3d(meshes.add(Sphere::new(sphere::SUN_R).mesh().ico(3).unwrap())),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(1.0, 0.97, 0.8),
-            emissive: LinearRgba::rgb(14.0, 12.5, 8.0), // brighter, whiter-warm: reads as a hot sun, not olive
-            unlit: true,
-            ..default()
-        })),
-        Transform::from_translation(sphere::sun_dir(0) * sphere::SUN_DIST),
-        // CRITICAL: sun disc sits far out ALONG sun direction = directly between directional light + planet.
-        // If it casts, huge shadow blankets whole lit hemisphere -> total walk-mode blackout (no light = no
-        // drop shadows). NotShadowCaster makes ground shadows work.
-        bevy::light::NotShadowCaster,
-        viz::SunDisc,
-    ));
+    // on-sky size ~matches moon (real Earth coincidence). Light source made visible. Two additive corona
+    // shells (children -> follow the disc) give it a radiant glow halo instead of a flat dull disc.
+    let sun_mesh = meshes.add(Sphere::new(sphere::SUN_R).mesh().ico(3).unwrap());
+    let corona_mat = |m: &mut Assets<StandardMaterial>, e: LinearRgba| {
+        m.add(StandardMaterial { base_color: Color::WHITE, emissive: e, unlit: true, alpha_mode: AlphaMode::Add, ..default() })
+    };
+    let corona_inner = corona_mat(&mut materials, LinearRgba::rgb(1.3, 0.78, 0.34));
+    let corona_outer = corona_mat(&mut materials, LinearRgba::rgb(0.5, 0.28, 0.12));
+    commands
+        .spawn((
+            Mesh3d(sun_mesh.clone()),
+            MeshMaterial3d(materials.add(StandardMaterial {
+                base_color: Color::srgb(1.0, 0.98, 0.85),
+                emissive: LinearRgba::rgb(24.0, 19.0, 11.0), // hot radiant core (brighter, whiter-warm)
+                unlit: true,
+                ..default()
+            })),
+            Transform::from_translation(sphere::sun_dir(0) * sphere::SUN_DIST),
+            // CRITICAL: sun disc sits far out ALONG sun direction = directly between directional light + planet.
+            // If it casts, huge shadow blankets whole lit hemisphere -> total walk-mode blackout (no light = no
+            // drop shadows). NotShadowCaster makes ground shadows work.
+            bevy::light::NotShadowCaster,
+            viz::SunDisc,
+        ))
+        .with_children(|p| {
+            p.spawn((Mesh3d(sun_mesh.clone()), MeshMaterial3d(corona_inner), Transform::from_scale(Vec3::splat(1.9)), bevy::light::NotShadowCaster));
+            p.spawn((Mesh3d(sun_mesh.clone()), MeshMaterial3d(corona_outer), Transform::from_scale(Vec3::splat(3.4)), bevy::light::NotShadowCaster));
+        });
     // starfield: the REAL Bright Star Catalog sky (same data as the orrery view), on a far shell. One mesh,
     // rotated each frame about the spin axis by viz::rotate_sky_stars so constellations wheel with the day.
     // Built in EQUATORIAL coords -> celestial pole = planet +Y; the ecliptic sun/moon/planets carry the

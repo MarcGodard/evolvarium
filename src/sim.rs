@@ -1575,6 +1575,10 @@ pub fn spawn_world_render(
         conifer: meshes.add(crate::viz::conifer_mesh()), // stacked-cone Christmas-tree silhouette
         vine: meshes.add(crate::viz::vine_mesh(0.16)),    // helix vine hugging the trunk (radius ~ trunk)
     });
+    // fallen-log prop dropped where a tree dies (viz::spawn_logs_on_tree_death): shared cylinder, per-log color.
+    commands.insert_resource(crate::viz::LogProps {
+        mesh: meshes.add(Cylinder::new(0.2, 2.2)),
+    });
     // shared grass tuft mesh + one green material for ALL tufts (ubiquitous; size_grass scales each tuft length
     // by local soil). Double-sided so thin blades show from both faces.
     commands.insert_resource(crate::viz::GrassMesh(meshes.add(crate::viz::grass_tuft_mesh())));

@@ -339,12 +339,13 @@ pholmq/TSN (GPL-2.0) @ commit 49fd49c (pinned in `orrery.rs` + `stars.rs` commen
       visibly BARE (emergent dirt clearings) + grazing-pressure feedback. New minimap field 'wear' (dirt-brown
       overlay, 9 fields now). Verified at full pop (`--load --gens=3-4`): pop steady 1100, plants ~4230,
       ~25-30 land cells trail-level bare + self-limiting (no desertification). Continuous log adds `wear`/`bare`.
-- [ ] **Dead-tree logs + hideouts**: when a tree dies it drops a fallen TRUNK/LOG on the ground (a new
-      ground-prop entity, not standing), with a VERY long rot time (logs persist for ages vs normal carrion/
-      detritus). Small creatures (size below a threshold) can HIDE in/behind a log -> predation cover (a hidden
-      small creature is harder for predators to sense/reach; ties into the threat/flee + predation systems).
-      Big creatures can't use them. Slow-rotting logs return nutrients to soil over a long tail. Adds terrain
-      texture + a size-gated survival niche (small + sneaky beats big + strong near cover).
+- [x] **Dead-tree logs — visual half (2026-06-24)**: when a tree dies it drops a fallen log on the ground
+      (`viz::Log`, observed via `RemovedComponents<Tree>` + a position cache; render-only, windowed app, no
+      sim/balance/seed coupling; bulk-despawn guard skips world resets). Logs vary per-instance (length,
+      thickness, yaw, bark color incl. mossy + weathered-grey) and sink into the ground at end of a long life.
+- [ ] **Dead-tree logs — gameplay half** (balance phase): small creatures HIDE in/behind a log -> predation
+      cover (ties into threat/flee + predation); big creatures can't; slow-rotting logs return soil nutrients.
+      Deferred (balance-adjacent) until the visuals-first phase ends.
 - [ ] Scale-up toward thousands of creatures (original spec headline) via density-invariant rebalance —
       big, do cautiously in validated steps. (Carrying cap now ~1100 w/ parallel live_step; see PARALLELIZATION.md Phase 6.)
 

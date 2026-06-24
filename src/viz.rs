@@ -114,6 +114,7 @@ impl Plugin for VizPlugin {
             .init_resource::<ShowPhylo>()
             .insert_resource(ShowShadows(true)) // shadows on by default (O toggles)
             .init_resource::<Identified>()
+            .init_resource::<TreePositions>()
             .add_systems(Startup, (log_viz_help, spawn_stats_ui, spawn_world_stats_ui, spawn_legend_ui, spawn_daycycle_ui, spawn_underwater_tint, spawn_clouds, set_initial_speed, spawn_minimap, spawn_phylo_ui, load_star_catalog, spawn_identity_ui))
             .add_systems(
                 Update,
@@ -127,6 +128,7 @@ impl Plugin for VizPlugin {
                     rain_visuals,
                     fire_visuals,
                     update_clouds,
+                    (track_tree_positions, spawn_logs_on_tree_death, age_logs),
                     hide_dead,
                     color_carrion,
                     (pick_on_click, update_identity_panel, update_stats, update_world_stats),
@@ -1925,6 +1927,124 @@ fn update_clouds(
     }
 }
 
+// --- Fallen logs: when a tree dies it drops a fallen trunk on the ground. RENDER-ONLY (no sim/balance/seed
+// coupling): tree death is observed via RemovedComponents<Tree>, the drop site comes from a cached last-known
+// position, and the systems live in the windowed app only. The hideout/predation-cover + soil-return half of
+// the backlog item is balance-adjacent and deferred to the balance phase.
+#[derive(Resource, Default)]
+pub struct TreePositions(pub std::collections::HashMap<Entity, Vec3>); // entity -> last-known surface dir (unit)
+
+// Shared log mesh (built in spawn_world_render); bark material is per-log (varied color) in the spawn system.
+#[derive(Resource)]
+pub struct LogProps {
+    pub mesh: Handle<Mesh>,
+}
+
+#[derive(Component)]
+pub struct Log {
+    age: f32,   // seconds since the tree fell
+    yaw: f32,   // tangent heading (lie direction)
+    dir: Vec3,  // surface dir (unit)
+    len: f32,   // length scale
+    thick: f32, // radius scale (thin branch .. fat trunk)
+}
+
+const LOG_LIFETIME: f32 = 150.0; // real seconds a log persists (logs rot slowly vs carrion)
+const LOG_SINK_SECS: f32 = 12.0; // final seconds: sink into ground so it leaves smoothly, no pop-out
+const MAX_LOGS: usize = 140; // cap accumulation
+const LOG_BULK: usize = 24; // > this many tree deaths in one frame = world reset/load, not natural death -> no logs
+
+// Lay a log on the surface along a tangent heading; `sink` lowers it into the ground (despawn anim).
+fn log_transform(dir: Vec3, yaw: f32, len: f32, thick: f32, sink: f32) -> Transform {
+    let up = dir.normalize_or_zero();
+    let (east, north) = crate::sphere::tangent_frame(up);
+    let axis = (east * yaw.cos() + north * yaw.sin()).normalize_or_zero(); // trunk lies along this tangent
+    let pos = crate::sphere::surface_pos(up, 0.2 * thick - sink); // rest ~radius above ground; sink buries it
+    Transform {
+        translation: pos,
+        rotation: Quat::from_rotation_arc(Vec3::Y, axis), // cylinder +Y axis -> tangent
+        scale: Vec3::new(thick, len, thick),
+    }
+}
+
+// Cache live-tree positions each frame so a death (entity already gone) can look up where to drop the log.
+fn track_tree_positions(trees: Query<(Entity, &Transform), With<Tree>>, mut cache: ResMut<TreePositions>) {
+    for (e, tf) in &trees {
+        cache.0.insert(e, tf.translation.normalize_or_zero());
+    }
+}
+
+// Drop a fallen log wherever a tree just despawned (RemovedComponents<Tree>). Skips bulk despawns (world
+// reset/load) and ocean. Always consumes the cache entry so it stays bounded to live trees.
+fn spawn_logs_on_tree_death(
+    mut removed: RemovedComponents<Tree>,
+    mut cache: ResMut<TreePositions>,
+    props: Option<Res<LogProps>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    existing: Query<(), With<Log>>,
+    mut commands: Commands,
+    mut seed: Local<u32>,
+) {
+    let dead: Vec<Entity> = removed.read().collect();
+    let dirs: Vec<Vec3> = dead.iter().filter_map(|e| cache.0.remove(e)).collect();
+    let Some(props) = props else { return };
+    if dead.len() > LOG_BULK {
+        return; // mass despawn = reset/load, not deaths
+    }
+    let mut count = existing.iter().count();
+    for dir in dirs {
+        if count >= MAX_LOGS {
+            break;
+        }
+        if dir.length_squared() < 0.5 || crate::sphere::is_ocean(dir) {
+            continue; // trees are land-only; guard anyway
+        }
+        *seed = seed.wrapping_add(1);
+        let s = *seed;
+        let yaw = hash01(s) * std::f32::consts::TAU;
+        let len = 0.6 + 1.1 * hash01(s ^ 0x55); // stubby branch .. long trunk
+        let thick = 0.6 + 0.9 * hash01(s ^ 0x77); // thin .. fat
+        // Per-log bark color: brown base, varied darkness, with occasional mossy-green or weathered-grey logs
+        // -> no two look identical.
+        let mut col = Vec3::new(0.30, 0.20, 0.12) * (0.6 + 0.7 * hash01(s ^ 0xA1));
+        let kind = hash01(s ^ 0xB2);
+        if kind < 0.28 {
+            col = col.lerp(Vec3::new(0.20, 0.30, 0.15), 0.45); // mossy
+        } else if kind > 0.8 {
+            col = col.lerp(Vec3::new(0.42, 0.39, 0.34), 0.5); // grey weathered/dead
+        }
+        let mat = materials.add(StandardMaterial {
+            base_color: Color::srgb(col.x, col.y, col.z),
+            perceptual_roughness: 1.0,
+            ..default()
+        });
+        commands.spawn((
+            Mesh3d(props.mesh.clone()),
+            MeshMaterial3d(mat),
+            log_transform(dir, yaw, len, thick, 0.0),
+            Log { age: 0.0, yaw, dir, len, thick },
+        ));
+        count += 1;
+    }
+}
+
+// Age logs; sink + despawn at end of life.
+fn age_logs(time: Res<Time>, mut q: Query<(Entity, &mut Log, &mut Transform)>, mut commands: Commands) {
+    let dt = time.delta_secs();
+    for (e, mut log, mut tf) in &mut q {
+        log.age += dt;
+        if log.age >= LOG_LIFETIME {
+            commands.entity(e).despawn();
+            continue;
+        }
+        let remaining = LOG_LIFETIME - log.age;
+        if remaining < LOG_SINK_SECS {
+            let sink = (1.0 - remaining / LOG_SINK_SECS) * 0.5; // bury up to 0.5 units
+            *tf = log_transform(log.dir, log.yaw, log.len, log.thick, sink);
+        }
+    }
+}
+
 // Wildfire (immediate-mode gizmos). Each burning cell = teardrop cluster of flickering flame tongues (hot
 // yellow-white base -> dim red swaying tips) + a few rising cooling embers. Tongue count, body radius +
 // height scale with burn intensity. Tight to land cell so coarse-grid coastal cells don't spill onto sea.
@@ -2235,14 +2355,25 @@ fn update_sky(
             // submerged: murky blue-green horizon, darker than open sky + dims with daylight
             Vec3::new(0.02, 0.12, 0.20) * (0.35 + 0.65 * d)
         } else {
-            let night = Vec3::new(0.02, 0.03, 0.07);
-            let warm = Vec3::new(0.75, 0.45, 0.32); // dawn/dusk horizon glow
-            let blue = Vec3::new(0.50, 0.70, 1.0); // clear bright midday
-            if d < 0.25 {
-                night.lerp(warm, (d / 0.25).clamp(0.0, 1.0))
-            } else {
-                warm.lerp(blue, ((d - 0.25) / 0.75).clamp(0.0, 1.0))
+            // Richer multi-stop day palette keyed by local daylight d (0 night .. 1 noon): deep indigo night ->
+            // violet pre-dawn -> warm orange dawn/dusk -> soft periwinkle low sun -> deep saturated zenith blue.
+            let stops = [
+                (0.00, Vec3::new(0.025, 0.035, 0.09)), // deep indigo night
+                (0.10, Vec3::new(0.14, 0.10, 0.26)),   // violet twilight
+                (0.22, Vec3::new(0.85, 0.42, 0.26)),   // warm dawn/dusk horizon
+                (0.40, Vec3::new(0.62, 0.58, 0.78)),   // hazy periwinkle, low sun
+                (1.00, Vec3::new(0.26, 0.55, 0.98)),   // deep clear midday blue
+            ];
+            let mut c = stops[stops.len() - 1].1;
+            for w in stops.windows(2) {
+                if d <= w[1].0 {
+                    let t = ((d - w[0].0) / (w[1].0 - w[0].0)).clamp(0.0, 1.0);
+                    let t = t * t * (3.0 - 2.0 * t); // smoothstep between stops
+                    c = w[0].1.lerp(w[1].1, t);
+                    break;
+                }
             }
+            c
         }
     };
     clear.0 = Color::srgb(c.x, c.y, c.z);
