@@ -156,10 +156,14 @@ fn eval(body: &BodyGraph, steps: u32) -> GymResult {
     }
 }
 
-// Fitness: reward horizontal travel, penalize ending well above the start height (launched/flipped, not
-// walking); cull non-finite (blown-up) bodies.
+const MAX_SANE_TRAVEL: f32 = 35.0; // a real gait can't exceed this in the run; beyond = solver divergence
+const MAX_SANE_HEIGHT: f32 = 8.0; // ended this far above/below start = launched/sank, not walking
+
+// Fitness: reward horizontal travel, penalize ending above start (launched/flipped). CULL divergent bodies:
+// the XPBD solver can fling an unstable body to a huge-but-finite COM (fitness 1e11) -> the GA reward-hacks
+// that instability if we don't reject it. Treat non-finite OR implausible travel/height as a hard fail.
 fn fitness(r: &GymResult) -> f32 {
-    if !r.finite {
+    if !r.finite || r.horiz > MAX_SANE_TRAVEL || (r.end_y - r.start_y).abs() > MAX_SANE_HEIGHT {
         return -1000.0;
     }
     r.horiz - 0.5 * (r.end_y - r.start_y).max(0.0)
