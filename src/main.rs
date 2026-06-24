@@ -14,6 +14,7 @@ mod camera;
 mod components;
 mod config;
 mod genome;
+mod gym;
 mod morph;
 mod niche;
 mod orrery;
@@ -158,6 +159,14 @@ fn main() {
         let snap_out = val(&args, "--snap=").map(String::from).unwrap_or_else(|| "evolved-continuous.json".into());
         let cap = parse_or(&args, "--cap=", 90usize);
         scenario::merge_creatures_into_snapshot(&rp, &snap_out, cap);
+        return;
+    }
+    // --gym: P2 physics gym (avian). Drop one developed body into an isolated arena, step headless, report,
+    // exit. --gym-seed picks the creature genome (default --seed); --gym-steps sets run length (120Hz).
+    if flag(&args, "--gym") {
+        let gym_seed = parse_or(&args, "--gym-seed=", seed);
+        let gym_steps = parse_or(&args, "--gym-steps=", 600u32);
+        gym::run_gym(gym_seed, gym_steps);
         return;
     }
 

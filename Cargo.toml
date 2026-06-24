@@ -16,6 +16,11 @@ serde_json = "1"
 # Headless CPU snapshot renderer (--shots): ray-trace the planet to PNG, no GPU needed. PNG encode only.
 image = { version = "0.25", default-features = false, features = ["png"] }
 
+# P2 morphology gym (--gym only): articulated-body physics to evolve+learn gaits in isolation. Headless
+# feature set (no render/debug/picking deps); enhanced-determinism for reproducible gym runs. NOT used by the
+# live planet (kinematic) -- only gym.rs builds a PhysicsPlugins app.
+avian3d = { version = "0.6", default-features = false, features = ["3d", "f32", "parry-f32", "default-collider", "xpbd_joints", "enhanced-determinism"] }
+
 # Bevy build-speed profile (deps optimized, our crate fast to recompile).
 [profile.dev]
 opt-level = 1
