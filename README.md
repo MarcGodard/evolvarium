@@ -7,6 +7,29 @@ sphere (birds fly above it, swimmers dive through its oceans) with day/night, dr
 rain, lightning wildfire, oceans, mountains, a tilted magnetic field with polar auroras, and cold poles vs a
 warm equator. Design spec lives in `../clients/evolvarium/` (`00-concept.md` ..).
 
+## Setup
+
+Need Rust (stable, edition 2021). Install via [rustup](https://rustup.rs):
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh   # then restart shell or: source "$HOME/.cargo/env"
+rustc --version                                                  # confirm toolchain
+```
+
+No pinned toolchain file: latest stable works. Builds the GPU visualizer (needs Vulkan + a display) and a
+headless mode (no GPU). Linux needs the usual Bevy system deps:
+
+```bash
+# Debian/Ubuntu
+sudo apt install build-essential pkg-config libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev vulkan-tools
+# Fedora
+sudo dnf install gcc pkg-config alsa-lib-devel systemd-devel wayland-devel libxkbcommon-devel vulkan-tools
+# Arch
+sudo pacman -S base-devel pkg-config alsa-lib systemd-libs wayland libxkbcommon vulkan-tools
+```
+
+macOS + Windows need no extra system packages (Metal / DirectX ship with the OS).
+
 ## Run it
 
 ```bash
@@ -14,8 +37,8 @@ cargo run                      # the planet visualizer (auto-loads the showcase 
 cargo run -- --headless        # no window, fast-forward, logs per-generation stats, exits
 ```
 
-First build compiles Bevy (slow, minutes); later builds are fast. Linux needs the usual Bevy deps
-(Vulkan/X11/Wayland, alsa, udev).
+First build compiles Bevy (slow, minutes); later builds are fast. No GPU/display (CI, servers)? Use
+`--headless` or `--shots` (CPU ray-tracer) instead of the windowed visualizer.
 
 **Camera:** **TAB** toggles ORBIT (in space) and WALK (on the ground). In orbit, hold **right-mouse + drag**
 to rotate around the planet, **scroll** to zoom, **WASD/QE** as a keyboard fallback. In walk, the eye rides a
