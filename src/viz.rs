@@ -12,6 +12,18 @@ use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
+// Double-sided, no-cull material: thin/open meshes (wings, fronds, hollow cones, blossoms) show both faces.
+// `rough` = perceptual_roughness (None -> StandardMaterial default 0.5).
+fn double_sided_mat(mats: &mut Assets<StandardMaterial>, color: Color, rough: Option<f32>) -> Handle<StandardMaterial> {
+    mats.add(StandardMaterial {
+        base_color: color,
+        perceptual_roughness: rough.unwrap_or(0.5),
+        double_sided: true,
+        cull_mode: None,
+        ..default()
+    })
+}
+
 // Visual time-of-day offset (ticks) added to sun ONLY for lighting + sun/moon sky. Sim daylight
 // (creature rest, plant growth) still reads raw tick. Lets walk snap to local noon + scrub sun for
 // low-angle shadows without fast-forwarding sim. 0 = sky matches sim time (orbit default).
@@ -107,7 +119,7 @@ impl Plugin for VizPlugin {
                     toggle_sensors,
                     draw_sensors,
                     (add_plant_visuals, size_plants, add_grass_visuals, add_seaweed_visuals, size_creatures, flap_wings),
-                    (day_night_lighting, time_of_day, toggle_shadows, walk_ambient, update_daycycle, track_underwater, update_sky, toggle_underwater_tint, animate_ocean, update_globe_climate, update_aurora_curtains, rotate_sky_stars, position_sky_planets),
+                    (day_night_lighting, time_of_day, toggle_shadows, walk_ambient, update_daycycle, track_underwater, update_sky, toggle_underwater_tint, animate_ocean, update_globe_climate, update_aurora_curtains, rotate_sky_stars, position_sky_planets, fade_sky_stars),
                     rain_visuals,
                     fire_visuals,
                     update_clouds,
@@ -560,7 +572,7 @@ fn add_creature_visuals(
             // Wider span at higher flight gene; flap FREQ from size -> hummingbird (small) flutters, hawk (big) beats.
             let span = (1.0 + 0.9 * g.flight) * body; // wing reach (each side)
             let flap_freq = 6.0 + 16.0 * (1.0 - g.size.clamp(0.0, 1.0)); // small = fast flutter, big = slow beats
-            let wing_mat = materials.add(StandardMaterial { base_color: srgb(color, 0.9), double_sided: true, cull_mode: None, perceptual_roughness: 0.95, ..default() });
+            let wing_mat = double_sided_mat(&mut materials, srgb(color, 0.9), Some(0.95));
             for side in [1.0f32, -1.0] {
                 let shoulder = Vec3::new(side * 0.35 * scale.x, 0.22 * scale.y, -0.05 * scale.z);
                 let rest = Transform {
@@ -713,13 +725,7 @@ fn add_plant_visuals(
                 // see-through to trunk/sky); spine cone fills core. Evergreen needle-green: brighter
                 // blue-green reads as foliage not black blob; roughness 0.6 near foliage default (0.5) so
                 // sun catches soft sheen like broadleaf. Old 0.9 matte + dark base: noon sun never lit it.
-                let m = materials.add(StandardMaterial {
-                    base_color: Color::srgb(0.16, 0.52, 0.30),
-                    perceptual_roughness: 0.6,
-                    double_sided: true,
-                    cull_mode: None,
-                    ..default()
-                });
+                let m = double_sided_mat(&mut materials, Color::srgb(0.16, 0.52, 0.30), Some(0.6));
                 (tm.conifer.clone(), m, -0.6)
             };
             let child = commands
@@ -728,12 +734,7 @@ fn add_plant_visuals(
             commands.entity(e).add_child(child);
             // flowering (blossom) fruit tree gets ring of bloom blobs in crown
             if t.edible && g.flower > 0.4 {
-                let fmat = materials.add(StandardMaterial {
-                    base_color: flower_color(g),
-                    double_sided: true,
-                    cull_mode: None,
-                    ..default()
-                });
+                let fmat = double_sided_mat(&mut materials, flower_color(g), None);
                 for k in 0..5 {
                     let a = k as f32 * 1.2566; // 72 deg apart
                     let c = commands
@@ -823,12 +824,7 @@ fn add_plant_visuals(
             let child = commands
                 .spawn((
                     Mesh3d(forms.flower.clone()),
-                    MeshMaterial3d(materials.add(StandardMaterial {
-                        base_color: flower_color(g),
-                        double_sided: true,
-                        cull_mode: None,
-                        ..default()
-                    })),
+                    MeshMaterial3d(double_sided_mat(&mut materials, flower_color(g), None)),
                     Transform::from_xyz(0.0, top, 0.0).with_scale(Vec3::splat(0.28 + 0.45 * g.flower)),
                 ))
                 .id();
@@ -1517,11 +1513,14 @@ fn day_night_lighting(
     let mp = crate::sphere::moon_pos(mtick);
     for (mut tf, mat) in &mut moons {
         tf.translation = mp;
+        // tidal lock: same face toward planet center (look_at origin) so the textured near side always shows.
+        tf.look_at(Vec3::ZERO, Vec3::Y);
         if let Some(m) = materials.get_mut(&mat.0) {
-            // blood moon: lerp the moon toward dark red as it enters the umbra
-            let e = Vec3::new(0.5, 0.5, 0.55).lerp(Vec3::new(0.35, 0.05, 0.03), lunar);
+            // moon is sun-lit now (texture + phases) so keep emissive a faint floor; blood moon reddens it +
+            // tints the base (which multiplies the lunar texture) as it enters the umbra.
+            let e = Vec3::new(0.05, 0.05, 0.06).lerp(Vec3::new(0.30, 0.04, 0.02), lunar);
             m.emissive = LinearRgba::rgb(e.x, e.y, e.z);
-            let bc = Vec3::new(0.85, 0.85, 0.9).lerp(Vec3::new(0.45, 0.12, 0.09), lunar);
+            let bc = Vec3::new(1.0, 1.0, 1.0).lerp(Vec3::new(0.55, 0.18, 0.13), lunar);
             m.base_color = Color::srgb(bc.x, bc.y, bc.z);
         }
     }
@@ -1534,6 +1533,36 @@ fn rotate_sky_stars(gen: Res<GenState>, offset: Res<SunOffset>, mut q: Query<&mu
     let daily = (vtick as f32 / crate::sphere::DAY_TICKS as f32) * std::f32::consts::TAU;
     for mut tf in &mut q {
         tf.rotation = Quat::from_rotation_y(daily);
+    }
+}
+
+// Fade the (additive) starfield + Milky Way with daylight: night = full, midday = only the brightest survive
+// (additive over a bright sky washes out the faint ones first). In orbit/orrery there is no atmosphere ->
+// keep stars full. Walk mode dims by local daylight at the walker. Modulates shared SkyStars material color
+// (multiplies vertex colors).
+fn fade_sky_stars(
+    gen: Res<GenState>,
+    offset: Res<SunOffset>,
+    mode: Res<crate::camera::CameraMode>,
+    walkers: Query<&crate::camera::WalkCam>,
+    stars: Query<&MeshMaterial3d<StandardMaterial>, With<SkyStars>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    let f = if *mode != crate::camera::CameraMode::Walk {
+        1.0
+    } else {
+        let dir = walkers.single().map(|w| w.dir.normalize_or_zero()).unwrap_or(Vec3::Y);
+        let vtick = (gen.tick as i64 + offset.0).max(0) as u32;
+        let d = crate::sphere::daylight_at(dir, vtick); // 0 night .. 1 noon
+        // smoothstep fade: full dark by twilight, near-zero by mid-morning. Brightest stars linger (higher
+        // vertex color) -> "just the biggest at midday".
+        let t = (d / 0.42).clamp(0.0, 1.0);
+        (1.0 - t * t * (3.0 - 2.0 * t)).max(0.02)
+    };
+    for mat in &stars {
+        if let Some(m) = materials.get_mut(&mat.0) {
+            m.base_color = Color::srgb(f, f, f);
+        }
     }
 }
 
