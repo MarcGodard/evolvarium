@@ -596,14 +596,12 @@ fn setup_scene(
             ));
         }
     }
-    // wildfire flames + smoke: pooled crossed-X meshes, one each per fire grid cell, hidden until that cell
-    // burns. viz::fire_sheet_visuals/smoke_visuals stand/scale/flicker active ones each frame. Flame = additive
-    // emissive (aurora trick, many little X tongues); smoke = alpha-blend grey plume above it.
-    let flame_mesh = meshes.add(viz::flame_cluster_mesh());
-    let smoke_mesh = meshes.add(viz::smoke_plume_mesh());
-    for c in 0..(crate::config::SOIL_RES * crate::config::SOIL_RES) {
+    // wildfire flames: a small pool of crossed-X flamelet clusters (additive emissive, aurora trick). Each slot
+    // owns its OWN mesh so viz::fire_sheet_visuals can animate the tongues' lean per frame (only burning cells
+    // pay the rebuild). Assigned to active fire cells each frame; hidden when fewer fires than slots.
+    for i in 0..viz::FLAME_POOL {
         commands.spawn((
-            Mesh3d(flame_mesh.clone()),
+            Mesh3d(meshes.add(viz::flame_cluster_mesh())),
             MeshMaterial3d(materials.add(StandardMaterial {
                 base_color: Color::LinearRgba(LinearRgba::new(0.0, 0.0, 0.0, 0.0)),
                 alpha_mode: AlphaMode::Add,
@@ -615,8 +613,12 @@ fn setup_scene(
             Transform::default(),
             Visibility::Hidden,
             bevy::light::NotShadowCaster,
-            viz::FlameCell { cell: c },
+            viz::FlamePool(i),
         ));
+    }
+    // smoke: one alpha-blend grey plume per fire grid cell (shared mesh, hidden until that cell burns).
+    let smoke_mesh = meshes.add(viz::smoke_plume_mesh());
+    for c in 0..(crate::config::SOIL_RES * crate::config::SOIL_RES) {
         commands.spawn((
             Mesh3d(smoke_mesh.clone()),
             MeshMaterial3d(materials.add(StandardMaterial {

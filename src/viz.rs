@@ -1927,11 +1927,38 @@ fn age_logs(time: Res<Time>, mut q: Query<(Entity, &mut Log, &mut Transform)>, m
     }
 }
 
-// One little flame tongue as a crossed-sheet "X" (aurora trick): two tiny vertical sheets (XY + ZY) so each
-// tongue reads as a full volume from ANY angle, never a thin line. Hot near-white base -> orange -> red tip,
-// width tapers to a point (teardrop). Baked into the shared cluster mesh at local (cx,0,cz), half-width rr,
-// height hh. Additive: RGB carries the vertical falloff, alpha mirrors it.
-fn push_flamelet(pos: &mut Vec<[f32; 3]>, nor: &mut Vec<[f32; 3]>, uv: &mut Vec<[f32; 2]>, col: &mut Vec<[f32; 4]>, idx: &mut Vec<u32>, cx: f32, cz: f32, rr: f32, hh: f32) {
+// Max simultaneously-rendered burning cells. Fire is contained (avg ~0.01); extras still get smoke + embers.
+// Each pool slot owns its mesh (animated per frame) -> only burning cells pay the per-frame vertex rebuild.
+pub const FLAME_POOL: usize = 96;
+const FLAMELETS: usize = 10; // little tongues per fire cell
+
+// One flamelet's layout: place in a unit disk (denser center via sqrt), own width/height (center tongues
+// tallest -> teardrop envelope), own lean phase. Pure from hashes -> deterministic + SHARED by the mesh
+// builder and the per-frame animator so vertex order matches. Returns (cx, cz, half-width, height, lean phase).
+fn flamelet(k: u32) -> (f32, f32, f32, f32, f32) {
+    let ang = hash01(k * 7 + 1) * std::f32::consts::TAU;
+    let rad = hash01(k * 13 + 3).sqrt() * 0.42; // sqrt -> denser toward center
+    let cx = ang.cos() * rad;
+    let cz = ang.sin() * rad;
+    let rr = 0.15 + 0.07 * hash01(k * 17 + 5);
+    let hh = (0.55 + 0.45 * hash01(k * 23 + 7)) * (1.0 - 0.5 * rad / 0.42);
+    (cx, cz, rr, hh, hash01(k * 31 + 11) * std::f32::consts::TAU)
+}
+
+// Per-flamelet tip lean at time t -> tongues wander/change angle like real fire (this is what the old gizmo
+// lines did). cellphase offsets each fire so they don't lean in lockstep. Returns horizontal (x,z) tip drift.
+fn flamelet_lean(hh: f32, lphase: f32, t: f32, cellphase: f32) -> (f32, f32) {
+    let amt = hh * 0.6; // max tip drift ~ 0.6 * height
+    let lx = (t * 0.20 + lphase + cellphase).sin() * amt;
+    let lz = (t * 0.16 + lphase * 1.3 + cellphase * 0.7).cos() * amt;
+    (lx, lz)
+}
+
+// Crossed-sheet "X" vertex grid for one flamelet (aurora trick): two tiny vertical sheets (XY + ZY) so the
+// tongue reads as volume from ANY angle, never a thin line. Tip leans by (lx,lz)*fy^2 (curve, more at top).
+// Width tapers to a point. push positions always; push nor/uv/col/idx only when `full` (static attrs, once).
+#[allow(clippy::too_many_arguments)]
+fn flamelet_geom(pos: &mut Vec<[f32; 3]>, nor: &mut Vec<[f32; 3]>, uv: &mut Vec<[f32; 2]>, col: &mut Vec<[f32; 4]>, idx: &mut Vec<u32>, full: bool, cx: f32, cz: f32, rr: f32, hh: f32, lx: f32, lz: f32) {
     let (cols, rows) = (3usize, 6usize);
     let lerp = |a: [f32; 3], b: [f32; 3], t: f32| [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
     let stop = |fy: f32| -> [f32; 3] {
@@ -1949,50 +1976,47 @@ fn push_flamelet(pos: &mut Vec<[f32; 3]>, nor: &mut Vec<[f32; 3]>, uv: &mut Vec<
         let vbase = pos.len() as u32;
         for r in 0..=rows {
             let fy = r as f32 / rows as f32;
-            let va = (1.0 - fy).powf(1.05); // bright base -> 0 at tip
             let taper = 1.0 - 0.85 * fy; // converge toward a point -> teardrop
-            let c = stop(fy);
+            let curve = fy * fy; // tip leans more than base
+            let ox = cx + lx * curve;
+            let oz = cz + lz * curve;
+            let y = fy * hh;
             for cc in 0..=cols {
-                let fxn = cc as f32 / cols as f32 - 0.5; // -0.5..0.5 (untapered, for even edge feather)
+                let fxn = cc as f32 / cols as f32 - 0.5; // -0.5..0.5 (untapered, even edge feather)
                 let fx = fxn * taper * rr;
-                let hf = (fxn * std::f32::consts::PI).cos().max(0.0); // 1 center -> 0 edges (soft sides)
-                let a = va * hf;
-                let y = fy * hh;
-                let p = if plane == 0 { [cx + fx, y, cz] } else { [cx, y, cz + fx] };
-                let n = if plane == 0 { [0.0, 0.0, 1.0] } else { [1.0, 0.0, 0.0] };
+                let p = if plane == 0 { [ox + fx, y, oz] } else { [ox, y, oz + fx] };
                 pos.push(p);
-                nor.push(n);
-                uv.push([fxn + 0.5, 1.0 - fy]);
-                col.push([c[0] * a, c[1] * a, c[2] * a, a]);
+                if full {
+                    let c = stop(fy);
+                    let a = (1.0 - fy).powf(1.05) * (fxn * std::f32::consts::PI).cos().max(0.0); // falloff x soft sides
+                    nor.push(if plane == 0 { [0.0, 0.0, 1.0] } else { [1.0, 0.0, 0.0] });
+                    uv.push([fxn + 0.5, 1.0 - fy]);
+                    col.push([c[0] * a, c[1] * a, c[2] * a, a]); // additive: RGB carries falloff, alpha mirrors
+                }
             }
         }
-        for r in 0..rows as u32 {
-            for cc in 0..cols as u32 {
-                let i = vbase + r * stride + cc;
-                idx.extend_from_slice(&[i, i + 1, i + stride + 1, i, i + stride + 1, i + stride]);
+        if full {
+            for r in 0..rows as u32 {
+                for cc in 0..cols as u32 {
+                    let i = vbase + r * stride + cc;
+                    idx.extend_from_slice(&[i, i + 1, i + stride + 1, i, i + stride + 1, i + stride]);
+                }
             }
         }
     }
 }
 
-// Flame BODY mesh: a CLUSTER of little crossed-X flamelets (replaces the old gizmo line-tongues with the
-// aurora "X" trick, one X per tongue). Flamelets packed in a unit disk (denser center via sqrt), each its own
-// height/width (center taller -> teardrop envelope) so the cell reads as many small flames, not one blob.
-// Deterministic (hashed per flamelet). One shared mesh; per-cell transform scales/flickers the whole cluster.
+// Flame BODY mesh: a CLUSTER of little crossed-X flamelets (replaces the old gizmo line-tongues, one X per
+// tongue). Built straight (lean 0); fire_sheet_visuals overwrites POSITION each frame to make tongues wander.
 pub fn flame_cluster_mesh() -> Mesh {
     let mut pos: Vec<[f32; 3]> = Vec::new();
     let mut nor: Vec<[f32; 3]> = Vec::new();
     let mut uv: Vec<[f32; 2]> = Vec::new();
     let mut col: Vec<[f32; 4]> = Vec::new();
     let mut idx: Vec<u32> = Vec::new();
-    let n = 10usize; // little flamelets per cell
-    for k in 0..n as u32 {
-        let ang = hash01(k * 7 + 1) * std::f32::consts::TAU;
-        let rad = hash01(k * 13 + 3).sqrt() * 0.42; // sqrt -> denser toward center
-        let (cx, cz) = (ang.cos() * rad, ang.sin() * rad);
-        let rr = 0.15 + 0.07 * hash01(k * 17 + 5); // flamelet half-width
-        let hh = (0.55 + 0.45 * hash01(k * 23 + 7)) * (1.0 - 0.5 * rad / 0.42); // center tongues tallest
-        push_flamelet(&mut pos, &mut nor, &mut uv, &mut col, &mut idx, cx, cz, rr, hh);
+    for k in 0..FLAMELETS as u32 {
+        let (cx, cz, rr, hh, _) = flamelet(k);
+        flamelet_geom(&mut pos, &mut nor, &mut uv, &mut col, &mut idx, true, cx, cz, rr, hh, 0.0, 0.0);
     }
     let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, pos);
@@ -2001,6 +2025,19 @@ pub fn flame_cluster_mesh() -> Mesh {
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, col);
     mesh.insert_indices(Indices::U32(idx));
     mesh
+}
+
+// Leaned flamelet positions for time t (SAME vertex order as flame_cluster_mesh) -> overwrite the mesh's
+// POSITION attribute to animate the tongues. Only positions change (lean); color/uv/normals stay as built.
+fn flame_cluster_positions(t: f32, cellphase: f32) -> Vec<[f32; 3]> {
+    let mut pos: Vec<[f32; 3]> = Vec::new();
+    let (mut nor, mut uv, mut col, mut idx) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for k in 0..FLAMELETS as u32 {
+        let (cx, cz, rr, hh, lphase) = flamelet(k);
+        let (lx, lz) = flamelet_lean(hh, lphase, t, cellphase);
+        flamelet_geom(&mut pos, &mut nor, &mut uv, &mut col, &mut idx, false, cx, cz, rr, hh, lx, lz);
+    }
+    pos
 }
 
 // Smoke plume mesh: crossed-X grey column (same X trick, but ALPHA-blend not additive -> smoke darkens). Soft
@@ -2051,43 +2088,54 @@ pub fn smoke_plume_mesh() -> Mesh {
     mesh
 }
 
-// Tags pooled flame/smoke entities to a fire grid cell. One each per cell, pre-spawned hidden (setup_scene).
+// Pool slot for an animated flame cluster (assigned to the Nth active fire cell each frame, FLAME_POOL of
+// them). Smoke is one per grid cell (static-ish, no per-frame vertex anim needed).
 #[derive(Component)]
-pub struct FlameCell {
-    pub cell: usize,
-}
+pub struct FlamePool(pub usize);
 #[derive(Component)]
 pub struct SmokeCell {
     pub cell: usize,
 }
 
-// Flame BODIES: drive the pooled flamelet-cluster meshes. Per cell: hide if cold/ocean, else stand on the cell
-// surface, scale width+height by burn intensity (pulses on tick clock), sway, and modulate additive brightness
-// by intensity*flicker (same feel as the old gizmo tongues, now many little X's). Deterministic.
+// Flame BODIES: assign the pool to active land fire cells (stable order by cell index), animate each. Per slot:
+// stand on the cell surface, scale by intensity, sway + flicker brightness, and OVERWRITE the mesh positions so
+// the little X tongues wander/change angle (the lively look the old gizmo lines had). Unused slots hidden.
 fn fire_sheet_visuals(
     fire: Res<Fire>,
     gen: Res<GenState>,
+    mut meshes: ResMut<Assets<Mesh>>,
     mut mats: ResMut<Assets<StandardMaterial>>,
-    mut q: Query<(&FlameCell, &MeshMaterial3d<StandardMaterial>, &mut Transform, &mut Visibility)>,
+    mut q: Query<(&FlamePool, &Mesh3d, &MeshMaterial3d<StandardMaterial>, &mut Transform, &mut Visibility)>,
 ) {
     let t = gen.tick as f32;
-    for (fc, mat, mut tf, mut vis) in &mut q {
-        let f = fire.cell[fc.cell];
-        let surf = grid_cell_surface(fc.cell);
-        let up = surf.normalize_or_zero();
-        // cold or over water -> hide (sim won't ignite ocean; guards coarse coastal cells reading as sea)
-        if f < 0.1 || crate::sphere::is_ocean(up) {
+    // active land fire cells (sim won't ignite ocean; guard coarse coastal cells reading as sea). Cell-index
+    // order is stable frame to frame -> slots don't churn between cells.
+    let mut active: Vec<(usize, f32)> = Vec::new();
+    for c in 0..fire.cell.len() {
+        let f = fire.cell[c];
+        if f >= 0.1 && !crate::sphere::is_ocean(grid_cell_surface(c).normalize_or_zero()) {
+            active.push((c, f));
+        }
+    }
+    for (fp, mesh3d, mat, mut tf, mut vis) in &mut q {
+        if fp.0 >= active.len() {
             *vis = Visibility::Hidden;
             continue;
         }
+        let (c, f) = active[fp.0];
+        let surf = grid_cell_surface(c);
+        let up = surf.normalize_or_zero();
         *vis = Visibility::Visible;
-        let flick = 0.5 + 0.5 * (t * 0.30 + fc.cell as f32 * 1.7).sin();
-        let wob = (t * 0.18 + fc.cell as f32 * 2.3).sin() * 0.28; // sway around the up axis
+        let flick = 0.5 + 0.5 * (t * 0.30 + c as f32 * 1.7).sin();
+        let wob = (t * 0.18 + c as f32 * 2.3).sin() * 0.18; // gentle whole-cluster sway (tongues wander on top)
         let w = 0.9 + 1.6 * f; // wider with intensity
         let hgt = (0.7 + 2.0 * f) * (0.7 + 0.5 * flick); // height, pulsing (~ up to 2.4)
         tf.translation = surf + up * 0.04;
         tf.rotation = Quat::from_axis_angle(up, wob) * Quat::from_rotation_arc(Vec3::Y, up);
         tf.scale = Vec3::new(w, hgt, w);
+        if let Some(m) = meshes.get_mut(&mesh3d.0) {
+            m.insert_attribute(Mesh::ATTRIBUTE_POSITION, flame_cluster_positions(t, c as f32 * 0.7));
+        }
         if let Some(m) = mats.get_mut(mat) {
             let b = (0.55 + 0.45 * flick) * (0.5 + 0.5 * f); // hotter + flicker = brighter additive glow
             m.base_color = Color::LinearRgba(LinearRgba::new(b, b, b, b));
