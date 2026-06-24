@@ -154,25 +154,30 @@ pholmq/TSN (GPL-2.0) @ commit 49fd49c (pinned in `orrery.rs` + `stars.rs` commen
       (float like a duck) + swimmers. Refactor only, behavior identical.
 - [ ] **Balance-phase follow-ups** (visuals-first now): dive-hunting tuning, flier predator niche, flock/school
       cohesion at altitude, HUD flier count.
-- [ ] **FLAGSHIP (balance phase): body SHAPE under selection — morphology emerges, not decoration.** Today
-      several shape genes (`elongate`, `head`, `tail`, `fin`, `limbs`-count) are PURE COSMETICS: they mutate +
-      inherit but nothing in `sim.rs`/`config.rs` reads them, so proportion drifts randomly. Only `size`,
-      `height`, `climb`, `eyes`, `swim`, `flight` pay rent. Make proportions functional so body plans are an
-      emergent optimum per biome instead of being declared by hard switches (`swim>0.45`->fish, `flight>0.5`
-      ->bird). Proposed trade-offs (each gene needs a benefit AND a cost, mirror the no-free-lunch pattern used
-      for `magneto`/`armor`):
-      - `elongate`: + lower swim drag + burst speed + slips into cover; − less body volume -> smaller energy
-        store + worse cold tolerance (surface-area heat loss).
-      - `fin`/`tail`: + swim thrust + turn rate; − drag + mass on land when not swimming.
-      - `limbs` (count/length): + land move speed + grip/climb; − metabolic upkeep per limb + swim drag.
-      - `head`: + bite leverage + sensor capacity (room for more eyes); − upkeep + slower turn.
-      - `girth`: + energy/fat store + armor capacity; − agility loss + higher upkeep.
-      Bigger move: replace the niche SWITCHES with GRADIENTS (lift ~ `flight` and costs mass; partial-swimmers
-      viable) so eels/octopuses/hawks/sprinters are discovered by pressure, not coded forks. Needs a small
-      water-drag model (cross-section x elongate x fins), a land-locomotion cost model (limbs x height x
-      girth), and a reach model for browsing. Gate/regenerate saved seeds (changes fitness landscape). Verify
-      carrying capacity holds (~70-90) per the balance gate. NOTE (idea from user 2026-06-24): "would be so
-      much cooler if shape, not just size, was under genetic pressure" — exactly this.
+- [ / ] **FLAGSHIP: generative morphology + embodied evolution (Karl-Sims part-graph). IN PROGRESS on the
+      `morphology` branch** (plan: `~/.claude/plans/cuddly-coalescing-bachman.md`). Replaces the per-scalar
+      "make elongate/tail/fin pay rent" idea with a far bigger move the user signed off on: an indirect
+      part-graph genome that GROWS open-ended bodies (recursion + reflection + repetition) so morphology is
+      discovered, not declared. Two-tier: physics + learned gaits in an isolated harness gym (P2); the live
+      1000-creature planet renders the evolved bodies + derives movement stats from geometry (no live physics).
+      - [x] **P1.1** `src/morph.rs`: `BodyGraph` (nodes=parts, edges=attach/recurse/reflect/joint), `develop()`,
+        `Morphometrics` (mass/reach/areas/limbs), bounded by `MAX_PARTS`. Pure + tested.
+      - [x] **P1.2** `Genome.body: BodyGraph` (serde default = capsule -> old saves load unchanged); founders
+        random, mutate drifts, crossover inherits.
+      - [x] **P1.3** generative merged mesh per body (`build_body_mesh`, hash-keyed LRU cache `BodyMeshCache`)
+        replaces the fixed-part assembler; emissive eyes from the body bbox. Creatures render as varied bodies.
+      - [x] **P1.4** geometry-derived stats coupled to fitness (gentle, no-free-lunch): legs->land traction,
+        fins->swim thrust, frontal area->water drag, wings->flight lift relief, part-count+mass->basal/move
+        cost, body reach->browse height. Carrying capacity holds (~1100 stable).
+      - [x] **P1.5** seed round-trip verified: evolved a fresh pop (96k ticks, pop ~1070 stable) -> saved
+        `evolved-morph.json` -> loaded -> body graphs develop + render (novel bodies, e.g. radial-spiked).
+        Seed gitignored (41MB full-world save; reflects UNTUNED balance) + DEFAULT_SEED swap DEFERRED until
+        after P2 balance retune, then commit the tuned showcase seed.
+      - [ ] **P2** physics gym (`avian3d`, `--gym`): actuated joints from the graph, brain learns gaits;
+        bake locomotion stats back; harness creature arm + tune/audit-morphology workflows.
+      - [ ] **P3** HyperNEAT-style CPPN brain scaling controller to body; optional live spotlight physics.
+      NOTE (user 2026-06-24): "as much if not more variety than earth", "go full out". Merge to `main` only
+      after P1 verified green + user sign-off.
 
 ### Magnetic field + magnetoreception (2026-06-22)
 - [x] **Tilted geomagnetic dipole** (`sphere.rs`): `MAG_TILT` + `mag_pole_dir` (magnetic north ~11.5 deg off
