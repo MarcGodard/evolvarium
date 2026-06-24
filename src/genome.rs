@@ -120,6 +120,12 @@ pub struct Genome {
     #[serde(default = "zero")]
     pub beak: f32,           // 0..1 snout/beak length (render only, NO sim effect): birds get a forward beak, other
                              // body plans a snout. Cosmetic, backfilled by ensure_cosmetic on old saves.
+
+    // M5 generative morphology: Karl-Sims part-graph that GROWS the body (see morph.rs). Drives the mesh +
+    // geometry-derived stats (mass/drag/reach/wing/fin), so SHAPE is under selection, not the old cosmetic
+    // scalars. serde default = single capsule -> old saves load + render as today's creature.
+    #[serde(default = "crate::morph::default_body")]
+    pub body: crate::morph::BodyGraph,
 }
 
 // serde defaults for traits absent in old saves
@@ -292,6 +298,7 @@ impl Genome {
             // is visible from gen 0 (not waiting many gens for mutation to cross 0.5). Rest stay low (ground-biased).
             flight: if rng.f32() < 0.15 { rng.range(0.55, 1.0) } else { rng.f32() * rng.f32() * 0.4 },
             beak: rng.f32() * rng.f32(), // skew short snouts; few long beaks/snouts
+            body: crate::morph::BodyGraph::random(rng), // generative body-graph (mesh + derived stats)
         }
     }
 
@@ -524,6 +531,8 @@ impl Genome {
         if rng.f32() < rate {
             self.beak = (self.beak + rng.normal() * 0.12).clamp(0.0, 1.0);
         }
+        // generative body-graph drift (param + structural; bounded inside morph::mutate)
+        self.body.mutate(rng, rate);
         // structural: add/remove sensor (+ matching input-weight columns), p=0.06 each
         if rng.f32() < 0.06 && self.sensors.len() < MAX_SENSORS {
             self.add_sensor(rng);
