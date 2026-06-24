@@ -1260,6 +1260,96 @@ pub(crate) fn collect_full_snapshot(
     assemble_snapshot(creatures, plants, saved_grids(soil, gw, climate, fire, wear), seed_bank, weather.rain, tick)
 }
 
+// Build + write the full world from READ-ONLY render-mode queries. Shared by the O-key save + save-on-close.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn do_full_save(
+    path: &str,
+    cq: &Query<(&Transform, &Energy, &Fitness, &Heading, &Genome, &DietState, &Locomotion), With<Creature>>,
+    pf: &Query<(&PlantGenome, &PlantState, &Transform, Option<&Tree>, Option<&Rot>, Option<&Ferment>, Option<&Seed>), (Without<Grass>, Without<Seaweed>, Without<Creature>)>,
+    soil: &Soil,
+    gw: &GroundWater,
+    climate: &Climate,
+    fire: &Fire,
+    wear: &Wear,
+    weather: &Weather,
+    bank: &SeedBank,
+    tick: u32,
+) -> usize {
+    let creatures: Vec<_> = cq
+        .iter()
+        .map(|(tf, en, fit, head, g, diet, loco)| saved_creature(tf, en, fit, head, g, diet, loco))
+        .collect();
+    let plants: Vec<_> = pf
+        .iter()
+        .map(|(g, st, tf, tree, rot, ferment, seed)| saved_plant_entity(g, st, tf, tree, rot, ferment, seed))
+        .collect();
+    let seed_bank: Vec<_> = bank
+        .0
+        .iter()
+        .map(|(g, p, t)| {
+            let d = p.normalize_or_zero();
+            crate::persist::SavedSeed { g: g.clone(), dir: [d.x, d.y, d.z], ticks: *t }
+        })
+        .collect();
+    let n = creatures.len();
+    let snap = assemble_snapshot(creatures, plants, saved_grids(soil, gw, climate, fire, wear), seed_bank, weather.rain, tick);
+    crate::persist::save_snapshot(path, &snap);
+    n
+}
+
+// Windowed god-control: press O to SAVE the full current world (creatures + plants + dynamic field grids
+// incl. wear + seed bank + tick) to disk. Reload with --load=<path> for an exact resume. Path = --save if set,
+// else savestate.json. Read-only queries -> parallelizes freely; reuses the headless --save builders.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn save_world_key(
+    keys: Res<ButtonInput<KeyCode>>,
+    cq: Query<(&Transform, &Energy, &Fitness, &Heading, &Genome, &DietState, &Locomotion), With<Creature>>,
+    pf: Query<(&PlantGenome, &PlantState, &Transform, Option<&Tree>, Option<&Rot>, Option<&Ferment>, Option<&Seed>), (Without<Grass>, Without<Seaweed>, Without<Creature>)>,
+    soil: Res<Soil>,
+    gw: Res<GroundWater>,
+    climate: Res<Climate>,
+    fire: Res<Fire>,
+    wear: Res<Wear>,
+    weather: Res<Weather>,
+    bank: Res<SeedBank>,
+    gen: Res<GenState>,
+) {
+    if !keys.just_pressed(KeyCode::KeyO) {
+        return;
+    }
+    let path = gen.save.clone().unwrap_or_else(|| "savestate.json".to_string());
+    let n = do_full_save(&path, &cq, &pf, &soil, &gw, &climate, &fire, &wear, &weather, &bank, gen.tick);
+    info!("SAVED full world: {} creatures @ tick {} -> {} (reload: --load={}) [O]", n, gen.tick, path, path);
+}
+
+// Save-on-exit (windowed): when the window's close button is hit AND --save=PATH was given, write the full
+// world before the app quits. Headless saves at programmatic run-end (generation_step); this covers the
+// interactive close. No --save -> no file written on close.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn save_on_window_close(
+    mut closed: MessageReader<bevy::window::WindowCloseRequested>,
+    cq: Query<(&Transform, &Energy, &Fitness, &Heading, &Genome, &DietState, &Locomotion), With<Creature>>,
+    pf: Query<(&PlantGenome, &PlantState, &Transform, Option<&Tree>, Option<&Rot>, Option<&Ferment>, Option<&Seed>), (Without<Grass>, Without<Seaweed>, Without<Creature>)>,
+    soil: Res<Soil>,
+    gw: Res<GroundWater>,
+    climate: Res<Climate>,
+    fire: Res<Fire>,
+    wear: Res<Wear>,
+    weather: Res<Weather>,
+    bank: Res<SeedBank>,
+    gen: Res<GenState>,
+) {
+    if closed.is_empty() {
+        return;
+    }
+    closed.clear();
+    let Some(path) = gen.save.clone() else {
+        return; // no --save target -> closing the window writes nothing
+    };
+    let n = do_full_save(&path, &cq, &pf, &soil, &gw, &climate, &fire, &wear, &weather, &bank, gen.tick);
+    info!("save-on-exit: wrote full world ({} creatures @ tick {}) -> {}", n, gen.tick, path);
+}
+
 // --- spawn ---
 
 // Headless: components only, no render assets (absent under MinimalPlugins).

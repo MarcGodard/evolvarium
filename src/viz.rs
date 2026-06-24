@@ -110,7 +110,7 @@ impl Plugin for VizPlugin {
                     update_world_stats,
                     time_controls,
                     toggle_legend,
-                    god_disturbances,
+                    (god_disturbances, crate::sim::save_world_key, crate::sim::save_on_window_close),
                     draw_selection,
                     (minimap_sync_cam, minimap_input, minimap_rebuild, minimap_dynamic),
                     (phylogeny_classify, toggle_phylo, update_phylo_panel),
@@ -1758,7 +1758,7 @@ fn fire_visuals(fire: Res<Fire>, gen: Res<GenState>, mut gizmos: Gizmos) {
 pub struct ShowSensors(pub bool);
 
 fn log_viz_help() {
-    info!("viz: TAB=orbit/walk (keeps true sim time; [ ] scrub time, \\ noon; swim into the sea: look + W to dive) | hue=diet, vividness=rigidity, size=sensors | color=skin genes (venom=warning tint), head/eyes/legs=genome, size=body | G=sensor rays | SPACE=pause | 1-5=speed +/-=fine | B=seed life P=populate planet L=lightning K=cull | M=minimap field Y=phylogeny | H=legend");
+    info!("viz: TAB=orbit/walk (keeps true sim time; [ ] scrub time, \\ noon; swim into the sea: look + W to dive) | hue=diet, vividness=rigidity, size=sensors | color=skin genes (venom=warning tint), head/eyes/legs=genome, size=body | G=sensor rays | SPACE=pause | 1-5=speed +/-=fine | B=seed life P=populate planet L=lightning K=cull | M=minimap field Y=phylogeny | O=save world | H=legend");
 }
 
 
@@ -2219,6 +2219,7 @@ CONTROLS
   B  seed creatures    P  populate whole planet
   L  lightning fire    K  cull    H  this legend
   M  cycle minimap field    Y  phylogeny (species tree)
+  O  save full world -> savestate.json (reload: --load=savestate.json)
   (P seeds plants+trees+creatures in every habitat)";
 
 fn spawn_legend_ui(mut commands: Commands) {

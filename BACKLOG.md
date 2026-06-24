@@ -33,6 +33,12 @@ live in `config.rs`; the live conversion plan is `SPHERE-PLAN.md`.
       Backward compatible: old seeds (no `world`) fall back to the legacy scatter path. So a worn world can be
       saved + reloaded for an instant screenshot (no long warmup). persist::WorldState + sim::{collect_full_snapshot,
       restore_full_world}. Verified: save@tick9600 -> reload resumes @9601 with wear 0.048 (vs fresh 0.001), pop 1100 exact.
+- [x] **In-game save key + save-on-exit (2026-06-23)**: press **O** in the windowed sim to write the full
+      current world to `savestate.json` (or the `--save` path), reload with `--load=savestate.json`. Closing
+      the window with `--save=PATH` set ALSO writes the full world (sim::save_on_window_close). Headless
+      `--save` already writes on programmatic run-end (--gens done / extinction). Read-only god-controls
+      reusing the headless --save builders (sim::do_full_save). Legend + help updated. (Caveat: headless
+      Ctrl-C/SIGINT kills the process before the save runs; use --gens for a clean save-on-exit.)
 
 ### Evolvable genes (creature)
 - [x] sensors (angle+range, add/remove), brain (weights + per-connection plasticity + hidden-layer size),
