@@ -29,6 +29,10 @@ pholmq/TSN (GPL-2.0) @ commit 49fd49c (pinned in `orrery.rs` + `stars.rs` commen
   H is the master HUD toggle; planet HUD hidden in orrery.
 - [x] **HUD calendar**: WORLD panel shows the full Earth date + clock (Yr/Mon/Day HH:MM), season, and the
   next solar/lunar eclipse countdown; creature age in days. (Dropped the sirius/year-length line.)
+- [x] **Fluffier clouds (2026-06-24)**: cloud puffs are now multi-lobe cumulus CLUSTERS (merged sphere
+  lobes, `viz::cloud_puff_mesh`) that self-shade into 3D billows instead of flat lozenges, matte, with
+  daylight-aware albedo (bright white high sun, golden where the sun grazes them at sunrise/sunset, dim
+  moonlit floor at night).
 - [x] **Sky polish (2026-06-24)**: stars + Milky Way are additive and fade with local daylight (midday ->
   only the brightest survive; orbit/orrery keep full); procedural Milky Way band on the real galactic plane
   (`stars::build_milky_way`, galactic->equatorial transform). Moon got a procedural cratered texture

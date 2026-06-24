@@ -1738,6 +1738,27 @@ fn cloud_alt() -> f32 {
     crate::sphere::PLANET_R + crate::sphere::ELEV_MAX + 10.0
 }
 
+// One fluffy cumulus puff = several overlapping sphere lobes merged into a single mesh (wider than tall).
+// Shared by every CloudPuff (one mesh, many draws). Lit StandardMaterial -> the lobes self-shade -> the
+// cloud reads as a 3D billow, not a flat lozenge. tf.scale flattens the whole cluster into a cloud.
+fn cloud_puff_mesh() -> Mesh {
+    let lobe = |r: f32, o: Vec3| Sphere::new(r).mesh().ico(2).unwrap().transformed_by(Transform::from_translation(o));
+    let mut m = lobe(1.0, Vec3::ZERO);
+    // deterministic lobes: a broad base ring + a raised crown -> cauliflower cumulus silhouette
+    for (r, o) in [
+        (0.78, Vec3::new(0.95, 0.05, 0.25)),
+        (0.72, Vec3::new(-0.9, 0.0, -0.2)),
+        (0.66, Vec3::new(0.25, 0.1, 1.0)),
+        (0.62, Vec3::new(-0.35, -0.05, -0.95)),
+        (0.82, Vec3::new(0.1, 0.45, -0.15)), // crown
+        (0.58, Vec3::new(0.6, -0.05, -0.65)),
+        (0.5, Vec3::new(-0.55, 0.2, 0.6)),
+    ] {
+        let _ = m.merge(&lobe(r, o));
+    }
+    m
+}
+
 // Cheap deterministic 0..1 from integer seed (jitter + per-puff variation; spawn reproducible).
 fn hash01(n: u32) -> f32 {
     let x = n.wrapping_mul(2654435761) ^ (n >> 15);
@@ -1750,7 +1771,7 @@ fn spawn_clouds(
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     use std::f32::consts::{FRAC_PI_2, PI, TAU};
-    let mesh = meshes.add(Sphere::new(1.0).mesh().ico(2).unwrap());
+    let mesh = meshes.add(cloud_puff_mesh());
     let alt = cloud_alt();
     // Dense grid + per-puff jitter -> cloudy regions read as clusters of varied puffs, not a lattice.
     let (rows, cols) = (22, 44);
@@ -1765,6 +1786,7 @@ fn spawn_clouds(
             let anchor = crate::sphere::lonlat_to_pos(lon, lat, 0.0).normalize();
             let mat = materials.add(StandardMaterial {
                 base_color: Color::srgba(0.95, 0.96, 1.0, 0.0),
+                perceptual_roughness: 1.0, // matte: no specular glint on cloud lobes
                 alpha_mode: AlphaMode::Blend,
                 ..default()
             });
@@ -1782,8 +1804,8 @@ fn spawn_clouds(
                     anchor,
                     moist: crate::sphere::moisture(anchor),
                     grow: 0.0,
-                    scale_var: 0.6 + hash01(seed ^ 0x1234) * 1.0,
-                    flat: 0.35 + hash01(seed ^ 0x5678) * 0.18,
+                    scale_var: 0.55 + hash01(seed ^ 0x1234) * 0.9,
+                    flat: 0.42 + hash01(seed ^ 0x5678) * 0.22, // less squash: cluster keeps billow volume
                     hbias: (hash01(seed ^ 0xabcd) - 0.5) * 6.0,
                 },
             ));
@@ -1799,6 +1821,7 @@ fn update_clouds(
 ) {
     let dt = time.delta_secs();
     let alt = cloud_alt();
+    let sun = crate::sphere::sun_dir(gen.tick);
     for (mut puff, mm, mut vis, mut tf) in &mut q {
         // Glide: cloud PATTERN drifts at -wind per tick (features move opposite sample rotation), so riding
         // anchor by -a keeps each puff on its own cloud as it sweeps across sky.
@@ -1828,13 +1851,19 @@ fn update_clouds(
         tf.translation = dir * (alt + puff.hbias);
         tf.rotation = Quat::from_rotation_arc(Vec3::Y, dir);
         if let Some(m) = mats.get_mut(&mm.0) {
-            // Opacity tracks grow -> forming cloud fades in from clear; thickest cap ~0.5. Thicker cover
-            // greys puff (rain clouds darker underneath); thin cover stays bright white.
-            let shade = 1.0 - 0.28 * cov;
-            m.base_color = Color::srgba(0.96 * shade, 0.97 * shade, 1.0 * shade, (0.45 * puff.grow).min(0.5));
+            // Daylight-aware albedo (multiplies the white sun light): bright white at high sun, GOLDEN where
+            // the sun grazes the cloud (sunrise/sunset), grey underside when thick. Faint emissive floor keeps
+            // night-side clouds as dim moonlit ghosts instead of going pure black.
+            let lit = dir.dot(sun); // -1 anti-sun .. 1 sub-solar
+            let warm = (1.0 - lit.max(0.0) / 0.45).clamp(0.0, 1.0); // 1 at grazing/low sun .. 0 overhead
+            let shade = 1.0 - 0.30 * cov; // thick cloud = greyer
+            let albedo = Vec3::new(0.97, 0.98, 1.0).lerp(Vec3::new(1.0, 0.72, 0.5), warm * 0.8) * shade;
+            m.base_color = Color::srgba(albedo.x, albedo.y, albedo.z, (0.5 * puff.grow).min(0.55));
+            m.emissive = LinearRgba::rgb(0.015, 0.018, 0.03) * puff.grow; // moonlit night floor
         }
-        // Start small wisp, grow to full puff; per-puff size + squash -> clouds lumpy not uniform.
-        let s = (2.0 + 16.0 * puff.grow) * puff.scale_var;
+        // Start small wisp, grow to full puff; per-puff size + squash -> clouds lumpy not uniform. Smaller
+        // base than the single-sphere era: the cluster mesh already spans ~2x a unit sphere.
+        let s = (1.3 + 10.0 * puff.grow) * puff.scale_var;
         tf.scale = Vec3::new(s, s * puff.flat, s); // squash along local up (set by tf.rotation) = flat cloud
     }
 }
