@@ -24,8 +24,22 @@ pholmq/TSN (GPL-2.0) @ commit 49fd49c (pinned in `orrery.rs` + `stars.rs` commen
   planet sky (orbit + walk) — stars wheel with the day; naked-eye planets (`SkyPlanet`) drift along the zodiac.
 - [x] **Eclipses**: sun disc sized to the moon's angular size, so the moon transits the sun; solar eclipse
   dims the sun toward twilight, lunar eclipse reddens the moon (blood moon). Analytic, tested geometry.
-- [ ] **Open follow-ups**: orbit/deferent trace lines in the orrery; ecliptic grid + zodiac + body labels;
-  hide planet WORLD HUD in orrery mode; HUD calendar date + Sirius/year readout + age-in-days surface.
+- [x] **Orrery overlays** (orrery-mode only, mode-gated keys): T orbit/deferent traces, G ecliptic grid,
+  Z zodiac, B body+bright-star labels (on by default), L constellations (off by default). Legend moved to J;
+  H is the master HUD toggle; planet HUD hidden in orrery.
+- [x] **HUD calendar**: WORLD panel shows the Earth date (Yr/Mon/Day) + a sky line (current year length,
+  Sirius near/far, apparent precession ~26000); creature age in days.
+- [x] **Bodies visible at any zoom**: constant-angular-size rendering so the moon/Phobos/Deimos/asteroids
+  stay visible; orrery min-zoom 6 so you can fly in and resolve the moon by Evolvarium.
+- [x] **Sirius as a body** on the precession apsidal line (bright blue-white), labeled + click-identifiable.
+- [x] **Click-to-identify** sky objects (bodies, sun, moon, Sirius, nearest catalog star with HR/mag/temp)
+  in orrery + planet sky; ground creatures/plants keep the inspector. (Fixed: minimap 2nd camera broke
+  cam.single() in pick_on_click + capture force_cam.)
+- [x] **Geocentric by default**: orrery centers on the home planet, renamed **Evolvarium** (display only);
+  C toggles to the system center.
+- [x] **Orrery time = sim time** so orrery, planet sky, and calendar agree on the moment.
+- [ ] **Open polish**: free-look/pan in the orrery (vs orbit-locked); name the home planet across the rest
+  of the UI; richer identity panels (constellation membership, distance).
 
 ### The planet (spherical world)
 - [x] Spherical sim: great-circle movement, localized homeland start that spreads, lon/lat spatial grids,
