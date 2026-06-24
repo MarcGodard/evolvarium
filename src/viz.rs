@@ -7,7 +7,7 @@ use bevy::prelude::*;
 use crate::components::{Alive, Creature, DietState, Energy, Fitness, Food, Grass, Heading, Rot, Seaweed, Seed, Tree};
 use crate::genome::{master_expression, Genome, NUTRIENTS};
 use crate::plant::{flower_color, form, plant_color, PlantGenome, PlantState};
-use crate::sim::{grid_cell_surface, Fire, GenState, GroundWater, EYE_MIN, EYE_SPAN, LIMB_MIN, LIMB_SPAN, ROT_GONE};
+use crate::sim::{grid_cell_surface, Fire, GenState, GroundWater, EYE_MIN, EYE_SPAN, ROT_GONE};
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
@@ -47,17 +47,6 @@ pub struct Ocean;
 #[derive(Component)]
 pub struct Atmosphere;
 
-// A flapping bird wing (child of a flier). flap_wings rotates it about its root (the shoulder) on the
-// forward (Z) axis. `side` (+1 right / -1 left) mirrors lift so both tips rise together; `freq` set from
-// body size (small bird = fast flutter, big bird = slow beats); `rest` = base transform (rotation reapplied
-// each frame so the wing returns to neutral between beats).
-#[derive(Component)]
-pub struct Wing {
-    pub side: f32,
-    pub freq: f32,
-    pub amp: f32,
-    pub rest: Transform,
-}
 
 // Planet globe entity. Casts shadow in BOTH camera modes (camera::update_planet_caster) -> planet
 // shadows own night side (no sun through planet) in orbit, and in walk terrain past local horizon
@@ -126,7 +115,7 @@ impl Plugin for VizPlugin {
                     add_creature_visuals,
                     toggle_sensors,
                     draw_sensors,
-                    (add_plant_visuals, size_plants, add_grass_visuals, add_seaweed_visuals, size_creatures, flap_wings),
+                    (add_plant_visuals, size_plants, add_grass_visuals, add_seaweed_visuals, size_creatures),
                     (day_night_lighting, update_sun_glow, time_of_day, toggle_shadows, walk_ambient, update_daycycle, track_underwater, update_sky, toggle_underwater_tint, animate_ocean, update_globe_climate, update_aurora_curtains, rotate_sky_stars, position_sky_planets, fade_sky_stars),
                     rain_visuals,
                     fire_visuals,
@@ -478,12 +467,7 @@ pub struct PlantForms {
     pub cap: Handle<Mesh>,        // mushroom cap
 }
 
-// Shared creature capsule mesh (inserted by spawn_world_render). add_creature_visuals dresses creatures
-// born mid-sim (spawn_creature adds no mesh) -> newborns + B-seeded creatures become visible.
-#[derive(Resource)]
-pub struct CreatureMesh(pub Handle<Mesh>);
-
-// M5: cache of generative body meshes keyed by body-graph hash. Newborns are parent-clone+mutation so many
+// Per-genome generative body meshes keyed by body-graph hash. Newborns are parent-clone+mutation so many
 // genomes repeat (cache hit); identical graphs reuse one mesh asset. LRU-capped: evicting a cache entry
 // drops only OUR handle (entities keep their clone alive, ref-counted) -> just means future identical graphs
 // rebuild. Bounds GPU mesh count regardless of births.
@@ -523,16 +507,10 @@ fn body_scale(g: &Genome) -> f32 {
 }
 const BODY_RENDER: f32 = 0.5; // graph-units -> world-units normalization (tune by capture)
 
-// Genetic body-part meshes (M4): head + eyes + legs as child entities -> head size, eye count, leg
-// count visible. Base sizes ~unit; add_creature_visuals scales per genome.
+// Shared eye mesh (emissive eye spheres are the one part NOT in the generative body graph).
 #[derive(Resource)]
 pub struct CreatureParts {
-    pub head: Handle<Mesh>,
     pub eye: Handle<Mesh>,
-    pub leg: Handle<Mesh>,
-    pub fin: Handle<Mesh>, // Y-axis cone: caudal tail fan + dorsal ridge (scaled flat per use)
-    pub seg: Handle<Mesh>, // unit cuboid: rod/bushy tails + flat pectoral side-fins (axis-aligned, no rotation)
-    pub wing: Handle<Mesh>, // flat swept tapered bird wing, root at x=0 extends +X (mirror via scale.x). Flaps about root.
 }
 
 // Skin color + body-plan scale from genome (M4). Shared by add_creature_visuals + restyle_creatures ->
@@ -564,19 +542,6 @@ fn size_creatures(mut q: Query<(&DietState, &Genome, &mut Transform), With<Creat
     for (diet, g, mut tf) in &mut q {
         let grow = (CREATURE_BORN_SCALE + (1.0 - CREATURE_BORN_SCALE) * diet.age as f32 / CREATURE_MATURE_TICKS).min(1.0);
         tf.scale = Vec3::splat(body_scale(g) * grow); // uniform: generative body carries the shape
-    }
-}
-
-// Flap bird wings each frame: rotate every Wing about the forward (Z) axis = its shoulder root. `side` mirrors
-// the angle so both tips rise together. Reapplies the rest transform first so flap is relative to neutral
-// (translation/scale constant; rotation oscillates). Real-time (Time), independent of sim speed/pause.
-fn flap_wings(time: Res<Time>, mut q: Query<(&Wing, &mut Transform)>) {
-    let t = time.elapsed_secs();
-    for (w, mut tf) in &mut q {
-        let a = (t * w.freq).sin() * w.amp;
-        tf.translation = w.rest.translation;
-        tf.scale = w.rest.scale;
-        tf.rotation = Quat::from_rotation_z(w.side * a) * w.rest.rotation;
     }
 }
 
@@ -1204,27 +1169,6 @@ pub fn blob_cluster_mesh(blobs: &[(Vec3, f32, f32)]) -> Mesh {
         push_sphere(&mut b, &mut idx, c, r, 5, 7, v);
     }
     b.finish(idx)
-}
-
-// Bird wing: flat swept tapered planform in the X-Z plane (y~0), ROOT at x=0 extending to a pointed tip at
-// x=1 (swept back, -Z). Drawn double-sided (material cull None) so the underside lights. Root at origin so a
-// flap = rotation about the wing entity's origin (the shoulder). Unit span; viz scales per genome.
-pub fn wing_mesh() -> Mesh {
-    let mut b = MeshBuf::new();
-    // outline, root(0) fanning out to the tip(2); leading edge sweeps back, trailing edge tapers in.
-    let pts = [
-        Vec3::new(0.0, 0.0, 0.18),   // 0 root leading
-        Vec3::new(0.55, 0.0, 0.02),  // 1 mid leading (swept)
-        Vec3::new(1.0, 0.0, -0.42),  // 2 pointed tip
-        Vec3::new(0.5, 0.0, -0.52),  // 3 mid trailing
-        Vec3::new(0.0, 0.0, -0.40),  // 4 root trailing
-    ];
-    for p in pts {
-        b.pos.push([p.x, p.y, p.z]);
-        b.nor.push([0.0, 1.0, 0.0]);
-        b.col.push([1.0, 1.0, 1.0, 1.0]);
-    }
-    b.finish(vec![0, 1, 2, 0, 2, 3, 0, 3, 4]) // fan from root
 }
 
 // Petalled flower: shallow CUP of petals around raised center button. Petals tilt up-and-out (tips raised)

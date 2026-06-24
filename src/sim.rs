@@ -1504,19 +1504,9 @@ pub fn spawn_world_render(
     mut bank: ResMut<SeedBank>,
     mut weather: ResMut<Weather>,
 ) {
-    let creature_mesh = meshes.add(Capsule3d::new(0.4, 0.8));
-    // shared creature mesh resource so viz::add_creature_visuals can dress creatures BORN mid-sim (spawn_creature
-    // adds no mesh) -> newborns + B-button creatures become visible, not just the seed pop.
-    commands.insert_resource(crate::viz::CreatureMesh(creature_mesh.clone()));
-    // creature body PARTS (M4 genetic visuals): head/eye/leg meshes, child entities of each creature -> genome's
-    // head size, eye count, leg count visible. Unit-ish base sizes; viz scales per genome.
+    // shared eye mesh; the body itself is a generative per-genome mesh built by viz (morph.rs)
     commands.insert_resource(crate::viz::CreatureParts {
-        head: meshes.add(Sphere::new(0.5).mesh().ico(2).unwrap()), // diameter 1 at child scale 1
         eye: meshes.add(Sphere::new(0.5).mesh().ico(1).unwrap()),
-        leg: meshes.add(Cylinder::new(0.5, 1.0)), // radius 0.5, height 1 -> thin legs after scaling
-        fin: meshes.add(Cone { radius: 0.5, height: 1.0 }), // apex +Y, base -Y; scaled flat -> fish fins
-        seg: meshes.add(Cuboid::new(1.0, 1.0, 1.0)), // unit box; scaled per tail/side-fin use
-        wing: meshes.add(crate::viz::wing_mesh()), // bird wing planform (root at origin, flaps about root)
     });
     // per-form plant mesh library: one silhouette per plant::form (viz::add_plant_visuals picks by genome).
     // Round forms = icospheres; tall/leafy = procedural frond clumps; lily pad = flat disc.

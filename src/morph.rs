@@ -67,22 +67,6 @@ pub struct PartGene {
     pub b: f32,
 }
 
-impl PartGene {
-    // Approx solid volume (mass proxy). Segment = tapered cylinder; Sphere = ball; Plate = thin slab.
-    fn volume(&self, scale: f32) -> f32 {
-        let l = (self.length * scale).max(0.0);
-        let r = (self.radius * scale).max(0.0);
-        match self.shape {
-            ShapeKind::Segment => {
-                let rm = r * (1.0 + self.taper.clamp(0.0, 1.0)) * 0.5; // mean radius over taper
-                std::f32::consts::PI * rm * rm * l
-            }
-            ShapeKind::Sphere => 4.0 / 3.0 * std::f32::consts::PI * r * r * r,
-            ShapeKind::Plate => l * (2.0 * r) * (PLATE_THICK * r), // thin slab
-        }
-    }
-}
-
 const PLATE_THICK: f32 = 0.18; // plate Z-thickness as a fraction of its half-width (visual + volume)
 
 // One attachment in the graph: child `to` hangs off parent `from`. recursion + reflection live here.
@@ -211,6 +195,7 @@ fn expand(g: &BodyGraph, node: usize, world: Transform, scale: f32, chirality: f
 // Geometry-derived stats (the honest costs/benefits). Computed ONCE at spawn/mutation, cached as a component.
 // All approximate (this is a stylized sim, not CFD): good enough to make shape pay rent.
 #[derive(Clone, Copy, Debug)]
+#[allow(dead_code)] // plan_area/limb_count/limb_length: computed stats reserved for the P2 gym + audits
 pub struct Morphometrics {
     pub mass: f32,          // Σ part volume (basal + move cost, energy store)
     pub part_count: u32,    // tissue upkeep

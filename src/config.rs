@@ -480,10 +480,8 @@ pub const ARMOR_BASAL: f32 = 0.5; // energy/sec basal at full armor
 // venom: toxic flesh deters predators -> predator eating venomous prey gains far less (sickening kill).
 pub const VENOM_DETER: f32 = 0.9;   // fraction of predation gain removed at full prey venom
 pub const VENOM_UPKEEP: f32 = 0.3;  // energy/sec basal at full venom (making toxins costs)
-// limbs: more legs = land traction (small ground-speed bonus) but more move cost per limb. Gene maps to
-// rendered leg COUNT of LIMB_MIN..LIMB_MIN+LIMB_SPAN (Phase 4 visuals).
-pub const LIMB_MIN: f32 = 2.0;       // legs at limbs gene 0
-pub const LIMB_SPAN: f32 = 6.0;      // legs added across gene range (-> 8 legs at gene 1)
+// limbs: more legs = land traction (small ground-speed bonus) but more move cost per limb. (Rendered leg
+// COUNT now comes from the generative body graph, morph.rs, not a scalar gene.)
 pub const LIMB_TRACTION: f32 = 0.25; // max land-speed bonus fraction at full limbs
 pub const LIMB_MOVE_COST: f32 = 0.5; // move-cost mult add at full limbs (more legs to drive)
 // climb (arboreal): nimble -> evades predators; reaches fruit trees w/o tall body; arboreal build wastes
