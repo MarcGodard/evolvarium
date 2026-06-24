@@ -480,10 +480,12 @@ pub struct BodyMeshCache {
 impl BodyMeshCache {
     // Generative mesh for this genome's body (built once per unique graph). center_y vertically centers the
     // body on the entity origin (so feet hang below + head above, like the old centered capsule).
-    fn get_or_build(&mut self, g: &Genome, meshes: &mut Assets<Mesh>) -> Handle<Mesh> {
+    // Returns (mesh, built): built=true means a cache MISS just ran the SDF mesher (the expensive path).
+    // Caller budgets misses per frame so a fresh world's ~140 unique bodies stream in instead of stalling.
+    fn get_or_build(&mut self, g: &Genome, meshes: &mut Assets<Mesh>) -> (Handle<Mesh>, bool) {
         let key = crate::morph::body_hash(&g.body);
         if let Some(h) = self.map.get(&key) {
-            return h.clone();
+            return (h.clone(), false);
         }
         let pheno = crate::morph::develop(&g.body);
         let m = crate::morph::Morphometrics::from_phenotype(&pheno);
@@ -496,7 +498,7 @@ impl BodyMeshCache {
                 self.map.remove(&old);
             }
         }
-        h
+        (h, true)
     }
 }
 
@@ -557,16 +559,28 @@ fn add_creature_visuals(
     mut q: Query<(Entity, &Genome, &mut Transform), (With<Creature>, Without<Mesh3d>)>,
 ) {
     let Some(parts) = parts else { return };
+    let mut built = 0; // SDF mesh builds (cache misses) this frame; cap so a fresh world streams in vs stalls
     for (e, g, mut tf) in &mut q {
         // GENERATIVE BODY: one merged mesh grown from the body-graph (morph.rs). Genome hue rides the
         // entity material base_color; the mesh's per-part vertex colors shade it (limbs darker, belly lighter).
         let (color, _) = creature_look(g);
         tf.scale = Vec3::splat(body_scale(g));
-        let body_mesh = cache.get_or_build(g, &mut meshes);
+        let (body_mesh, was_built) = cache.get_or_build(g, &mut meshes);
         commands.entity(e).insert((Mesh3d(body_mesh), MeshMaterial3d(materials.add(color))));
         spawn_eyes(&mut commands, e, g, &parts.eye, &mut materials);
+        if was_built {
+            built += 1;
+            if built >= MAX_BODY_BUILDS_PER_FRAME {
+                break; // rest stay un-dressed (Without<Mesh3d>) -> picked up next frame
+            }
+        }
     }
 }
+
+// Per-frame cap on fresh SDF body meshes. A new world has ~140 unique bodies; building all on frame 1 is the
+// load stall. Cap -> window opens immediately, creatures stream in over a handful of frames (juvenile grow-in
+// masks the pop). Cache HITS (clones) are free + not counted, so steady-state births are unaffected.
+const MAX_BODY_BUILDS_PER_FRAME: usize = 6;
 
 // Spawn the emissive eye spheres as children of `parent`, anchored to the head surface (morph::eye_anchor),
 // NOT the whole-body bbox -> no floating ahead of a tapering body.

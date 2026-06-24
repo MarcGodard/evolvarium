@@ -689,47 +689,58 @@ pub fn build_body_mesh(p: &Phenotype, center_y: f32) -> Mesh {
     }
     let at = |i: usize, j: usize, l: usize| fld[i + j * stride_y + l * stride_z];
 
-    // gradient (central diff) -> outward normal (SDF rises outward)
-    let geps = (cell * 0.5).max(0.01);
-    let grad = |p: Vec3| -> Vec3 {
-        let dx = body_field(&parts, p + Vec3::X * geps, k) - body_field(&parts, p - Vec3::X * geps, k);
-        let dy = body_field(&parts, p + Vec3::Y * geps, k) - body_field(&parts, p - Vec3::Y * geps, k);
-        let dz = body_field(&parts, p + Vec3::Z * geps, k) - body_field(&parts, p - Vec3::Z * geps, k);
-        Vec3::new(dx, dy, dz).normalize_or_zero()
-    };
+    // Corner normals = normalized field gradient, central-differenced from the ALREADY-sampled grid (no extra
+    // body_field calls; this was the load hot spot). Vertex normals interpolate these along the crossing edge.
+    let mut grd = vec![Vec3::ZERO; fld.len()];
+    for l in 0..=nz {
+        for j in 0..=ny {
+            for i in 0..=nx {
+                let dx = at((i + 1).min(nx), j, l) - at(i.saturating_sub(1), j, l);
+                let dy = at(i, (j + 1).min(ny), l) - at(i, j.saturating_sub(1), l);
+                let dz = at(i, j, (l + 1).min(nz)) - at(i, j, l.saturating_sub(1));
+                grd[i + j * stride_y + l * stride_z] = Vec3::new(dx, dy, dz).normalize_or_zero();
+            }
+        }
+    }
+    let gn = |i: usize, j: usize, l: usize| grd[i + j * stride_y + l * stride_z];
 
     // cube -> 6 tetrahedra along the 0-6 diagonal. Corner offsets (cube local).
     const CORNER: [(usize, usize, usize); 8] =
         [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0), (0, 0, 1), (1, 0, 1), (1, 1, 1), (0, 1, 1)];
     const TETS: [[usize; 4]; 6] = [[0, 5, 1, 6], [0, 1, 2, 6], [0, 2, 3, 6], [0, 3, 7, 6], [0, 7, 4, 6], [0, 4, 5, 6]];
 
-    let mut emit = |a: Vec3, b: Vec3, c: Vec3| {
-        let gn = (b - a).cross(c - a); // geometric normal
-        let avg = grad(a) + grad(b) + grad(c); // desired outward
-        let (p0, p1, p2) = if gn.dot(avg) < 0.0 { (a, c, b) } else { (a, b, c) }; // fix winding
-        for v in [p0, p1, p2] {
-            let n = grad(v);
-            let mut vv = v;
-            vv.y -= center_y;
+    // emit takes (pos, normal) per vertex. Winding fixed against the interpolated normals (outward).
+    let mut emit = |a: (Vec3, Vec3), b: (Vec3, Vec3), c: (Vec3, Vec3)| {
+        let geom = (b.0 - a.0).cross(c.0 - a.0);
+        let (v0, v1, v2) = if geom.dot(a.1 + b.1 + c.1) < 0.0 { (a, c, b) } else { (a, b, c) };
+        for (mut p, n) in [v0, v1, v2] {
+            p.y -= center_y;
             idx.push(pos.len() as u32);
-            pos.push([vv.x, vv.y, vv.z]);
+            pos.push([p.x, p.y, p.z]);
             nrm.push([n.x, n.y, n.z]);
-            col.push(nearest_color(&parts, v));
+            col.push(nearest_color(&parts, p + Vec3::Y * center_y)); // color in pre-shift body space
         }
     };
 
     for l in 0..nz {
         for j in 0..ny {
             for i in 0..nx {
-                // gather 8 cube corners (pos + field val)
+                // gather 8 cube corners (pos + field val + corner normal)
                 let mut cp = [Vec3::ZERO; 8];
                 let mut cv = [0.0f32; 8];
+                let mut cn = [Vec3::ZERO; 8];
                 for (n, &(di, dj, dl)) in CORNER.iter().enumerate() {
                     cp[n] = gpos(i + di, j + dj, l + dl);
                     cv[n] = at(i + di, j + dj, l + dl);
+                    cn[n] = gn(i + di, j + dj, l + dl);
                 }
                 for t in &TETS {
-                    march_tet([cp[t[0]], cp[t[1]], cp[t[2]], cp[t[3]]], [cv[t[0]], cv[t[1]], cv[t[2]], cv[t[3]]], &mut emit);
+                    march_tet(
+                        [cp[t[0]], cp[t[1]], cp[t[2]], cp[t[3]]],
+                        [cv[t[0]], cv[t[1]], cv[t[2]], cv[t[3]]],
+                        [cn[t[0]], cn[t[1]], cn[t[2]], cn[t[3]]],
+                        &mut emit,
+                    );
                 }
             }
         }
@@ -745,10 +756,10 @@ pub fn build_body_mesh(p: &Phenotype, center_y: f32) -> Mesh {
 
 // Marching tetrahedra: split inside (val<0) from outside, emit the crossing polygon. 1-or-3 inside -> 1 tri;
 // 2 inside -> quad (2 tris). Crossing point = linear iso-interp along the edge.
-fn march_tet(p: [Vec3; 4], v: [f32; 4], emit: &mut impl FnMut(Vec3, Vec3, Vec3)) {
-    let cross = |a: usize, b: usize| -> Vec3 {
+fn march_tet(p: [Vec3; 4], v: [f32; 4], n: [Vec3; 4], emit: &mut impl FnMut((Vec3, Vec3), (Vec3, Vec3), (Vec3, Vec3))) {
+    let cross = |a: usize, b: usize| -> (Vec3, Vec3) {
         let t = v[a] / (v[a] - v[b]); // v[a],v[b] opposite signs -> t in (0,1)
-        p[a] + (p[b] - p[a]) * t
+        (p[a] + (p[b] - p[a]) * t, (n[a] + (n[b] - n[a]) * t).normalize_or_zero())
     };
     let ins: Vec<usize> = (0..4).filter(|&n| v[n] < 0.0).collect();
     let out: Vec<usize> = (0..4).filter(|&n| v[n] >= 0.0).collect();
