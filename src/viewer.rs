@@ -8,7 +8,8 @@
 
 use crate::components::Creature;
 use crate::genome::Genome;
-use crate::viz::{EyeVis, Selected};
+use crate::morph::ShapeKind;
+use crate::viz::{BodyMeshCache, CreatureParts, EyeVis, Selected};
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
 use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts, EguiPrimaryContextPass};
@@ -82,79 +83,169 @@ fn hold_pause(state: Option<Res<ViewerState>>, mut vtime: ResMut<Time<Virtual>>)
     }
 }
 
-// egui panel: a 0..1 slider per scalar trait gene. Editing writes back only on actual change (Slider.changed)
-// -> fires Changed<Genome> just for that edit (drives restyle + rebuild_on_edit). Skips net/plast/body/
-// sensors/uptake (not single-scalar; body-graph genes aren't hand-editable here).
+// Full-height LEFT side panel: every editable gene, grouped + scrollable. Writes back only on actual change
+// (Slider/Checkbox .changed()) -> fires Changed<Genome> just for that edit (drives restyle + rebuild_on_edit).
+// Covers all scalar trait genes, the 10 uptake nutrients, the vision sensors, and the body-graph shape
+// (per-node primitive/size, per-edge placement/recursion). Skips only the NN weights (net/plast).
 fn viewer_panel(mut contexts: EguiContexts, state: Option<Res<ViewerState>>, mut q: Query<&mut Genome, With<Creature>>) {
     let Some(state) = state else { return };
     let Ok(ctx) = contexts.ctx_mut() else { return };
     let Ok(mut g) = q.get_mut(state.creature) else { return };
+    let g = &mut *g; // edit via this &mut; each `sl!`/checkbox writes only when the value moved (keeps Changed precise)
+    let pi = std::f32::consts::PI;
 
-    macro_rules! gene {
-        ($ui:expr, $field:ident) => {{
-            let mut v = g.$field;
-            if $ui.add(egui::Slider::new(&mut v, 0.0..=1.0).text(stringify!($field))).changed() {
-                g.$field = v; // DerefMut -> Changed<Genome> only when the value actually moved
+    // slider over any f32 lvalue ($place): read a copy, write back ONLY when egui reports the value changed.
+    macro_rules! sl {
+        ($ui:expr, $label:expr, $lo:expr, $hi:expr, $place:expr) => {{
+            let mut v = $place;
+            if $ui.add(egui::Slider::new(&mut v, $lo..=$hi).text($label)).changed() {
+                $place = v;
             }
         }};
     }
 
-    egui::Window::new("Genome").default_width(260.0).show(ctx, |ui| {
-        if state.released {
-            ui.label("released into sim (editing still rebuilds this creature)");
-        } else {
-            ui.label("T = release into sim");
-        }
+    egui::SidePanel::left("genome_panel").resizable(true).default_width(340.0).width_range(240.0..=640.0).show(ctx, |ui| {
+        ui.heading("Genome");
+        ui.label(if state.released { "released into sim (edits still rebuild this creature)" } else { "T = release into sim" });
         ui.separator();
-        ui.label("body / size");
-        gene!(ui, size);
-        gene!(ui, height);
-        gene!(ui, head);
-        gene!(ui, eyes);
-        gene!(ui, limbs);
-        ui.separator();
-        ui.label("locomotion / niche");
-        gene!(ui, swim);
-        gene!(ui, flight);
-        gene!(ui, climb);
-        gene!(ui, alpine);
-        ui.separator();
-        ui.label("defense / diet");
-        gene!(ui, armor);
-        gene!(ui, pelt);
-        gene!(ui, venom);
-        gene!(ui, bite);
-        gene!(ui, carnivory);
-        ui.separator();
-        ui.label("look (cosmetic)");
-        gene!(ui, skin_hue);
-        gene!(ui, skin_sat);
-        gene!(ui, pattern);
-        gene!(ui, elongate);
-        gene!(ui, tail);
-        gene!(ui, fin);
-        gene!(ui, beak);
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            egui::CollapsingHeader::new("Body & size").default_open(true).show(ui, |ui| {
+                sl!(ui, "size", 0.0, 1.0, g.size);
+                sl!(ui, "height", 0.0, 1.0, g.height);
+                sl!(ui, "head", 0.0, 1.0, g.head);
+                sl!(ui, "eyes", 0.0, 1.0, g.eyes);
+                sl!(ui, "limbs", 0.0, 1.0, g.limbs);
+            });
+            egui::CollapsingHeader::new("Locomotion & niche").show(ui, |ui| {
+                sl!(ui, "swim", 0.0, 1.0, g.swim);
+                sl!(ui, "flight", 0.0, 1.0, g.flight);
+                sl!(ui, "climb", 0.0, 1.0, g.climb);
+                sl!(ui, "alpine", 0.0, 1.0, g.alpine);
+                sl!(ui, "light_pref", 0.0, 1.0, g.light_pref);
+                sl!(ui, "temp_pref", 0.0, 1.0, g.temp_pref);
+            });
+            egui::CollapsingHeader::new("Defense").show(ui, |ui| {
+                sl!(ui, "armor", 0.0, 1.0, g.armor);
+                sl!(ui, "pelt", 0.0, 1.0, g.pelt);
+                sl!(ui, "venom", 0.0, 1.0, g.venom);
+            });
+            egui::CollapsingHeader::new("Diet & metabolism").show(ui, |ui| {
+                sl!(ui, "bite", 0.0, 1.0, g.bite);
+                sl!(ui, "carnivory", 0.0, 1.0, g.carnivory);
+                sl!(ui, "detox", 0.0, 1.0, g.detox);
+                sl!(ui, "rigidity", 0.0, 1.0, g.rigidity);
+                sl!(ui, "metab", 0.0, 1.0, g.metab);
+                sl!(ui, "adiposity", 0.0, 1.0, g.adiposity);
+                sl!(ui, "longevity", 0.0, 1.0, g.longevity);
+                sl!(ui, "parental", 0.0, 1.0, g.parental);
+            });
+            egui::CollapsingHeader::new("Behavior & senses").show(ui, |ui| {
+                sl!(ui, "social", 0.0, 1.0, g.social);
+                sl!(ui, "magneto", 0.0, 1.0, g.magneto);
+            });
+            egui::CollapsingHeader::new("Look (cosmetic)").show(ui, |ui| {
+                sl!(ui, "skin_hue", 0.0, 1.0, g.skin_hue);
+                sl!(ui, "skin_sat", 0.0, 1.0, g.skin_sat);
+                sl!(ui, "pattern", 0.0, 1.0, g.pattern);
+                sl!(ui, "elongate", 0.0, 1.0, g.elongate);
+                sl!(ui, "tail", 0.0, 1.0, g.tail);
+                sl!(ui, "fin", 0.0, 1.0, g.fin);
+                sl!(ui, "beak", 0.0, 1.0, g.beak);
+            });
+            egui::CollapsingHeader::new("Uptake (nutrient affinities)").show(ui, |ui| {
+                for i in 0..crate::genome::NUTRIENTS {
+                    sl!(ui, format!("nutrient {i}"), 0.0, 2.0, g.uptake[i]);
+                }
+            });
+            egui::CollapsingHeader::new("Sensors (vision)").show(ui, |ui| {
+                let mut remove = None;
+                for i in 0..g.sensors.len() {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("#{i}"));
+                        if g.sensors.len() > 1 && ui.small_button("remove").clicked() {
+                            remove = Some(i);
+                        }
+                    });
+                    sl!(ui, "angle", -pi, pi, g.sensors[i].angle);
+                    sl!(ui, "range", 0.0, 40.0, g.sensors[i].range);
+                }
+                if let Some(i) = remove {
+                    g.sensors.remove(i);
+                }
+                if ui.button("+ add sensor").clicked() {
+                    g.sensors.push(crate::genome::Sensor { angle: 0.0, range: 15.0 });
+                }
+            });
+            egui::CollapsingHeader::new("Body graph (shape)").show(ui, |ui| {
+                ui.label("nodes (body parts)");
+                for i in 0..g.body.nodes.len() {
+                    ui.separator();
+                    let mut shape = g.body.nodes[i].shape;
+                    egui::ComboBox::from_id_salt(("node_shape", i)).selected_text(format!("node {i}: {shape:?}")).show_ui(ui, |ui| {
+                        ui.selectable_value(&mut shape, ShapeKind::Segment, "Segment");
+                        ui.selectable_value(&mut shape, ShapeKind::Sphere, "Sphere");
+                        ui.selectable_value(&mut shape, ShapeKind::Plate, "Plate");
+                    });
+                    if shape != g.body.nodes[i].shape {
+                        g.body.nodes[i].shape = shape;
+                    }
+                    sl!(ui, "length", 0.15, 3.0, g.body.nodes[i].length);
+                    sl!(ui, "radius", 0.05, 1.2, g.body.nodes[i].radius);
+                    sl!(ui, "taper", 0.05, 1.0, g.body.nodes[i].taper);
+                    sl!(ui, "shade r", 0.0, 1.0, g.body.nodes[i].r);
+                    sl!(ui, "shade g", 0.0, 1.0, g.body.nodes[i].g);
+                    sl!(ui, "shade b", 0.0, 1.0, g.body.nodes[i].b);
+                }
+                ui.separator();
+                ui.label("edges (how parts attach)");
+                for i in 0..g.body.edges.len() {
+                    ui.separator();
+                    ui.label(format!("edge {i}: node {} -> node {}", g.body.edges[i].from, g.body.edges[i].to));
+                    sl!(ui, "along (up parent)", 0.0, 1.0, g.body.edges[i].along);
+                    sl!(ui, "around (side)", -pi, pi, g.body.edges[i].around);
+                    sl!(ui, "pitch (tilt)", -1.5, 1.5, g.body.edges[i].pitch);
+                    sl!(ui, "roll", -pi, pi, g.body.edges[i].roll);
+                    sl!(ui, "scale (per recursion)", 0.2, 1.0, g.body.edges[i].scale);
+                    let mut refl = g.body.edges[i].reflect;
+                    if ui.checkbox(&mut refl, "reflect (mirror to other side)").changed() {
+                        g.body.edges[i].reflect = refl;
+                    }
+                    let mut rec = g.body.edges[i].recurse as i32;
+                    if ui.add(egui::Slider::new(&mut rec, 0..=5).text("recurse (chain length)")).changed() {
+                        g.body.edges[i].recurse = rec as u8;
+                    }
+                }
+            });
+        });
     });
 }
 
-// On a gene edit: despawn the inspected creature's eye children + drop its Mesh3d so viz::add_creature_visuals
-// re-dresses it next frame (new eye count/anchor/scale). Body mesh is cached by body_hash (scalar genes don't
-// touch body), so this is cheap; color/scale refresh comes free from viz::restyle_creatures. Scoped to the
-// inspected entity -> editing after release never strips eyes off the rest of the population.
+// On a gene edit, rebuild the inspected creature IN PLACE (no invisible frame -> no flash/"reset"): swap the
+// body Mesh3d (BodyMeshCache keys on body_hash, so body-graph edits build a fresh mesh; scalar edits reuse
+// the cached one) and respawn the eye children from the current genome. Color/scale refresh comes free from
+// viz::restyle_creatures (also Changed<Genome>). With<Mesh3d> filter skips the spawn frame (initial dress is
+// add_creature_visuals' job -> no double eyes). Scoped to the inspected entity, so editing after release
+// never touches the rest of the population.
 fn rebuild_on_edit(
     mut commands: Commands,
     state: Option<Res<ViewerState>>,
-    changed: Query<&Children, (With<Creature>, Changed<Genome>)>,
+    parts: Option<Res<CreatureParts>>,
+    mut cache: ResMut<BodyMeshCache>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    changed: Query<(&Genome, &Children), (With<Creature>, With<Mesh3d>, Changed<Genome>)>,
     eyes: Query<(), With<EyeVis>>,
 ) {
-    let Some(state) = state else { return };
-    let Ok(children) = changed.get(state.creature) else { return };
+    let (Some(state), Some(parts)) = (state, parts) else { return };
+    let Ok((g, children)) = changed.get(state.creature) else { return };
+    let mesh = cache.get_or_build(g, &mut meshes);
+    commands.entity(state.creature).insert(Mesh3d(mesh)); // overwrite in place
     for c in children.iter() {
         if eyes.get(c).is_ok() {
             commands.entity(c).despawn();
         }
     }
-    commands.entity(state.creature).remove::<Mesh3d>();
+    crate::viz::spawn_eyes(&mut commands, state.creature, g, &parts.eye, &mut materials);
 }
 
 // T: seed a full world (plants + trees + creatures, habitat-matched) around the inspected creature, clone its
