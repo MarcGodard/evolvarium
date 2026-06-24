@@ -108,7 +108,7 @@ fn viewer_panel(mut contexts: EguiContexts, state: Option<Res<ViewerState>>, mut
     let Ok(ctx) = contexts.ctx_mut() else { return };
     over_ui.0 = ctx.is_pointer_over_area() || ctx.wants_pointer_input(); // gate viewer_camera so UI scroll/drag stays in the panel
     let Ok(mut g) = q.get_mut(state.creature) else { return };
-    let g = &mut *g; // edit via this &mut; each `sl!`/checkbox writes only when the value moved (keeps Changed precise)
+    let g = &mut g; // Mut<Genome>; macro/checkbox write through it ONLY on real change -> Changed<Genome> stays precise (no per-frame rebuild)
     let pi = std::f32::consts::PI;
 
     // slider over any f32 lvalue ($place): read a copy, write back ONLY when egui reports the value changed.
@@ -127,12 +127,18 @@ fn viewer_panel(mut contexts: EguiContexts, state: Option<Res<ViewerState>>, mut
         ui.label(if state.released { "released into sim (edits still rebuild this creature)" } else { "T = release into sim" });
         ui.separator();
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            egui::CollapsingHeader::new("Body & size").default_open(true).show(ui, |ui| {
-                sl!(ui, "size", 0.0, 1.0, g.size);
-                sl!(ui, "height", 0.0, 1.0, g.height);
-                sl!(ui, "head", 0.0, 1.0, g.head);
-                sl!(ui, "eyes", 0.0, 1.0, g.eyes);
-                sl!(ui, "limbs", 0.0, 1.0, g.limbs);
+            // SHAPE comes from the generative body graph, not these scalars -> reshape via "Body graph (shape)".
+            egui::CollapsingHeader::new("Appearance").default_open(true).show(ui, |ui| {
+                sl!(ui, "size (whole-body scale)", 0.0, 1.0, g.size);
+                sl!(ui, "eyes (count 1..6)", 0.0, 1.0, g.eyes);
+                sl!(ui, "head (eye size)", 0.0, 1.0, g.head);
+                sl!(ui, "skin_hue", 0.0, 1.0, g.skin_hue);
+                sl!(ui, "skin_sat", 0.0, 1.0, g.skin_sat);
+                ui.label("↓ to reshape the BODY, use 'Body graph (shape)' below");
+            });
+            egui::CollapsingHeader::new("Traits (stats, no mesh change)").show(ui, |ui| {
+                sl!(ui, "height (reach)", 0.0, 1.0, g.height);
+                sl!(ui, "limbs (leg count)", 0.0, 1.0, g.limbs);
             });
             egui::CollapsingHeader::new("Locomotion & niche").show(ui, |ui| {
                 sl!(ui, "swim", 0.0, 1.0, g.swim);
@@ -161,9 +167,7 @@ fn viewer_panel(mut contexts: EguiContexts, state: Option<Res<ViewerState>>, mut
                 sl!(ui, "social", 0.0, 1.0, g.social);
                 sl!(ui, "magneto", 0.0, 1.0, g.magneto);
             });
-            egui::CollapsingHeader::new("Look (cosmetic)").show(ui, |ui| {
-                sl!(ui, "skin_hue", 0.0, 1.0, g.skin_hue);
-                sl!(ui, "skin_sat", 0.0, 1.0, g.skin_sat);
+            egui::CollapsingHeader::new("Look (cosmetic, legacy)").show(ui, |ui| {
                 sl!(ui, "pattern", 0.0, 1.0, g.pattern);
                 sl!(ui, "elongate", 0.0, 1.0, g.elongate);
                 sl!(ui, "tail", 0.0, 1.0, g.tail);
