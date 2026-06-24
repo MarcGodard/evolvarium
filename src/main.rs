@@ -362,6 +362,25 @@ fn setup_scene(
         bevy::light::NotShadowCaster,
         viz::Ocean,
     ));
+    // atmosphere rim: thin shell just above the surface, additive sky-blue, FRONT-culled (only far-side back
+    // faces drawn). The opaque globe writes depth first, so the far shell is occluded EXCEPT the thin ring
+    // peeking past the planet silhouette -> a soft blue limb halo, no tint over the disc. Orbit-view only
+    // (viz::atmosphere_visibility); from the surface you are inside it. Day-lit crescent set per-frame.
+    commands.spawn((
+        Mesh3d(meshes.add(Sphere::new(sphere::PLANET_R * 1.055).mesh().ico(5).unwrap())),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::srgb(0.35, 0.55, 1.0),
+            emissive: LinearRgba::rgb(0.35, 0.55, 1.0),
+            unlit: true,
+            alpha_mode: AlphaMode::Add,
+            cull_mode: Some(bevy::render::render_resource::Face::Front),
+            ..default()
+        })),
+        Transform::IDENTITY,
+        bevy::light::NotShadowCaster,
+        Visibility::Hidden, // shown only in orbit (atmosphere_visibility)
+        viz::Atmosphere,
+    ));
     // sun (directional light; direction set per-frame by day_night_lighting). shadows_enabled toggled by
     // camera::update_shadow_mode: OFF in orbit (shadow-range boundary showed as "eclipse" disc when zoomed),
     // ON in walk (eye-level horizon close so range covers whole view -> real shadows, no disc). Cascade tuned

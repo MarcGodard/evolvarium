@@ -43,6 +43,10 @@ pub struct Underwater(pub bool);
 #[derive(Component)]
 pub struct Ocean;
 
+// Atmosphere rim shell (additive blue limb halo). Orbit-view only; gated by atmosphere_visibility.
+#[derive(Component)]
+pub struct Atmosphere;
+
 // A flapping bird wing (child of a flier). flap_wings rotates it about its root (the shoulder) on the
 // forward (Z) axis. `side` (+1 right / -1 left) mirrors lift so both tips rise together; `freq` set from
 // body size (small bird = fast flutter, big bird = slow beats); `rest` = base transform (rotation reapplied
@@ -130,7 +134,7 @@ impl Plugin for VizPlugin {
                     toggle_legend,
                     (god_disturbances, crate::sim::save_world_key, crate::sim::save_on_window_close),
                     draw_selection,
-                    (minimap_sync_cam, minimap_visibility, toggle_hud, hud_visibility, planet_sky_visibility, minimap_input, minimap_rebuild, minimap_dynamic),
+                    (minimap_sync_cam, minimap_visibility, toggle_hud, hud_visibility, planet_sky_visibility, atmosphere_visibility, minimap_input, minimap_rebuild, minimap_dynamic),
                     (phylogeny_classify, toggle_phylo, update_phylo_panel),
                 ),
             );
@@ -338,6 +342,20 @@ fn planet_sky_visibility(
     mut q: Query<&mut Visibility, Or<(With<SkyStars>, With<SkyPlanet>)>>,
 ) {
     let want = if *mode == crate::camera::CameraMode::Orrery { Visibility::Hidden } else { Visibility::Inherited };
+    for mut v in &mut q {
+        if *v != want {
+            *v = want;
+        }
+    }
+}
+
+// Atmosphere rim glows only from space (orbit): the surface camera sits inside the shell, and in the orrery
+// the planet is a distant speck. Show in Orbit, hide otherwise.
+fn atmosphere_visibility(
+    mode: Res<crate::camera::CameraMode>,
+    mut q: Query<&mut Visibility, With<Atmosphere>>,
+) {
+    let want = if *mode == crate::camera::CameraMode::Orbit { Visibility::Inherited } else { Visibility::Hidden };
     for mut v in &mut q {
         if *v != want {
             *v = want;
