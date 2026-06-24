@@ -521,6 +521,28 @@ pub fn merge_creatures_into_snapshot(result_path: &str, snap_path: &str, cap: us
     println!("merge-creatures: +{} from {} -> {} now has {} creatures", added, result_path, snap_path, snap.creatures.len());
 }
 
+// CLI --merge-snap: append one creature SNAPSHOT's creatures into another (gym cohort -> growing seed). The
+// gym (--gym-evolve --save) writes a creatures-only Snapshot; the creature tune workflow's synthesize stage
+// folds each niche cohort into the seed sequentially (no race). Keeps newest on overflow.
+pub fn merge_snapshot_creatures(src_path: &str, dst_path: &str, cap: usize) {
+    let src = match crate::persist::load_snapshot(src_path) {
+        Some(s) => s,
+        None => {
+            println!("merge-snap: source load failed ({})", src_path);
+            return;
+        }
+    };
+    let mut dst = crate::persist::load_snapshot(dst_path).unwrap_or(crate::persist::Snapshot { generation: 0, creatures: Vec::new(), plants: Vec::new(), world: None });
+    let added = src.creatures.len();
+    dst.creatures.extend(src.creatures);
+    if dst.creatures.len() > cap {
+        let excess = dst.creatures.len() - cap;
+        dst.creatures.drain(0..excess);
+    }
+    crate::persist::save_snapshot(dst_path, &dst);
+    println!("merge-snap: +{} from {} -> {} now has {} creatures", added, src_path, dst_path, dst.creatures.len());
+}
+
 // Gene-agnostic per-field numeric means over genome set (serde reflection -> covers any new gene).
 // Generic over genome type: serves both PlantGenome and Genome. Top-level f64 fields only; nested
 // arrays/objects (net/sensors/uptake) skipped, which is exactly the scalar genes we want.

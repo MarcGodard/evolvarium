@@ -161,6 +161,14 @@ fn main() {
         scenario::merge_creatures_into_snapshot(&rp, &snap_out, cap);
         return;
     }
+    // --merge-snap=cohort.json --snap=seed.json: fold one gym cohort snapshot's creatures into a growing
+    // creature seed (capped). Creature tune workflow synthesize stage calls this per niche cohort.
+    if let Some(src) = val(&args, "--merge-snap=").map(String::from) {
+        let snap_out = val(&args, "--snap=").map(String::from).unwrap_or_else(|| "evolved-morph.json".into());
+        let cap = parse_or(&args, "--cap=", 96usize);
+        scenario::merge_snapshot_creatures(&src, &snap_out, cap);
+        return;
+    }
     // --gym: P2 physics gym (avian). Drop one developed body into an isolated arena, step headless, report,
     // exit. --gym-seed picks the creature genome (default --seed); --gym-steps sets run length (120Hz).
     if flag(&args, "--gym") {

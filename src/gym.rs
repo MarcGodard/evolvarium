@@ -199,13 +199,15 @@ pub fn evolve_gym(pop_n: usize, gens: u32, steps: u32, seed: u64, save: Option<S
         pop = next;
     }
     if let Some(path) = save {
-        match serde_json::to_string(&pop[0]) {
-            Ok(j) => {
-                let _ = std::fs::write(&path, j);
-                println!("gym-evolve: saved best mover -> {path}");
-            }
-            Err(e) => println!("gym-evolve: save failed: {e}"),
-        }
+        // export the top-K movers as a planet-loadable creatures-only snapshot (world None -> legacy load
+        // scatters them by niche, regenerates plants). Re-score final pop to rank.
+        let mut scored: Vec<(f32, usize)> = pop.iter().enumerate().map(|(i, g)| (fitness(&eval(&g.body, steps)), i)).collect();
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        let k = pop_n.min(16);
+        let creatures: Vec<Genome> = scored.iter().take(k).map(|(_, i)| pop[*i].clone()).collect();
+        let snap = crate::persist::Snapshot { generation: 0, creatures, plants: Vec::new(), world: None };
+        crate::persist::save_snapshot(&path, &snap);
+        println!("gym-evolve: saved top {k} movers -> {path}");
     }
 }
 
