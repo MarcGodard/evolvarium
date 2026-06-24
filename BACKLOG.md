@@ -6,6 +6,27 @@ live in `config.rs`; the live conversion plan is `SPHERE-PLAN.md`.
 
 ## Done
 
+### Solar system + sky: real Tychos model (2026-06-24)
+Full design `~/Documents/Github/clients/evolvarium/15-solar-system-tychos.md`. Data copied from
+pholmq/TSN (GPL-2.0) @ commit 49fd49c (pinned in `orrery.rs` + `stars.rs` comments).
+- [x] **`orrery.rs`** — byte-exact TSN body table (celestial-settings.json: sun, planets, moons, Pluto,
+  Halley, Eros via nested deferent/epicycle chain) + geocentric sky dirs. Pure, unit-tested.
+- [x] **Sirius-binary precession** — Earth's PVP orbit made elliptical (period 24000 yr, e=0.0404, apsides
+  aimed at Sirius). One ellipse reconciles: ~26000-yr *apparent* precession (apoapsis), 360-day mean year
+  breathing ~332..390 d with Sirius distance, whole-system rate k=omega/n.
+- [x] **Earth calendar + real sun/moon** (`sphere.rs`): `t_years`, `ecliptic_to_sky`, `fmt_date`/
+  `fmt_age_days`; `sun_dir`/`moon_dir` delegate to the model. Seasons now a real ~360-day year (sub-solar
+  latitude drift); climate band + pop preserved. Wet/dry season phase-locked to the year.
+- [x] **Orrery view** (`orrery_view.rs`, `camera.rs`): TAB cycles Orbit -> Orrery -> Walk. Renders all TSN
+  bodies at model positions; own lively clock; `--cap-orrery` for offline shots. Minimap orbit-only.
+- [x] **Real starfield** (`stars.rs`): TSN Bright Star Catalog (8227 stars, BSC.json) colored by temperature
+  + constellation lines (off by default, L toggles). One combined mesh. Used by BOTH the orrery and the
+  planet sky (orbit + walk) — stars wheel with the day; naked-eye planets (`SkyPlanet`) drift along the zodiac.
+- [x] **Eclipses**: sun disc sized to the moon's angular size, so the moon transits the sun; solar eclipse
+  dims the sun toward twilight, lunar eclipse reddens the moon (blood moon). Analytic, tested geometry.
+- [ ] **Open follow-ups**: orbit/deferent trace lines in the orrery; ecliptic grid + zodiac + body labels;
+  hide planet WORLD HUD in orrery mode; HUD calendar date + Sirius/year readout + age-in-days surface.
+
 ### The planet (spherical world)
 - [x] Spherical sim: great-circle movement, localized homeland start that spreads, lon/lat spatial grids,
       positional day/night, sphere terrain/ocean/temperature/moisture fields (`sphere.rs`).

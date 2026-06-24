@@ -2603,7 +2603,13 @@ fn update_world_stats(
         if g.rigidity > 0.6 { spec += 1; }
     }
     let nf = n.max(1) as f32;
-    let day = gen.tick / crate::sphere::DAY_TICKS;
+    // calendar date + Sirius-precession readout (the year breathes with Sirius distance)
+    let date = crate::sphere::fmt_date(gen.tick);
+    let ty = crate::sphere::t_years(gen.tick);
+    let yrlen = crate::orrery::year_len_days(ty).round() as i32;
+    let sdist = crate::orrery::sirius_dist01(ty); // 0 near .. 1 far
+    let prox = if sdist > 0.66 { "far" } else if sdist < 0.33 { "near" } else { "mid" };
+    let prec = ((crate::orrery::apparent_precession_years(ty) / 100.0).round() as i32) * 100;
     // sample population ~1x/sec into rolling history (~48 samples) for trend sparkline
     *frame += 1;
     if (*frame).is_multiple_of(60) {
@@ -2619,7 +2625,7 @@ fn update_world_stats(
         format!("{:.2}x", vtime.relative_speed())
     };
     t.0 = format!(
-        "WORLD\nspeed      {speed}\npop        {n}\nday        {day}\ntrend      {trend}\ntemp avg   {:.2}  (cold {cold} / warm {warm})\nlongevity  {:.2}\nmetab      {:.2}\nr/K        {:.2}\nhabitat    aquatic {aq} / flying {fly} / land {land}\nspecialists {spec}",
+        "WORLD\nspeed      {speed}\npop        {n}\ndate       {date}\nsky        yr {yrlen}d  sirius {prox}  prec ~{prec}\ntrend      {trend}\ntemp avg   {:.2}  (cold {cold} / warm {warm})\nlongevity  {:.2}\nmetab      {:.2}\nr/K        {:.2}\nhabitat    aquatic {aq} / flying {fly} / land {land}\nspecialists {spec}",
         temp / nf, lng / nf, met / nf, par / nf
     );
 }
@@ -2769,7 +2775,7 @@ fn update_stats(
             master,
             breadth,
             diet.g,
-            diet.age,
+            crate::sphere::fmt_age_days(diet.age),
         );
     } else if let Ok((pg, st, rot, tree)) = foods.get(e) {
         if let Some(tree) = tree {
