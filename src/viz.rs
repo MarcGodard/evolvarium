@@ -256,17 +256,26 @@ fn spawn_minimap(
         ));
 }
 
-// Sync the minimap globe to the main view: orbit the inspector camera around the field-globe using OrbitCam's
-// yaw/pitch (same dir formula as the main orbit cam) -> minimap shows the same face. Also keep the corner
-// viewport sized to the window.
+// Sync the minimap globe to the main view: orbit the inspector camera around the field-globe so the minimap
+// shows the face you're looking at. Orbit mode -> OrbitCam yaw/pitch. Walk mode -> center on the walker's
+// surface point (`WalkCam.dir`) so the corner globe tracks where you stand. Also keep the viewport window-sized.
 fn minimap_sync_cam(
+    mode: Res<crate::camera::CameraMode>,
     orbit: Query<&crate::camera::OrbitCam>,
+    walk: Query<&crate::camera::WalkCam>,
     windows: Query<&Window, With<PrimaryWindow>>,
     mut cam: Query<(&mut Transform, &mut Camera), With<MinimapCam>>,
 ) {
-    let Ok(o) = orbit.single() else { return };
     let Ok((mut tf, mut camera)) = cam.single_mut() else { return };
-    let dir = Vec3::new(o.pitch.cos() * o.yaw.cos(), o.pitch.sin(), o.pitch.cos() * o.yaw.sin());
+    let dir = if *mode == crate::camera::CameraMode::Walk {
+        match walk.single() {
+            Ok(w) => w.dir.normalize_or_zero(), // aim at walker's spot
+            Err(_) => return,
+        }
+    } else {
+        let Ok(o) = orbit.single() else { return };
+        Vec3::new(o.pitch.cos() * o.yaw.cos(), o.pitch.sin(), o.pitch.cos() * o.yaw.sin())
+    };
     *tf = Transform::from_translation(dir * MM_DIST).looking_at(Vec3::ZERO, Vec3::Y);
     if let Ok(w) = windows.single() {
         let sf = w.scale_factor();
@@ -283,13 +292,13 @@ fn minimap_sync_cam(
     }
 }
 
-// Minimap is an ORBIT-view aid only: deactivate its camera + hide its label in orrery/walk modes.
+// Minimap shows in Orbit + Walk (tracks the walker); hidden only in the orrery (solar-system) view.
 fn minimap_visibility(
     mode: Res<crate::camera::CameraMode>,
     mut cam: Query<&mut Camera, With<MinimapCam>>,
     mut label: Query<&mut Visibility, With<MinimapLabel>>,
 ) {
-    let show = *mode == crate::camera::CameraMode::Orbit;
+    let show = *mode != crate::camera::CameraMode::Orrery;
     if let Ok(mut c) = cam.single_mut() {
         if c.is_active != show {
             c.is_active = show;
