@@ -1914,7 +1914,9 @@ fn update_clouds(
             let shade = 1.0 - 0.30 * cov; // thick cloud = greyer
             let albedo = Vec3::new(0.97, 0.98, 1.0).lerp(Vec3::new(1.0, 0.72, 0.5), warm * 0.8) * shade;
             m.base_color = Color::srgba(albedo.x, albedo.y, albedo.z, (0.5 * puff.grow).min(0.55));
-            m.emissive = LinearRgba::rgb(0.015, 0.018, 0.03) * puff.grow; // moonlit night floor
+            // Soft grey scatter floor so the SHADED side (anti-sun lobes, limb clouds seen from orbit) reads as
+            // a cloud, not a dark floating rock. Small vs full sun on the lit side, so day clouds stay bright.
+            m.emissive = LinearRgba::rgb(0.09, 0.095, 0.11) * puff.grow;
         }
         // Start small wisp, grow to full puff; per-puff size + squash -> clouds lumpy not uniform. Smaller
         // base than the single-sphere era: the cluster mesh already spans ~2x a unit sphere.
