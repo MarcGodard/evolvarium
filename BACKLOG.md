@@ -154,8 +154,9 @@ pholmq/TSN (GPL-2.0) @ commit 49fd49c (pinned in `orrery.rs` + `stars.rs` commen
       (float like a duck) + swimmers. Refactor only, behavior identical.
 - [ ] **Balance-phase follow-ups** (visuals-first now): dive-hunting tuning, flier predator niche, flock/school
       cohesion at altitude, HUD flier count.
-- [ / ] **FLAGSHIP: generative morphology + embodied evolution (Karl-Sims part-graph). IN PROGRESS on the
-      `morphology` branch** (plan: `~/.claude/plans/cuddly-coalescing-bachman.md`). Replaces the per-scalar
+- [x] **FLAGSHIP: generative morphology + embodied evolution (Karl-Sims part-graph). P1+P2 DONE + MERGED to
+      `main`** (DEFAULT_SEED = evolved-morph.json). Only P3 deferred (below). Plan:
+      `~/.claude/plans/cuddly-coalescing-bachman.md`. Replaces the per-scalar
       "make elongate/tail/fin pay rent" idea with a far bigger move the user signed off on: an indirect
       part-graph genome that GROWS open-ended bodies (recursion + reflection + repetition) so morphology is
       discovered, not declared. Two-tier: physics + learned gaits in an isolated harness gym (P2); the live
@@ -186,8 +187,8 @@ pholmq/TSN (GPL-2.0) @ commit 49fd49c (pinned in `orrery.rs` + `stars.rs` commen
         sustains healthy (~1043); creatures render varied + complex (limbs, eyes, herding).
       - [ ] **P3** HyperNEAT-style CPPN brain scaling controller to body; optional live spotlight physics.
         (Deferred: not needed for working tuned creatures; the planet is kinematic + uses geometry stats.)
-      NOTE (user 2026-06-24): "as much if not more variety than earth", "go full out". Merge to `main` only
-      after P1 verified green + user sign-off.
+      NOTE (user 2026-06-24): "as much if not more variety than earth", "go full out". MERGED to `main`
+      (sign-off given); metaball skin then wraps the evolved bodies in one tight surface (see World/visuals).
 
 ### Magnetic field + magnetoreception (2026-06-22)
 - [x] **Tilted geomagnetic dipole** (`sphere.rs`): `MAG_TILT` + `mag_pole_dir` (magnetic north ~11.5 deg off
@@ -281,8 +282,11 @@ pholmq/TSN (GPL-2.0) @ commit 49fd49c (pinned in `orrery.rs` + `stars.rs` commen
 - [x] Layer 2 (Workflow): `tools/tune-plants.workflow.js` — one tuner agent per niche (core land, aquatic,
       trees, mixed pairs) iterates the runner toward survival+growth, synthesize merges winners into the
       library + smokes the seeded planet + logs frictions. Run on demand (opt-in).
-- [ ] Layer 1 CREATURE arm: `creature_cohort` is parsed-but-inert; wire reflex presets + creature
-      death-cause tallies + objectives (doc 14) when creatures are tackled. First job = friction F1.
+- [x] Layer 1 CREATURE arm (DONE, M4): `creature_cohort` runner live in `scenario.rs` — genome overrides +
+      named reflex priors (`reflex_brain`: approach-food / flee-predator / rest-at-night / wander), continuous
+      in-scenario breeding, death-cause tallies (`deaths_by_cause`) + survival/master/trait-drift metrics + best
+      survivors. `--merge-creatures` harvests winners into a population snapshot; `tools/tune-creatures.workflow.js`
+      fans out one tuner per niche. (OPEN follow-up: friction F1 = soften the master-expression gradient.)
 
 ### Genes (each: real trade-off, serde-default balance-neutral, verify headless before commit)
 - [ ] Reproductive r/K cluster (breed-threshold / offspring-investment / fecundity / age-at-maturity as
@@ -364,7 +368,12 @@ pholmq/TSN (GPL-2.0) @ commit 49fd49c (pinned in `orrery.rs` + `stars.rs` commen
 - [x] **Day-biased atmosphere glow (2026-06-24)**: rim shell now carries per-vertex color driven by the sun
   (`viz::update_atmosphere`) -> bright blue on the sunlit limb, dim airglow on the night side, warm sliver at
   the terminator. Replaces the uniform ring.
-- [ ] Visual polish: nicer creature meshes per niche.
+- [x] **Visual polish: nicer creature meshes (2026-06-24)**: per-niche bodies now come from the evolved
+      part-graph (morphology flagship), THEN a metaball SDF skin (`morph.rs` build_body_mesh) wraps each in
+      one tight surface — smooth-union closes gaps + fillets seams (no more blocky stacked primitives).
+      Graph-connectivity bridges keep far/thin-necked heads attached; sub-cell-thin parts floored so fins/
+      limbs don't shred; load cost hidden via grid-sampled normals + a per-frame build budget. Eyes anchor to
+      the head surface (floating-eyes fix). Verified via `--capture` across body plans.
 - [x] **Corner inspector minimap** (DONE): a real 3D globe in the top-right that ROTATES WITH the view (2nd
       camera on RenderLayers 1, corner viewport, synced to OrbitCam), colored by a chosen FIELD. 'M' cycles
       biome / heat / moisture / elevation. (UI fixed to the main camera via IsDefaultUiCamera so the HUD doesn't
