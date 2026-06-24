@@ -1945,13 +1945,13 @@ fn flamelet(k: u32) -> (f32, f32, f32, f32, f32) {
     (cx, cz, rr, hh, hash01(k * 31 + 11) * std::f32::consts::TAU)
 }
 
-// Per-flamelet tip lean at time t -> tongues wander/change angle like real fire (this is what the old gizmo
-// lines did). cellphase offsets each fire so they don't lean in lockstep. Returns horizontal (x,z) tip drift.
-fn flamelet_lean(hh: f32, lphase: f32, t: f32, cellphase: f32) -> (f32, f32) {
-    let amt = hh * 0.6; // max tip drift ~ 0.6 * height
-    let lx = (t * 0.20 + lphase + cellphase).sin() * amt;
-    let lz = (t * 0.16 + lphase * 1.3 + cellphase * 0.7).cos() * amt;
-    (lx, lz)
+// Tip lean at time t. The whole flame waves TOGETHER: all tongues share one gust (t*0.22 + cellphase) leaning
+// the same direction, with only a slight per-tongue desync (lphase) for randomness -- NOT each tongue doing
+// its own circle. The lean axis drifts slowly so it isn't a rigid back-and-forth. cellphase offsets each fire.
+fn flamelet_lean(lphase: f32, t: f32, cellphase: f32) -> (f32, f32) {
+    let dir = t * 0.015 + cellphase; // lean direction rotates slowly
+    let s = (t * 0.22 + cellphase + lphase * 0.30).sin() * 0.15; // shared sway, tiny per-tongue offset
+    (s * dir.cos(), s * dir.sin())
 }
 
 // Crossed-sheet "X" vertex grid for one flamelet (aurora trick): two tiny vertical sheets (XY + ZY) so the
@@ -1976,10 +1976,11 @@ fn flamelet_geom(pos: &mut Vec<[f32; 3]>, nor: &mut Vec<[f32; 3]>, uv: &mut Vec<
         let vbase = pos.len() as u32;
         for r in 0..=rows {
             let fy = r as f32 / rows as f32;
-            let taper = 1.0 - 0.85 * fy; // converge toward a point -> teardrop
-            let curve = fy * fy; // tip leans more than base
-            let ox = cx + lx * curve;
-            let oz = cz + lz * curve;
+            let taper = 1.0 - 0.85 * fy; // sheet width narrows toward the tip
+            let curve = fy * fy; // tip leans/converges more than base
+            let conv = 1.0 - 0.6 * curve; // tongues pull toward cluster center as they rise -> teardrop
+            let ox = cx * conv + lx * curve;
+            let oz = cz * conv + lz * curve;
             let y = fy * hh;
             for cc in 0..=cols {
                 let fxn = cc as f32 / cols as f32 - 0.5; // -0.5..0.5 (untapered, even edge feather)
@@ -2034,7 +2035,7 @@ fn flame_cluster_positions(t: f32, cellphase: f32) -> Vec<[f32; 3]> {
     let (mut nor, mut uv, mut col, mut idx) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for k in 0..FLAMELETS as u32 {
         let (cx, cz, rr, hh, lphase) = flamelet(k);
-        let (lx, lz) = flamelet_lean(hh, lphase, t, cellphase);
+        let (lx, lz) = flamelet_lean(lphase, t, cellphase);
         flamelet_geom(&mut pos, &mut nor, &mut uv, &mut col, &mut idx, false, cx, cz, rr, hh, lx, lz);
     }
     pos
@@ -2127,11 +2128,11 @@ fn fire_sheet_visuals(
         let up = surf.normalize_or_zero();
         *vis = Visibility::Visible;
         let flick = 0.5 + 0.5 * (t * 0.30 + c as f32 * 1.7).sin();
-        let wob = (t * 0.18 + c as f32 * 2.3).sin() * 0.18; // gentle whole-cluster sway (tongues wander on top)
         let w = 0.9 + 1.6 * f; // wider with intensity
         let hgt = (0.7 + 2.0 * f) * (0.7 + 0.5 * flick); // height, pulsing (~ up to 2.4)
+        // base stays put (no whole-cluster rotation); the wave is the per-tongue tip lean (flame_cluster_positions)
         tf.translation = surf + up * 0.04;
-        tf.rotation = Quat::from_axis_angle(up, wob) * Quat::from_rotation_arc(Vec3::Y, up);
+        tf.rotation = Quat::from_rotation_arc(Vec3::Y, up);
         tf.scale = Vec3::new(w, hgt, w);
         if let Some(m) = meshes.get_mut(&mesh3d.0) {
             m.insert_attribute(Mesh::ATTRIBUTE_POSITION, flame_cluster_positions(t, c as f32 * 0.7));
