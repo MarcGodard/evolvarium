@@ -698,8 +698,7 @@ fn spawn_carrion(commands: &mut Commands, pos: Vec3, mass: f32, fat: f32) {
 
 // Spawn one creature (no render mesh; viz::add_creature_visuals gives one in render mode). Continuous-mode
 // offspring; fresh brain from genome priors, learns over its own life.
-// Returns the spawned Entity (viewer tracks the single inspected creature; live callers ignore it).
-pub(crate) fn spawn_creature(commands: &mut Commands, g: Genome, pos: Vec3, rng: &mut Rng, birth_energy: f32) -> Entity {
+pub(crate) fn spawn_creature(commands: &mut Commands, g: Genome, pos: Vec3, rng: &mut Rng, birth_energy: f32) {
     // migrate older saved nets to current brain-input width before Brain copies weights (shape mismatch ->
     // out-of-bounds index in forward()). No-op for fresh genomes + births.
     let mut g = g;
@@ -707,20 +706,18 @@ pub(crate) fn spawn_creature(commands: &mut Commands, g: Genome, pos: Vec3, rng:
     let h = rng.range(-std::f32::consts::PI, std::f32::consts::PI);
     let brain = Brain { net: g.net.clone(), prev_dist: f32::INFINITY, attack: 0.0, defend: 0.0, fight_reward: 0.0 };
     let diet = diet_state(&g);
-    commands
-        .spawn((
-            Creature,
-            g,
-            brain,
-            diet,
-            Energy::from_total(birth_energy),
-            Fitness(0.0),
-            Heading(h),
-            Alive(true),
-            Locomotion { start: pos, path: 0.0, alt: 0.0 },
-            Transform::from_translation(pos),
-        ))
-        .id()
+    commands.spawn((
+        Creature,
+        g,
+        brain,
+        diet,
+        Energy::from_total(birth_energy),
+        Fitness(0.0),
+        Heading(h),
+        Alive(true),
+        Locomotion { start: pos, path: 0.0, alt: 0.0 },
+        Transform::from_translation(pos),
+    ));
 }
 
 // God-control (render B button): drop `n` creatures scattered over land. Clones of random LIVING creatures +
@@ -1506,7 +1503,6 @@ pub fn spawn_world_render(
     mut wear: ResMut<Wear>,
     mut bank: ResMut<SeedBank>,
     mut weather: ResMut<Weather>,
-    viewer: Option<Res<crate::viewer::ViewerMode>>,
 ) {
     // shared eye mesh; the body itself is a generative per-genome mesh built by viz (morph.rs)
     commands.insert_resource(crate::viz::CreatureParts {
@@ -1628,12 +1624,6 @@ pub fn spawn_world_render(
             commands.spawn((Mesh3d(rock_mesh.clone()), MeshMaterial3d(rock_mat.clone()), tf, bevy::light::NotShadowCaster));
             placed += 1;
         }
-    }
-
-    // viewer mode (--viewer): render assets + planet dressing only, EMPTY stage (no creatures/plants).
-    // viewer.rs spawns the single inspected creature; population/plants seed when the user presses T.
-    if viewer.is_some() {
-        return;
     }
 
     // --load resumes a saved population; else random founding pop. Positions re-randomized.

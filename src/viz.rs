@@ -480,7 +480,7 @@ pub struct BodyMeshCache {
 impl BodyMeshCache {
     // Generative mesh for this genome's body (built once per unique graph). center_y vertically centers the
     // body on the entity origin (so feet hang below + head above, like the old centered capsule).
-    pub fn get_or_build(&mut self, g: &Genome, meshes: &mut Assets<Mesh>) -> Handle<Mesh> {
+    fn get_or_build(&mut self, g: &Genome, meshes: &mut Assets<Mesh>) -> Handle<Mesh> {
         let key = crate::morph::body_hash(&g.body);
         if let Some(h) = self.map.get(&key) {
             return h.clone();
@@ -512,10 +512,6 @@ const BODY_RENDER: f32 = 0.5; // graph-units -> world-units normalization (tune 
 pub struct CreatureParts {
     pub eye: Handle<Mesh>,
 }
-
-// Tags an eye child entity so the viewer can despawn + rebuild eyes when genes change (viewer::rebuild_on_edit).
-#[derive(Component)]
-pub struct EyeVis;
 
 // Skin color + body-plan scale from genome (M4). Shared by add_creature_visuals + restyle_creatures ->
 // newborns look right immediately. Color from skin_hue/skin_sat genes; venom -> aposematic orange-red
@@ -573,9 +569,8 @@ fn add_creature_visuals(
 }
 
 // Spawn the emissive eye spheres as children of `parent`, anchored to the head surface (morph::eye_anchor),
-// NOT the whole-body bbox -> no floating ahead of a tapering body. Reused by add_creature_visuals (initial
-// dress) + viewer::rebuild_on_edit (live re-dress when head/eyes/size genes change).
-pub fn spawn_eyes(commands: &mut Commands, parent: Entity, g: &Genome, eye_mesh: &Handle<Mesh>, materials: &mut Assets<StandardMaterial>) {
+// NOT the whole-body bbox -> no floating ahead of a tapering body.
+fn spawn_eyes(commands: &mut Commands, parent: Entity, g: &Genome, eye_mesh: &Handle<Mesh>, materials: &mut Assets<StandardMaterial>) {
     let pheno = crate::morph::develop(&g.body);
     let m = crate::morph::Morphometrics::from_phenotype(&pheno);
     let center_y = (m.bbox_min.y + m.bbox_max.y) * 0.5; // mesh shifts verts down by this
@@ -594,7 +589,7 @@ pub fn spawn_eyes(commands: &mut Commands, parent: Entity, g: &Genome, eye_mesh:
         let ey = (a.center.y - center_y) + a.radius * 0.35 - row * eye_d * 0.5;
         let ez = a.center.z + a.radius * 0.85 + eye_d * 0.3; // proud of the head's front face
         let eye = commands
-            .spawn((Mesh3d(eye_mesh.clone()), MeshMaterial3d(eye_mat.clone()), Transform { translation: Vec3::new(ex, ey, ez), scale: Vec3::splat(eye_d), ..default() }, EyeVis))
+            .spawn((Mesh3d(eye_mesh.clone()), MeshMaterial3d(eye_mat.clone()), Transform { translation: Vec3::new(ex, ey, ez), scale: Vec3::splat(eye_d), ..default() }))
             .id();
         commands.entity(parent).add_child(eye);
     }
