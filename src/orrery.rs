@@ -27,17 +27,19 @@ const M0: f32 = PI; // epoch phase: tick 0 near APOAPSIS -> today reads the slow
 // Fixed Sirius ecliptic direction (apsidal line; periapsis points here). Arbitrary-but-fixed unit-ish vec.
 const SIRIUS_DIR: Vec3 = Vec3::new(0.86, 0.0, 0.51);
 
-// --- TSN body table (verbatim from design doc 15; parents reference earlier indices) ---
-struct Body {
-    name: &'static str,
-    parent: i32,   // -1 = SystemCenter root
-    speed: f32,    // rad / year
-    orbit: f32,    // deferent/epicycle radius
-    start_deg: f32,
-    tilt_deg: f32, // applied to this node's CHILD frame
+// --- TSN body table (verbatim from TSN celestial-settings.json; parents reference earlier indices) ---
+pub struct Body {
+    pub name: &'static str,
+    pub parent: i32, // -1 = SystemCenter root
+    pub speed: f32,  // rad / year
+    pub orbit: f32,  // deferent/epicycle radius
+    pub start_deg: f32,
+    pub tilt_deg: f32, // applied to this node's CHILD frame
+    pub size: f32,     // render radius (TSN units)
+    pub spin: f32,     // axial rotation speed (deg/year), cosmetic in the orrery view
 }
-const fn b(name: &'static str, parent: i32, speed: f32, orbit: f32, start_deg: f32, tilt_deg: f32) -> Body {
-    Body { name, parent, speed, orbit, start_deg, tilt_deg }
+const fn b(name: &'static str, parent: i32, speed: f32, orbit: f32, start_deg: f32, tilt_deg: f32, size: f32, spin: f32) -> Body {
+    Body { name, parent, speed, orbit, start_deg, tilt_deg, size, spin }
 }
 
 // Indices of bodies we consume downstream.
@@ -52,40 +54,55 @@ pub const JUPITER: usize = 19;
 pub const SATURN: usize = 21;
 
 const TABLE: &[Body] = &[
-    b("SystemCenter", -1, 0.0, 0.0, 0.0, 0.0),
-    b("Earth", 0, -0.0002479160869310127, 37.8453, 0.0, -23.439062), // speed unused: replaced by elliptical precession
-    b("Moon deferent A", 1, 0.71015440177343, 0.000712491685519208, 226.4, 0.0),
-    b("Moon deferent B", 1, 0.0, 0.0, -1.8, 0.0), // TSN parent "Earth offset" (tiny) -> Earth
-    b("Moon", 3, 83.28521, 0.25505129081458283, 261.2, 0.0),
-    b("Sun deferent", 0, 0.0, 0.0, 0.0, 0.0),
-    b("Sun", 5, 6.283185307179586, 100.0, 0.0, 0.0),
-    b("Mercury deferent A", 0, 6.283185307179586, 100.0, 0.0, 0.0),
-    b("Mercury deferent B", 7, -6.283185307179586, 0.6, 33.0, 0.0),
-    b("Mercury", 8, 26.08763045, 38.710225, -180.8, 0.0),
-    b("Venus deferent A", 0, 6.283185307179586, 100.0, 0.0, 0.0),
-    b("Venus deferent B", 10, -6.283185307179586, 0.6, 16.6, 0.0),
-    b("Venus", 11, 10.21331385, 72.327789, -23.6, 0.0),
-    b("Mars deferent E", 0, 6.283185307179586, 100.0, 0.0, 0.0),
-    b("Mars deferent S", 13, 0.3974599, 7.44385, -115.0, 0.0),
-    b("Mars", 14, -3.33985, 152.677, 119.3, -23.439062),
-    b("Phobos", 15, 6986.5, 5.0, 122.0, 0.0),
-    b("Deimos", 15, 1802.0, 10.0, 0.0, 0.0),
-    b("Jupiter deferent", 0, -6.283185307179586, 0.0, 75.4, 0.0),
-    b("Jupiter", 18, 0.52994136, 520.4, -34.0, 0.0),
-    b("Saturn deferent", 0, -6.283185307179586, 89.0, 518.0, 0.0),
-    b("Saturn", 20, 0.21351984, 958.2, -123.8, 0.0),
-    b("Uranus deferent", 0, -6.283185307179586, 170.0, 123.0, 0.0),
-    b("Uranus", 22, 0.07500314, 1920.13568, 371.8, 0.0),
-    b("Neptune deferent", 0, -6.283185307179586, 20.0, 175.2, 0.0),
-    b("Neptune", 24, 0.03837314, 3004.72, 329.3, 0.0),
-    b("Pluto deferent", 0, -6.283185307179586, 0.0, 8.0, 0.0),
-    b("Pluto", 26, 0.0253303, 3948.2, 200.0, 122.5),
-    b("Halleys deferent", 0, -6.283185307179586, 20.0, 179.0, 0.0),
-    b("Halleys", 28, -0.0830100973, 1674.5, 76.33, 0.0),
-    b("Eros deferent A", 0, 6.283185307179586, 100.0, 0.0, 0.0),
-    b("Eros deferent B", 30, -7.291563307179587, 5.2, 0.0, 0.0),
-    b("Eros", 31, 4.57668492, 145.79, 171.8, 0.0),
+    //  name                parent  speed                    orbit                start_deg  tilt_deg     size  spin
+    b("SystemCenter",       -1, 0.0,                     0.0,                  0.0,       0.0,         1.0,  0.0),
+    b("Earth",               0, -0.0002479160869310127,  37.8453,              0.0,       -23.439062,  4.0,  2301.1694948647196), // speed unused: replaced by elliptical precession
+    b("Moon deferent A",     1, 0.71015440177343,        0.000712491685519208, 226.4,     0.0,         0.6,  0.0),
+    b("Moon deferent B",     2, 0.0,                     0.0,                  -1.8,      0.0,         0.6,  0.0), // TSN parent = Moon deferent A
+    b("Moon",                3, 83.28521,                0.25505129081458283,  261.2,     0.0,         1.0,  0.0),
+    b("Sun deferent",        0, 0.0,                     0.0,                  0.0,       0.0,         2.0,  0.0),
+    b("Sun",                 5, 6.283185307179586,       100.0,                0.0,       0.0,         8.0,  90.5),
+    b("Mercury deferent A",  0, 6.283185307179586,       100.0,                0.0,       0.0,         0.7,  0.0),
+    b("Mercury deferent B",  7, -6.283185307179586,      0.6,                  33.0,      0.0,         0.7,  0.0),
+    b("Mercury",             8, 26.08763045,             38.710225,            -180.8,    0.0,         1.53, 0.0),
+    b("Venus deferent A",    0, 6.283185307179586,       100.0,                0.0,       0.0,         2.0,  0.0),
+    b("Venus deferent B",   10, -6.283185307179586,      0.6,                  16.6,      0.0,         2.0,  0.0),
+    b("Venus",              11, 10.21331385,             72.327789,            -23.6,     0.0,         3.8,  0.0),
+    b("Mars deferent E",     0, 6.283185307179586,       100.0,                0.0,       0.0,         2.0,  0.0),
+    b("Mars deferent S",    13, 0.3974599,               7.44385,              -115.0,    0.0,         2.0,  0.0),
+    b("Mars",               14, -3.33985,                152.677,              119.3,     -23.439062,  2.13, 2301.169494864719),
+    b("Phobos",             15, 6986.5,                  5.0,                  122.0,     0.0,         0.5,  0.0),
+    b("Deimos",             15, 1802.0,                  10.0,                 0.0,       0.0,         0.5,  0.0),
+    b("Jupiter deferent",    0, -6.283185307179586,      0.0,                  75.4,      0.0,         1.0,  0.0),
+    b("Jupiter",            18, 0.52994136,              520.4,                -34.0,     0.0,         6.0,  5562.3218194),
+    b("Saturn deferent",     0, -6.283185307179586,      89.0,                 518.0,     0.0,         1.0,  0.0),
+    b("Saturn",             20, 0.21351984,              958.2,                -123.8,    0.0,         5.0,  5244.4748582),
+    b("Uranus deferent",     0, -6.283185307179586,      170.0,                123.0,     0.0,         1.0,  0.0),
+    b("Uranus",             22, 0.07500314,              1920.13568,           371.8,     0.0,         7.5,  3239.2344713),
+    b("Neptune deferent",    0, -6.283185307179586,      20.0,                 175.2,     0.0,         1.0,  0.0),
+    b("Neptune",            24, 0.03837314,              3004.72,              329.3,     0.0,         7.5,  3059.2770006),
+    b("Pluto deferent",      0, -6.283185307179586,      0.0,                  8.0,       0.0,         0.0,  0.0),
+    b("Pluto",              26, 0.0253303,               3948.2,               200.0,     122.5,       0.9,  1000.0),
+    b("Halleys deferent",    0, -6.283185307179586,      20.0,                 179.0,     0.0,         1.0,  0.0),
+    b("Halleys",            28, -0.0830100973,           1674.5,               76.33,     0.0,         1.5,  0.0),
+    b("Eros deferent A",     0, 6.283185307179586,       100.0,                0.0,       0.0,         2.0,  0.0),
+    b("Eros deferent B",    30, -7.291563307179587,      5.2,                  0.0,       0.0,         2.0,  0.0),
+    b("Eros",               31, 4.57668492,              145.79,               171.8,     0.0,         0.1,  0.0),
 ];
+
+/// Number of bodies in the TSN table.
+pub fn body_count() -> usize {
+    TABLE.len()
+}
+/// Body metadata (name, render size, axial tilt deg) by index, for the orrery view.
+pub fn body_meta(idx: usize) -> (&'static str, f32, f32) {
+    let bd = &TABLE[idx];
+    (bd.name, bd.size, bd.tilt_deg)
+}
+/// All body world positions at real time `tau` (ecliptic frame, SystemCenter at origin). For the orrery view.
+pub fn body_positions(tau: f32) -> Vec<Vec3> {
+    world_positions(tau)
+}
 
 // --- precession (slow binary orbit on REAL time) ---
 fn solve_ecc_anomaly(m: f32, e: f32) -> f32 {
