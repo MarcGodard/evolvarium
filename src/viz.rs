@@ -61,6 +61,12 @@ pub struct SunLight;
 pub struct Moon;
 #[derive(Component)]
 pub struct SunDisc; // visible glowing sun (follows light direction)
+#[derive(Component)]
+pub struct SkyStars; // real BSC starfield shell; wheels with the day (rotate_sky_stars)
+#[derive(Component)]
+pub struct SkyPlanet {
+    pub idx: usize, // orrery body index; positioned each frame against the stars (position_sky_planets)
+}
 // Auroral magnetic latitude (radians, ~66 deg): curtains sit at this |mag latitude|. Shared spawn + anim.
 pub const AURORA_LAT: f32 = 1.15;
 // Aurora base altitude above surface (world units; PLANET_R=80). Curtains rise CURTAIN_H tall from here
@@ -99,7 +105,7 @@ impl Plugin for VizPlugin {
                     toggle_sensors,
                     draw_sensors,
                     (add_plant_visuals, size_plants, add_grass_visuals, add_seaweed_visuals, size_creatures, flap_wings),
-                    (day_night_lighting, time_of_day, toggle_shadows, walk_ambient, update_daycycle, track_underwater, update_sky, toggle_underwater_tint, animate_ocean, update_globe_climate, update_aurora_curtains),
+                    (day_night_lighting, time_of_day, toggle_shadows, walk_ambient, update_daycycle, track_underwater, update_sky, toggle_underwater_tint, animate_ocean, update_globe_climate, update_aurora_curtains, rotate_sky_stars, position_sky_planets),
                     rain_visuals,
                     fire_visuals,
                     update_clouds,
@@ -1474,6 +1480,28 @@ fn day_night_lighting(
             let bc = Vec3::new(0.85, 0.85, 0.9).lerp(Vec3::new(0.45, 0.12, 0.09), lunar);
             m.base_color = Color::srgb(bc.x, bc.y, bc.z);
         }
+    }
+}
+
+// Wheel the real starfield with the planet's daily spin. Equatorial coords -> rotate about +Y (celestial
+// pole). FULL tick keeps it in step with sun/moon/planets (which carry the obliquity via ecliptic_to_sky).
+fn rotate_sky_stars(gen: Res<GenState>, offset: Res<SunOffset>, mut q: Query<&mut Transform, With<SkyStars>>) {
+    let vtick = (gen.tick as i64 + offset.0).max(0) as u32;
+    let daily = (vtick as f32 / crate::sphere::DAY_TICKS as f32) * std::f32::consts::TAU;
+    for mut tf in &mut q {
+        tf.rotation = Quat::from_rotation_y(daily);
+    }
+}
+
+// Place each wandering planet on the sky shell at its geocentric ecliptic dir (orrery), through the same
+// ecliptic_to_sky transform as sun/moon, so it drifts correctly against the fixed stars along the zodiac.
+fn position_sky_planets(gen: Res<GenState>, offset: Res<SunOffset>, mut q: Query<(&SkyPlanet, &mut Transform)>) {
+    let vtick = (gen.tick as i64 + offset.0).max(0) as u32;
+    let tau = crate::sphere::t_years(vtick);
+    let r = crate::sphere::PLANET_R * 85.0 * 0.97; // just inside the star shell
+    for (p, mut tf) in &mut q {
+        let ecl = crate::orrery::geocentric_dir(p.idx, tau);
+        tf.translation = crate::sphere::ecliptic_to_sky(ecl, vtick) * r;
     }
 }
 

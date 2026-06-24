@@ -95,7 +95,7 @@ pub fn build_starfield(r: f32) -> (Mesh, HashMap<u32, Vec3>) {
         let k: f32 = f32_field(st, "K").unwrap_or(5500.0);
         // brightness 0.08..1 from magnitude (bright = low V). Size + color intensity scale with it.
         let lum = ((6.5 - v) / 8.0).clamp(0.06, 1.0);
-        let s = 22.0 * (0.32 + lum); // quad half-size: bright ~29 (~4px), dim ~8 (~1px) at shell 9000
+        let s = 22.0 * (0.32 + lum) * (r / 9000.0); // quad half-size, scaled so angular size is constant at any shell r
         let rgb = temp_to_rgb(k);
         let i = (0.45 + lum * 0.55).min(1.0);
         let col = [rgb[0] * i, rgb[1] * i, rgb[2] * i, 1.0];

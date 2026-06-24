@@ -413,26 +413,45 @@ fn setup_scene(
         bevy::light::NotShadowCaster,
         viz::SunDisc,
     ));
-    // starfield: evenly-spread points on far shell (deterministic Fibonacci sphere), shared emissive mesh.
-    let star_mesh = meshes.add(Sphere::new(9.0).mesh().ico(1).unwrap());
-    let star_mat = materials.add(StandardMaterial {
-        base_color: Color::WHITE,
-        emissive: LinearRgba::rgb(2.0, 2.0, 2.3),
-        unlit: true,
-        ..default()
-    });
-    let n_stars = 700usize;
-    let golden = std::f32::consts::PI * (3.0 - 5.0_f32.sqrt());
-    for i in 0..n_stars {
-        let y = 1.0 - (i as f32 + 0.5) / n_stars as f32 * 2.0;
-        let r = (1.0 - y * y).max(0.0).sqrt();
-        let theta = golden * i as f32;
-        let dir = Vec3::new(theta.cos() * r, y, theta.sin() * r);
+    // starfield: the REAL Bright Star Catalog sky (same data as the orrery view), on a far shell. One mesh,
+    // rotated each frame about the spin axis by viz::rotate_sky_stars so constellations wheel with the day.
+    // Built in EQUATORIAL coords -> celestial pole = planet +Y; the ecliptic sun/moon/planets carry the
+    // obliquity instead, so they drift against the fixed stars (= seasons + wandering planets).
+    let sky_r = sphere::PLANET_R * 85.0; // ~6800, inside the 12k camera far clip
+    let (sky_mesh, _hip) = stars::build_starfield(sky_r);
+    commands.spawn((
+        Mesh3d(meshes.add(sky_mesh)),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::WHITE, // vertex colors carry per-star temperature
+            unlit: true,
+            cull_mode: None,
+            ..default()
+        })),
+        Transform::IDENTITY,
+        bevy::light::NotShadowCaster,
+        viz::SkyStars,
+    ));
+    // naked-eye wandering planets, positioned each frame by viz::position_sky_planets via the orrery model.
+    let planet_mesh = meshes.add(Sphere::new(sky_r / 240.0).mesh().ico(3).unwrap());
+    let sky_planets: [(usize, LinearRgba); 5] = [
+        (orrery::MERCURY, LinearRgba::rgb(1.1, 1.0, 0.85)),
+        (orrery::VENUS, LinearRgba::rgb(2.4, 2.2, 1.7)), // brightest "evening star"
+        (orrery::MARS, LinearRgba::rgb(2.0, 0.7, 0.4)),
+        (orrery::JUPITER, LinearRgba::rgb(1.8, 1.6, 1.25)),
+        (orrery::SATURN, LinearRgba::rgb(1.7, 1.55, 1.1)),
+    ];
+    for (idx, col) in sky_planets {
         commands.spawn((
-            Mesh3d(star_mesh.clone()),
-            MeshMaterial3d(star_mat.clone()),
-            Transform::from_translation(dir * 7000.0),
-            bevy::light::NotShadowCaster, // background stars never cast
+            Mesh3d(planet_mesh.clone()),
+            MeshMaterial3d(materials.add(StandardMaterial {
+                base_color: Color::WHITE,
+                emissive: col,
+                unlit: true,
+                ..default()
+            })),
+            Transform::from_xyz(0.0, sky_r * 0.97, 0.0),
+            bevy::light::NotShadowCaster,
+            viz::SkyPlanet { idx },
         ));
     }
     // aurora: high above each MAGNETIC pole at auroral magnetic latitude (~66 deg), oriented to

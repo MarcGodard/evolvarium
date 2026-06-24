@@ -22,7 +22,7 @@ impl Plugin for OrreryViewPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<OrreryClock>()
             .add_systems(Startup, (spawn_orrery_bodies, spawn_starfield))
-            .add_systems(Update, (advance_clock, position_orrery_bodies).chain());
+            .add_systems(Update, (advance_clock, position_orrery_bodies, toggle_constellations));
     }
 }
 
@@ -54,7 +54,9 @@ fn spawn_starfield(
                 ..default()
             })),
             Transform::from_translation(ORRERY_CENTER),
+            Visibility::Hidden, // OFF by default; toggle with L (toggle_constellations)
             bevy::light::NotShadowCaster,
+            ConstellationLines,
         ));
     }
     info!("orrery view: starfield {} BSC stars + constellation lines on shell r={}", n_stars, STAR_SHELL);
@@ -69,6 +71,18 @@ pub struct OrreryClock {
 #[derive(Component)]
 pub struct OrreryBody {
     pub idx: usize,
+}
+
+#[derive(Component)]
+struct ConstellationLines;
+
+// Toggle constellation lines with L (off by default). Works regardless of camera mode.
+fn toggle_constellations(keys: Res<ButtonInput<KeyCode>>, mut q: Query<&mut Visibility, With<ConstellationLines>>) {
+    if keys.just_pressed(KeyCode::KeyL) {
+        for mut v in &mut q {
+            *v = if *v == Visibility::Hidden { Visibility::Visible } else { Visibility::Hidden };
+        }
+    }
 }
 
 // TSN-ish body colors (name -> emissive RGB). Bodies render self-lit so they read as orrery markers.
