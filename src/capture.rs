@@ -27,7 +27,9 @@ pub struct CaptureCfg {
     pub underwater: bool, // --cap-water: submerge in deep ocean. verifies swim view + blue tint
     pub lat: Option<f32>, // --cap-lat: top-down orbit view at this latitude (deg, +90 = north pole, -90 = south)
     pub warmup: u32,      // --cap-warmup: sim frames before the shot (default WARMUP). Raise to let fliers rise off the ground + land-wear trails accumulate before snapping.
+    pub back: f32,        // --cap-back: walk side-vantage distance from homeland (default 22 = original framing). Small = wide-area close-up.
     pub orrery: bool,     // --cap-orrery: capture the TSN solar-system view instead of the planet
+    pub focus_creature: bool, // --cap-creature: aim at the creature nearest homeland from cap-back units away (creature close-up)
 }
 
 // Deepest-ocean surface dir, found by scanning a Fibonacci sphere (2000 samples). Robust to noise seed
@@ -96,9 +98,34 @@ impl Plugin for CapturePlugin {
 
 // Aim camera at homeland from fixed side+elevated vantage, ignoring walk/orbit. Deterministic so test
 // objects + shadows always framed.
-fn force_cam(cfg: Res<CaptureCfg>, mut q: Query<&mut Transform, (With<Camera3d>, With<crate::camera::OrbitCam>)>) {
+fn force_cam(
+    cfg: Res<CaptureCfg>,
+    mut q: Query<&mut Transform, (With<Camera3d>, With<crate::camera::OrbitCam>)>,
+    creatures: Query<&Transform, (With<crate::components::Creature>, Without<Camera3d>)>,
+) {
     if cfg.orrery {
         return; // OrreryCam set in setup_capture_view; apply_orrery frames it from the focus point
+    }
+    // --cap-creature: lock onto the creature nearest homeland, frame it from cap-back units away (slightly up
+    // + along the cap-yaw tangent). Repeated each frame so it tracks the chosen creature through warmup.
+    if cfg.focus_creature {
+        let home = crate::sim::homeland_center();
+        let target = creatures
+            .iter()
+            .map(|t| t.translation)
+            .min_by(|a, b| {
+                let da = (a.normalize_or_zero() - home).length_squared();
+                let db = (b.normalize_or_zero() - home).length_squared();
+                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+            });
+        if let (Some(target), Ok(mut t)) = (target, q.single_mut()) {
+            let up = target.normalize_or_zero(); // planet-up at the creature
+            let tangent = crate::sphere::heading_tangent(up, cfg.yaw);
+            let dist = cfg.back.max(2.0);
+            let eye = target + tangent * dist + up * (0.7 * dist); // back + well above to clear grass (3/4 down view)
+            *t = Transform::from_translation(eye).looking_at(target, up);
+        }
+        return;
     }
     if cfg.orbit {
         // --cap-lat: aim orbit cam straight down at chosen latitude on homeland meridian, top-down pole view.
@@ -132,8 +159,11 @@ fn force_cam(cfg: Res<CaptureCfg>, mut q: Query<&mut Transform, (With<Camera3d>,
     }
     let home = crate::sim::homeland_center();
     let side = crate::sphere::heading_tangent(home, cfg.yaw);
-    let eye = crate::sphere::surface_pos(home, 10.0) + side * 22.0;
-    let target = crate::sphere::surface_pos(home, 2.0);
+    // elevated side vantage looking at homeland. Scales with --cap-back: back=22 = original wide framing,
+    // small back (e.g. 4) = close-up on the founding creatures. Height tracks back so the look-down angle holds.
+    let f = cfg.back / 22.0;
+    let eye = crate::sphere::surface_pos(home, 10.0 * f) + side * 22.0 * f;
+    let target = crate::sphere::surface_pos(home, 2.0 * f);
     if let Ok(mut t) = q.single_mut() {
         *t = Transform::from_translation(eye).looking_at(target, home);
     }
@@ -182,8 +212,8 @@ fn setup_capture_view(
     } else {
         *mode = CameraMode::Walk;
         if let Ok(mut w) = q.single_mut() {
-            // stand back 16u from homeland along heading so homeland entities are in front
-            w.dir = crate::sphere::step(home, cfg.yaw, -16.0).0;
+            // stand back cfg.back u from homeland along heading so homeland entities are in front
+            w.dir = crate::sphere::step(home, cfg.yaw, -cfg.back).0;
             w.yaw = cfg.yaw;
             w.pitch = cfg.pitch;
         }

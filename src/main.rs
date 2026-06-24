@@ -97,6 +97,11 @@ fn main() {
     let cap_yaw = parse_or(&args, "--cap-yaw=", 0.0f32);
     let cap_off = parse_or(&args, "--cap-off=", 0i64);
     let cap_pitch = parse_or(&args, "--cap-pitch=", -0.35f32);
+    // --cap-back=N: walk-shot side-vantage distance from homeland (default 22 = original wide framing). Small
+    // (e.g. 4) = close-up on the founding creatures; large = wider establishing shot. Height scales with it.
+    let cap_back = parse_or(&args, "--cap-back=", 22.0f32);
+    // --cap-creature: aim the walk camera at the creature nearest homeland (close-up for creature visual work).
+    let cap_creature = flag(&args, "--cap-creature");
     // --cap-lat=DEG: aim orbit camera straight down at this latitude (deg, + = north pole, - = south)
     // for top-down pole view. Implies orbit. Pair w/ --cap-dist to frame whole cap.
     let cap_lat = val(&args, "--cap-lat=").and_then(|s| s.parse::<f32>().ok());
@@ -275,7 +280,7 @@ fn main() {
             app.insert_resource(viz::MinimapInitField(field)); // open minimap on a chosen overlay for the shot
         }
         if let Some(prefix) = capture {
-            app.insert_resource(capture::CaptureCfg { prefix, when: cap_when, yaw: cap_yaw, off: cap_off, pitch: cap_pitch, orbit: cap_orbit, dist: cap_dist, underwater: cap_water, lat: cap_lat, warmup: cap_warmup, orrery: cap_orrery })
+            app.insert_resource(capture::CaptureCfg { prefix, when: cap_when, yaw: cap_yaw, off: cap_off, pitch: cap_pitch, orbit: cap_orbit, dist: cap_dist, underwater: cap_water, lat: cap_lat, warmup: cap_warmup, orrery: cap_orrery, back: cap_back, focus_creature: cap_creature })
                 .add_plugins(capture::CapturePlugin);
         }
     }
