@@ -22,6 +22,9 @@ impl Plugin for OrbitCameraPlugin {
                     orbit_drag,
                     orbit_keys,
                     zoom,
+                    orrery_drag,
+                    orrery_zoom,
+                    apply_orrery,
                     walk_look,
                     walk_move,
                     apply_orbit,
@@ -40,12 +43,21 @@ fn log_controls() {
     info!("camera: TAB = orbit/walk | ORBIT: right-drag rotate, scroll zoom, click select, F follow | WALK: WASD move, arrows/right-drag look, Shift run, swim into the sea (look + W to dive)");
 }
 
-// Active camera. Orbit = space view; Walk = ground view (real shadows).
+// Active camera. Orbit = planet space view; Orrery = TSN solar-system view; Walk = ground view (shadows).
 #[derive(Resource, Default, Clone, Copy, PartialEq, Eq)]
 pub enum CameraMode {
     #[default]
     Orbit,
+    Orrery,
     Walk,
+}
+
+// Orrery state: camera orbits the far solar-system center (orrery_view::ORRERY_CENTER), aimed inward.
+#[derive(Component)]
+pub struct OrreryCam {
+    pub yaw: f32,
+    pub pitch: f32,
+    pub dist: f32,
 }
 
 // Orbit state: camera sits on sphere of radius `dist` around planet center, aimed inward.
@@ -92,6 +104,7 @@ fn spawn_camera(mut commands: Commands) {
         // soft ambient (per-camera in 0.18) so night side not pitch black
         AmbientLight { brightness: 220.0, ..default() },
         OrbitCam { yaw: lon, pitch: lat.clamp(-1.3, 1.3), dist: 230.0 },
+        OrreryCam { yaw: 0.6, pitch: 0.5, dist: 1500.0 }, // framed on the inner system (Sun..Jupiter)
         WalkCam { dir: hl.normalize_or_zero(), yaw: 0.0, pitch: 0.0, eye_alt: WALK_EYE },
         // shadow softness: swapped per mode in update_shadow_mode (orbit = soft Gaussian, walk = crisp)
         bevy::light::ShadowFilteringMethod::Hardware2x2,
@@ -108,15 +121,21 @@ fn toggle_mode(
     mut mode: ResMut<CameraMode>,
     mut selected: ResMut<Selected>,
     mut sun_offset: ResMut<SunOffset>,
-    mut q: Query<(&OrbitCam, &mut WalkCam)>,
+    mut q: Query<(&OrbitCam, &OrreryCam, &mut WalkCam)>,
 ) {
     if !keys.just_pressed(KeyCode::Tab) {
         return;
     }
+    // TAB cycles Orbit -> Orrery -> Walk -> Orbit.
     *mode = match *mode {
         CameraMode::Orbit => {
-            if let Ok((orbit, mut walk)) = q.single_mut() {
-                // surface point under orbit camera = its position direction
+            selected.follow = false;
+            info!("camera: ORRERY mode (TSN solar system: right-drag rotate, scroll zoom, TAB to walk)");
+            CameraMode::Orrery
+        }
+        CameraMode::Orrery => {
+            if let Ok((orbit, _orrery, mut walk)) = q.single_mut() {
+                // drop walk onto the surface point the ORBIT camera was over (orbit dir), facing north.
                 walk.dir = Vec3::new(
                     orbit.pitch.cos() * orbit.yaw.cos(),
                     orbit.pitch.sin(),
@@ -126,12 +145,10 @@ fn toggle_mode(
                 walk.yaw = 0.0;
                 walk.pitch = 0.0;
                 walk.eye_alt = WALK_EYE;
-                // keep TRUE sim time on arrival so walk + orbit agree on time-of-day at same spot (snapping
-                // to morning made orbit-night jump to walk-midday). [ ] scrub, \ jumps to noon.
-                sun_offset.0 = 0;
+                sun_offset.0 = 0; // true sim time on arrival (walk + orbit agree on time-of-day)
             }
             selected.follow = false;
-            info!("camera: WALK mode (WASD move, arrows/right-drag look, Shift run, swim into the sea: look + W to dive, [ ] scrub time, \\ noon, TAB to orbit)");
+            info!("camera: WALK mode (WASD move, arrows/right-drag look, Shift run, swim: look + W to dive, [ ] scrub time, \\ noon, TAB to orbit)");
             CameraMode::Walk
         }
         CameraMode::Walk => {
@@ -195,6 +212,60 @@ fn apply_orbit(mode: Res<CameraMode>, selected: Res<Selected>, mut q: Query<(&mu
     let dir = Vec3::new(cam.pitch.cos() * cam.yaw.cos(), cam.pitch.sin(), cam.pitch.cos() * cam.yaw.sin());
     t.translation = dir * cam.dist;
     t.look_at(Vec3::ZERO, Vec3::Y);
+}
+
+// --- orrery mode (TSN solar system at the far ORRERY_CENTER) ---
+
+const ORRERY_MIN_DIST: f32 = 60.0;   // close in on the inner bodies
+const ORRERY_MAX_DIST: f32 = 8000.0; // whole system incl. outer planets (kept under the 12k far clip)
+
+fn orrery_drag(
+    mode: Res<CameraMode>,
+    buttons: Res<ButtonInput<MouseButton>>,
+    motion: Res<AccumulatedMouseMotion>,
+    keys: Res<ButtonInput<KeyCode>>,
+    time: Res<Time<bevy::time::Real>>,
+    mut q: Query<&mut OrreryCam>,
+) {
+    if *mode != CameraMode::Orrery {
+        return;
+    }
+    let Ok(mut cam) = q.single_mut() else { return };
+    if buttons.pressed(MouseButton::Right) {
+        cam.yaw -= motion.delta.x * 0.005;
+        cam.pitch = (cam.pitch + motion.delta.y * 0.005).clamp(-1.45, 1.45);
+    }
+    // keyboard fallback (A/D spin, Q/E tilt, W/S zoom)
+    let dt = time.delta_secs();
+    let boost = if keys.pressed(KeyCode::ShiftLeft) { 3.0 } else { 1.0 };
+    if keys.pressed(KeyCode::KeyA) { cam.yaw += 0.8 * dt * boost; }
+    if keys.pressed(KeyCode::KeyD) { cam.yaw -= 0.8 * dt * boost; }
+    if keys.pressed(KeyCode::KeyQ) { cam.pitch = (cam.pitch + 0.8 * dt * boost).clamp(-1.45, 1.45); }
+    if keys.pressed(KeyCode::KeyE) { cam.pitch = (cam.pitch - 0.8 * dt * boost).clamp(-1.45, 1.45); }
+    let zk = 400.0 * dt * boost;
+    if keys.pressed(KeyCode::KeyW) { cam.dist = (cam.dist - zk).clamp(ORRERY_MIN_DIST, ORRERY_MAX_DIST); }
+    if keys.pressed(KeyCode::KeyS) { cam.dist = (cam.dist + zk).clamp(ORRERY_MIN_DIST, ORRERY_MAX_DIST); }
+}
+
+fn orrery_zoom(mode: Res<CameraMode>, scroll: Res<AccumulatedMouseScroll>, mut q: Query<&mut OrreryCam>) {
+    if *mode != CameraMode::Orrery || scroll.delta.y == 0.0 {
+        return;
+    }
+    let Ok(mut cam) = q.single_mut() else { return };
+    // scroll zoom proportional to distance -> smooth from inner bodies out to Pluto
+    cam.dist = (cam.dist * (1.0 - scroll.delta.y * 0.1)).clamp(ORRERY_MIN_DIST, ORRERY_MAX_DIST);
+}
+
+// Place camera around ORRERY_CENTER, looking inward at the solar system.
+fn apply_orrery(mode: Res<CameraMode>, mut q: Query<(&mut Transform, &OrreryCam)>) {
+    if *mode != CameraMode::Orrery {
+        return;
+    }
+    let Ok((mut t, cam)) = q.single_mut() else { return };
+    let dir = Vec3::new(cam.pitch.cos() * cam.yaw.cos(), cam.pitch.sin(), cam.pitch.cos() * cam.yaw.sin());
+    let center = crate::orrery_view::ORRERY_CENTER;
+    t.translation = center + dir * cam.dist;
+    t.look_at(center, Vec3::Y);
 }
 
 // --- walk mode ---

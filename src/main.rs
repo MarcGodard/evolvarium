@@ -16,6 +16,7 @@ mod config;
 mod genome;
 mod niche;
 mod orrery;
+mod orrery_view;
 mod persist;
 mod capture;
 mod plant;
@@ -97,6 +98,8 @@ fn main() {
     let cap_dist = args.iter().find_map(|a| a.strip_prefix("--cap-dist=").and_then(|s| s.parse::<f32>().ok())).unwrap_or(140.0);
     // --cap-water: submerge capture camera in deep ocean (verify swim view + underwater tint).
     let cap_water = args.iter().any(|a| a == "--cap-water");
+    // --cap-orrery: capture the TSN solar-system (orrery) view instead of the planet.
+    let cap_orrery = args.iter().any(|a| a == "--cap-orrery");
     // --cap-warmup=N: sim frames before snapping (default 50). Raise for slow effects (fliers reaching cruise
     // altitude, land-wear trails forming). --cap-mmfield=N: open the minimap on overlay N (8 = wear) so a slow
     // live field can be screenshotted.
@@ -256,6 +259,7 @@ fn main() {
             .insert_resource(Time::<Fixed>::from_hz((1.0 / sim::DT) as f64))
             .add_plugins(camera::OrbitCameraPlugin)
             .add_plugins(viz::VizPlugin)
+            .add_plugins(orrery_view::OrreryViewPlugin)
             .add_systems(Startup, (setup_scene, sim::spawn_world_render))
             .add_systems(
                 FixedUpdate,
@@ -265,7 +269,7 @@ fn main() {
             app.insert_resource(viz::MinimapInitField(field)); // open minimap on a chosen overlay for the shot
         }
         if let Some(prefix) = capture {
-            app.insert_resource(capture::CaptureCfg { prefix, when: cap_when, yaw: cap_yaw, off: cap_off, pitch: cap_pitch, orbit: cap_orbit, dist: cap_dist, underwater: cap_water, lat: cap_lat, warmup: cap_warmup })
+            app.insert_resource(capture::CaptureCfg { prefix, when: cap_when, yaw: cap_yaw, off: cap_off, pitch: cap_pitch, orbit: cap_orbit, dist: cap_dist, underwater: cap_water, lat: cap_lat, warmup: cap_warmup, orrery: cap_orrery })
                 .add_plugins(capture::CapturePlugin);
         }
     }

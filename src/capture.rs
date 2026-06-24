@@ -27,6 +27,7 @@ pub struct CaptureCfg {
     pub underwater: bool, // --cap-water: submerge in deep ocean. verifies swim view + blue tint
     pub lat: Option<f32>, // --cap-lat: top-down orbit view at this latitude (deg, +90 = north pole, -90 = south)
     pub warmup: u32,      // --cap-warmup: sim frames before the shot (default WARMUP). Raise to let fliers rise off the ground + land-wear trails accumulate before snapping.
+    pub orrery: bool,     // --cap-orrery: capture the TSN solar-system view instead of the planet
 }
 
 // Deepest-ocean surface dir, found by scanning a Fibonacci sphere (2000 samples). Robust to noise seed
@@ -96,6 +97,17 @@ impl Plugin for CapturePlugin {
 // Aim camera at homeland from fixed side+elevated vantage, ignoring walk/orbit. Deterministic so test
 // objects + shadows always framed.
 fn force_cam(cfg: Res<CaptureCfg>, mut q: Query<&mut Transform, With<Camera3d>>) {
+    if cfg.orrery {
+        // orrery view: orbit the solar-system center. cap-yaw/pitch aim, cap-dist zooms (default 1800).
+        let center = crate::orrery_view::ORRERY_CENTER;
+        let pitch = if cfg.pitch != 0.0 { cfg.pitch } else { 0.45 };
+        let dist = if cfg.dist > 500.0 { cfg.dist } else { 1800.0 };
+        let dir = Vec3::new(pitch.cos() * cfg.yaw.cos(), pitch.sin(), pitch.cos() * cfg.yaw.sin());
+        if let Ok(mut t) = q.single_mut() {
+            *t = Transform::from_translation(center + dir * dist).looking_at(center, Vec3::Y);
+        }
+        return;
+    }
     if cfg.orbit {
         // --cap-lat: aim orbit cam straight down at chosen latitude on homeland meridian, top-down pole view.
         // Own transform here (not apply_orbit) to pick stable up: look_at with up=Y collapses at poles (view
@@ -143,6 +155,10 @@ fn setup_capture_view(
     mut q: Query<&mut WalkCam>,
     mut orbit_q: Query<&mut crate::camera::OrbitCam>,
 ) {
+    if cfg.orrery {
+        *mode = CameraMode::Orrery; // bodies positioned by orrery_view; force_cam owns the camera transform
+        return;
+    }
     let home = crate::sim::homeland_center();
     // sun anchor: overhead ocean point for --cap-water, else overhead homeland.
     let sun_anchor = if cfg.underwater { shallow_swim_dir() } else { home };
