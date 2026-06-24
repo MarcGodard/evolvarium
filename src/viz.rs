@@ -127,6 +127,7 @@ impl Plugin for VizPlugin {
                     (day_night_lighting, time_of_day, toggle_shadows, walk_ambient, update_daycycle, track_underwater, update_sky, toggle_underwater_tint, animate_ocean, update_globe_climate, update_aurora_curtains, rotate_sky_stars, position_sky_planets, fade_sky_stars),
                     rain_visuals,
                     fire_visuals,
+                    meteor_visuals,
                     update_clouds,
                     (track_tree_positions, spawn_logs_on_tree_death, age_logs),
                     hide_dead,
@@ -2100,6 +2101,65 @@ fn fire_visuals(fire: Res<Fire>, gen: Res<GenState>, mut gizmos: Gizmos) {
             let lit = Color::srgba(1.0, 0.6, 0.2, (1.0 - frac) * 0.9); // bright, dims as cools
             let gone = Color::srgba(1.0, 0.3, 0.05, 0.0);
             gizmos.line_gradient(p, p + up * 0.4, lit, gone);
+        }
+    }
+}
+
+// Shooting stars: a few deterministic meteor "slots" that periodically streak across the sky shell, gizmo
+// gradient line (bright blue-white head -> transparent tail). Stateless + tick-driven (like rain). Night only
+// in walk (skip when the sun is up); always in orbit (dark space); off in orrery (separate sky). Render-only.
+fn meteor_visuals(
+    gen: Res<GenState>,
+    offset: Res<SunOffset>,
+    mode: Res<crate::camera::CameraMode>,
+    walkers: Query<&crate::camera::WalkCam>,
+    mut gizmos: Gizmos,
+) {
+    use crate::camera::CameraMode;
+    if *mode == CameraMode::Orrery {
+        return;
+    }
+    let vtick = (gen.tick as i64 + offset.0).max(0) as u32;
+    if *mode == CameraMode::Walk {
+        let dir = walkers.single().map(|w| w.dir.normalize_or_zero()).unwrap_or(Vec3::Y);
+        if crate::sphere::daylight_at(dir, vtick) > 0.3 {
+            return; // daytime sky: no visible shooting stars
+        }
+    }
+    const SHELL: f32 = crate::sphere::PLANET_R * 85.0; // matches the planet sky-star shell
+    const N: u32 = 7; // meteor slots (sparse -> the occasional shooting star, not a constant shower)
+    const STREAK: u32 = 220; // ticks a streak is visible (quick flash)
+    // hashed unit vector per seed (sky start point / sweep reference)
+    let unit = |s: u32| {
+        Vec3::new(hash01(s) - 0.5, hash01(s ^ 0x1111) - 0.5, hash01(s ^ 0x2222) - 0.5).normalize_or_zero()
+    };
+    for k in 0..N {
+        let period = 1500 + (hash01(k ^ 0xA1) * 3200.0) as u32; // sparse + varied -> meteors are occasional
+        let phase = (gen.tick + (hash01(k ^ 0xB2) * period as f32) as u32) % period;
+        if phase >= STREAK {
+            continue;
+        }
+        let p = phase as f32 / STREAK as f32; // 0..1 progress along the streak
+        let a = unit(k ^ 0x55);
+        let axis = a.cross(unit(k ^ 0x77)).normalize_or_zero(); // great-circle sweep axis
+        if axis.length_squared() < 0.5 {
+            continue;
+        }
+        let arc = 0.55; // radians swept head travels
+        let fade = (p * 5.0).min(1.0) * ((1.0 - p) * 5.0).min(1.0); // fade in + out at the ends
+        // draw a tapering tail of segments behind the head, brightest at the head
+        let segs = 6;
+        let tail = 0.13; // radians of trailing tail
+        for s in 0..segs {
+            let f0 = s as f32 / segs as f32;
+            let f1 = (s + 1) as f32 / segs as f32;
+            let h0 = Quat::from_axis_angle(axis, p * arc - f0 * tail) * a * SHELL;
+            let h1 = Quat::from_axis_angle(axis, p * arc - f1 * tail) * a * SHELL;
+            let a0 = fade * (1.0 - f0); // head bright -> tail transparent
+            let a1 = fade * (1.0 - f1);
+            let c0 = Color::srgba(0.85, 0.9, 1.0, a0);
+            let c1 = Color::srgba(0.7, 0.8, 1.0, a1);
+            gizmos.line_gradient(h0, h1, c0, c1);
         }
     }
 }

@@ -9,6 +9,9 @@ live in `config.rs`; the live conversion plan is `SPHERE-PLAN.md`.
 ### Solar system + sky: real Tychos model (2026-06-24)
 Full design `~/Documents/Github/clients/evolvarium/15-solar-system-tychos.md`. Data copied from
 pholmq/TSN (GPL-2.0) @ commit 49fd49c (pinned in `orrery.rs` + `stars.rs` comments).
+- [x] **Shooting stars (2026-06-24)**: occasional meteors streak the night sky (`viz::meteor_visuals`,
+  gizmo gradient streaks). Stateless + tick-deterministic like rain; 7 sparse slots; night-only in walk,
+  always in orbit, off in orrery. Render-only.
 - [x] **`orrery.rs`** — byte-exact TSN body table (celestial-settings.json: sun, planets, moons, Pluto,
   Halley, Eros via nested deferent/epicycle chain) + geocentric sky dirs. Pure, unit-tested.
 - [x] **Sirius-binary precession** — Earth's PVP orbit made elliptical (period 24000 yr, e=0.0404, apsides
