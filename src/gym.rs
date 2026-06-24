@@ -1,36 +1,33 @@
-// P2 morphology gym (--gym): drop one creature's developed body into an isolated avian-physics arena, step
-// it headless + deterministically, and score locomotion. P2.2: the body is ARTICULATED -- each part is its
-// own rigid body linked to its parent by a joint from the graph's JointSpec; hinge (limb) joints carry an
-// AngularMotor whose target angle oscillates (a CPG gait), so the creature attempts to move itself. Score =
-// horizontal COM travel. Builds its own PhysicsPlugins App -- the live planet (kinematic) never touches avian.
-// Brain-driven control + lifetime learning come next (P2.3); this proves articulation + actuation + a scorable
-// locomotion signal.
+// P2 morphology gym (--gym): evolve creatures that move themselves in an isolated avian-physics arena.
+// Each part is its own rigid body, linked to its parent by a joint from the graph's JointSpec; hinge limbs
+// carry an AngularMotor driven by an evolvable CPG (per-joint gait_phase + amplitude from the genome, left/
+// right anti-phase by body side). Fitness = horizontal COM travel (minus an airborne penalty so it rewards
+// walking, not launching). `--gym-evolve` runs a GA over body+gait toward better movers. Builds its own
+// PhysicsPlugins App per eval -- the live planet (kinematic) never touches avian. Brain/HyperNEAT real-time
+// control is P3; this is the evolvable-CPG controller the plan flagged as the robust path.
 use avian3d::prelude::*;
 use bevy::prelude::*;
 use std::time::Duration;
 
+use crate::config::{MUT_RATE, MUT_STD};
+use crate::genome::Genome;
 use crate::morph::{develop, BodyGraph, JointKind, PlacedPart, ShapeKind};
 use crate::rng::Rng;
 
 const HZ: f64 = 120.0; // physics rate (fixed dt); enhanced-determinism + fixed step = reproducible
 const DROP_H: f32 = 0.4; // start the body just above ground so it lands fast + spends the run moving
 const CPG_FREQ: f32 = 2.2; // gait oscillation (Hz) of the limb-motor target angle
-const MOTOR_STIFF: f32 = 40.0; // AccelerationBased motor: position tracking gain (mass-independent)
+const MOTOR_STIFF: f32 = 40.0; // AccelerationBased motor: position-tracking gain (mass-independent)
 const MOTOR_DAMP: f32 = 8.0; // motor velocity damping
 const MOTOR_MAX_TORQUE: f32 = 30.0; // clamp so a motor can't fling the body apart
-// collision layers: creature parts collide ONLY with the ground, never with each other (ragdoll self-
-// collision at the overlapping joints diverges the solver -> NaN). Limbs may interpenetrate; acceptable for
-// a first gait, refine with selective self-collision later.
-const L_GROUND: u32 = 1 << 0;
-const L_BODY: u32 = 1 << 1;
+const L_GROUND: u32 = 1 << 0; // parts collide only with ground, never each other (ragdoll self-collision
+const L_BODY: u32 = 1 << 1; //   at overlapping joints diverges the solver). Refine w/ selective later.
 
 #[derive(Resource)]
 struct GymCfg {
-    seed: u64,
+    body: BodyGraph,
 }
 
-// Per-hinge actuator: drive this joint's motor target angle as center + amp*sin(t). Phase offset per joint
-// staggers limbs into a gait.
 #[derive(Resource, Default)]
 struct Actuators(Vec<Actuator>);
 struct Actuator {
@@ -44,10 +41,8 @@ struct Actuator {
 struct GymClock(f32);
 
 #[derive(Component)]
-struct GymPart; // any creature body part (COM scoring)
+struct GymPart;
 
-// Body center + rotation + collider for a part, in body-local space. avian capsule/cuboid span local Y; a
-// part's base sits at tf.translation with axis tf.rotation*+Y, so the shape CENTER is half a length up it.
 fn part_body(p: &PlacedPart) -> (Vec3, Quat, Collider) {
     let axis = p.tf.rotation * Vec3::Y;
     match p.shape {
@@ -70,10 +65,7 @@ fn local_axis(a: u8) -> Vec3 {
 
 fn setup(mut commands: Commands, cfg: Res<GymCfg>) {
     commands.spawn((RigidBody::Static, Collider::cuboid(400.0, 2.0, 400.0), CollisionLayers::new(L_GROUND, L_BODY), Transform::from_xyz(0.0, -1.0, 0.0)));
-    let mut rng = Rng::seed(cfg.seed);
-    let body = BodyGraph::random(&mut rng);
-    let pheno = develop(&body);
-
+    let pheno = develop(&cfg.body);
     let bodies: Vec<(Vec3, Quat, Collider)> = pheno.parts.iter().map(part_body).collect();
     let min_y = bodies.iter().map(|(c, _, _)| c.y).fold(f32::INFINITY, f32::min);
     let lift = DROP_H - min_y;
@@ -86,13 +78,12 @@ fn setup(mut commands: Commands, cfg: Res<GymCfg>) {
         ents.push(e);
     }
 
-    // joints from each part to its parent, anchored at the child's base (the attach point on the parent)
     let mut acts: Vec<Actuator> = Vec::new();
     for (i, part) in pheno.parts.iter().enumerate() {
         let Some(p) = part.parent else { continue };
         let (cc, cr, _) = bodies[i];
         let (pc, pr, _) = bodies[p];
-        let attach = part.tf.translation; // child base, body-local (lift cancels out in anchor deltas below)
+        let attach = part.tf.translation; // child base (lift cancels in the anchor deltas)
         let anchor_child = cr.inverse() * (attach - cc);
         let anchor_parent = pr.inverse() * (attach - pc);
         match part.joint.kind {
@@ -110,8 +101,10 @@ fn setup(mut commands: Commands, cfg: Res<GymCfg>) {
                     )
                     .id();
                 let center = 0.5 * (part.joint.lo + part.joint.hi);
-                let amp = 0.85 * 0.5 * (part.joint.hi - part.joint.lo);
-                acts.push(Actuator { joint: je, center, amp, phase: i as f32 * 0.7 });
+                let amp = 0.85 * 0.5 * (part.joint.hi - part.joint.lo) * part.joint.motor; // genetic swing scale
+                // genetic phase + left/right anti-phase (by body side) -> alternating gait for free
+                let side = if part.tf.translation.x < -0.05 { std::f32::consts::PI } else { 0.0 };
+                acts.push(Actuator { joint: je, center, amp, phase: part.joint.gait_phase + side });
             }
             JointKind::Universal => {
                 commands.spawn(SphericalJoint::new(ents[p], ents[i]).with_local_anchor1(anchor_parent).with_local_anchor2(anchor_child));
@@ -124,19 +117,27 @@ fn setup(mut commands: Commands, cfg: Res<GymCfg>) {
     commands.insert_resource(Actuators(acts));
 }
 
-pub fn run_gym(seed: u64, steps: u32) {
+struct GymResult {
+    horiz: f32,
+    end_y: f32,
+    start_y: f32,
+    finite: bool,
+}
+
+// Run ONE body in a fresh physics arena for `steps` and return locomotion metrics. Deterministic.
+fn eval(body: &BodyGraph, steps: u32) -> GymResult {
     let mut app = App::new();
     app.add_plugins(MinimalPlugins)
         .add_plugins(TransformPlugin)
         .add_plugins(PhysicsPlugins::default())
         .insert_resource(Gravity(Vec3::NEG_Y * 9.81))
-        .insert_resource(GymCfg { seed })
+        .insert_resource(GymCfg { body: body.clone() })
         .init_resource::<Actuators>()
         .init_resource::<GymClock>()
         .add_systems(Startup, setup);
     app.finish();
     app.cleanup();
-    app.update(); // run Startup (spawn arena + articulated body)
+    app.update(); // Startup: spawn arena + articulated body
 
     let dt = Duration::from_secs_f64(1.0 / HZ);
     let world = app.world_mut();
@@ -147,14 +148,67 @@ pub fn run_gym(seed: u64, steps: u32) {
         world.run_schedule(PhysicsSchedule);
     }
     let end = com(world);
-    let horiz = ((end.x - start.x).powi(2) + (end.z - start.z).powi(2)).sqrt();
+    GymResult {
+        horiz: ((end.x - start.x).powi(2) + (end.z - start.z).powi(2)).sqrt(),
+        end_y: end.y,
+        start_y: start.y,
+        finite: end.is_finite(),
+    }
+}
+
+// Fitness: reward horizontal travel, penalize ending well above the start height (launched/flipped, not
+// walking); cull non-finite (blown-up) bodies.
+fn fitness(r: &GymResult) -> f32 {
+    if !r.finite {
+        return -1000.0;
+    }
+    r.horiz - 0.5 * (r.end_y - r.start_y).max(0.0)
+}
+
+// Single inspection run: print metrics for the body grown from `seed`.
+pub fn run_gym(seed: u64, steps: u32) {
+    let mut rng = Rng::seed(seed);
+    let g = Genome::random(&mut rng);
+    let r = eval(&g.body, steps);
     println!(
-        "gym: seed={} steps={} ({:.2}s) | start=({:.2},{:.2},{:.2}) end=({:.2},{:.2},{:.2}) | horiz_travel={:.2} | finite={}",
-        seed, steps, steps as f64 / HZ, start.x, start.y, start.z, end.x, end.y, end.z, horiz, end.is_finite(),
+        "gym: seed={} steps={} ({:.2}s) | horiz_travel={:.2} | start_y={:.2} end_y={:.2} | fitness={:.2} | finite={}",
+        seed, steps, steps as f64 / HZ, r.horiz, r.start_y, r.end_y, fitness(&r), r.finite,
     );
 }
 
-// Update each hinge motor's target angle for this step (CPG gait): center + amp*sin(t*2pi*freq + phase).
+// GA over body+gait: evaluate locomotion, keep elites, refill by clone+mutate. Best fitness should climb.
+// Saves the best genome (serde) to `save` if given (a locomotion-specialist seed for the planet / further GA).
+pub fn evolve_gym(pop_n: usize, gens: u32, steps: u32, seed: u64, save: Option<String>) {
+    let mut rng = Rng::seed(seed);
+    let mut pop: Vec<Genome> = (0..pop_n).map(|_| Genome::random(&mut rng)).collect();
+    let elite_n = (pop_n / 4).max(1);
+    for gen in 0..gens {
+        let mut scored: Vec<(f32, usize)> = pop.iter().enumerate().map(|(i, g)| (fitness(&eval(&g.body, steps)), i)).collect();
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        let best = scored[0].0;
+        let mean = scored.iter().map(|s| s.0).sum::<f32>() / pop_n as f32;
+        println!("gym-evolve gen {gen}: best={best:.2} mean={mean:.2}");
+        let elite: Vec<Genome> = scored.iter().take(elite_n).map(|(_, i)| pop[*i].clone()).collect();
+        let mut next = elite.clone(); // elitism: best survive unmutated (next[0] = current best)
+        while next.len() < pop_n {
+            let p = &elite[(rng.f32() * elite_n as f32) as usize % elite_n];
+            let mut c = p.clone();
+            c.mutate(&mut rng, MUT_RATE, MUT_STD); // drifts body + gait (+ net/traits, used on the planet)
+            next.push(c);
+        }
+        pop = next;
+    }
+    if let Some(path) = save {
+        match serde_json::to_string(&pop[0]) {
+            Ok(j) => {
+                let _ = std::fs::write(&path, j);
+                println!("gym-evolve: saved best mover -> {path}");
+            }
+            Err(e) => println!("gym-evolve: save failed: {e}"),
+        }
+    }
+}
+
 fn drive_motors(world: &mut World) {
     let t = {
         let mut c = world.resource_mut::<GymClock>();
@@ -172,7 +226,6 @@ fn drive_motors(world: &mut World) {
     }
 }
 
-// Center of mass of all parts (avian Position = physics source of truth).
 fn com(world: &mut World) -> Vec3 {
     let mut q = world.query_filtered::<&Position, With<GymPart>>();
     let mut sum = Vec3::ZERO;

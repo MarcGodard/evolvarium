@@ -166,7 +166,13 @@ fn main() {
     if flag(&args, "--gym") {
         let gym_seed = parse_or(&args, "--gym-seed=", seed);
         let gym_steps = parse_or(&args, "--gym-steps=", 600u32);
-        gym::run_gym(gym_seed, gym_steps);
+        if flag(&args, "--gym-evolve") {
+            let pop = parse_or(&args, "--gym-pop=", 24usize);
+            let gens = parse_or(&args, "--gym-gens=", 20u32);
+            gym::evolve_gym(pop, gens, gym_steps, gym_seed, save.clone());
+        } else {
+            gym::run_gym(gym_seed, gym_steps);
+        }
         return;
     }
 

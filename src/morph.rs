@@ -47,11 +47,13 @@ pub struct JointSpec {
     pub axis: u8,       // 0=x 1=y 2=z local hinge axis
     pub lo: f32,        // angle limit lo (rad)
     pub hi: f32,        // angle limit hi (rad)
-    pub motor: f32,     // 0..1 actuator strength (P2 gym)
+    pub motor: f32,     // 0..1 CPG amplitude scale (how hard this joint swings); evolvable gait gene
+    #[serde(default)]
+    pub gait_phase: f32, // CPG phase offset (rad) for this joint; evolvable -> limb coordination = a gait
 }
 impl Default for JointSpec {
     fn default() -> Self {
-        JointSpec { kind: JointKind::Fixed, axis: 0, lo: -0.6, hi: 0.6, motor: 0.0 }
+        JointSpec { kind: JointKind::Fixed, axis: 0, lo: -0.6, hi: 0.6, motor: 0.0, gait_phase: 0.0 }
     }
 }
 
@@ -343,7 +345,7 @@ impl BodyGraph {
                 scale: rng.range(0.7, 0.95),
                 reflect: true,
                 recurse: 1 + (rng.f32() * 2.0) as u8, // 1..2 -> jointed limb chain
-                joint: JointSpec { kind: JointKind::Hinge, axis: 0, lo: -0.8, hi: 0.8, motor: rng.f32() },
+                joint: JointSpec { kind: JointKind::Hinge, axis: 0, lo: -0.8, hi: 0.8, motor: rng.range(0.5, 1.0), gait_phase: rng.range(0.0, std::f32::consts::TAU) },
             });
         }
         // optional tail
@@ -402,6 +404,13 @@ impl BodyGraph {
             if rng.f32() < rate * 0.4 {
                 e.recurse = (e.recurse as i32 + if rng.f32() < 0.5 { -1 } else { 1 }).clamp(0, 5) as u8;
             }
+            // gait genes (CPG): phase coordination + per-joint swing amplitude -> evolvable locomotion
+            if rng.f32() < rate {
+                e.joint.gait_phase += rng.normal() * 0.4;
+            }
+            if rng.f32() < rate {
+                e.joint.motor = (e.joint.motor + rng.normal() * 0.12).clamp(0.0, 1.0);
+            }
         }
         // structural: add a new appendage (node + reflected edge off the torso)
         if rng.f32() < 0.04 && self.nodes.len() < MAX_NODES && self.edges.len() < MAX_EDGES {
@@ -426,7 +435,7 @@ impl BodyGraph {
                 scale: rng.range(0.7, 0.95),
                 reflect: rng.f32() < 0.7,
                 recurse: 1 + (rng.f32() * 2.0) as u8,
-                joint: JointSpec { kind: JointKind::Hinge, axis: 0, lo: -0.8, hi: 0.8, motor: rng.f32() },
+                joint: JointSpec { kind: JointKind::Hinge, axis: 0, lo: -0.8, hi: 0.8, motor: rng.range(0.5, 1.0), gait_phase: rng.range(0.0, std::f32::consts::TAU) },
             });
         }
         // structural: drop a random non-head edge (keep root + at least the head edge)
