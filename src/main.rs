@@ -616,11 +616,11 @@ fn setup_scene(
             viz::FlamePool(i),
         ));
     }
-    // smoke: one alpha-blend grey plume per fire grid cell (shared mesh, hidden until that cell burns).
-    let smoke_mesh = meshes.add(viz::smoke_plume_mesh());
-    for c in 0..(crate::config::SOIL_RES * crate::config::SOIL_RES) {
+    // smoke: a matching pool of curling alpha-blend grey plumes (own mesh each so viz::smoke_visuals animates
+    // the billow per frame). Assigned to the same active fire cells as the flames; hidden when fewer fires.
+    for i in 0..viz::FLAME_POOL {
         commands.spawn((
-            Mesh3d(smoke_mesh.clone()),
+            Mesh3d(meshes.add(viz::smoke_plume_mesh())),
             MeshMaterial3d(materials.add(StandardMaterial {
                 base_color: Color::srgba(1.0, 1.0, 1.0, 0.0),
                 alpha_mode: AlphaMode::Blend,
@@ -632,7 +632,7 @@ fn setup_scene(
             Transform::default(),
             Visibility::Hidden,
             bevy::light::NotShadowCaster,
-            viz::SmokeCell { cell: c },
+            viz::SmokePool(i),
         ));
     }
 }

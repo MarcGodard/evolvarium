@@ -2041,45 +2041,61 @@ fn flame_cluster_positions(t: f32, cellphase: f32) -> Vec<[f32; 3]> {
     pos
 }
 
-// Smoke plume mesh: crossed-X grey column (same X trick, but ALPHA-blend not additive -> smoke darkens). Soft
-// fade-in just off the flame, WIDENS upward (smoke spreads), wisps out to transparent at top. Local Y 0..1;
-// per-cell transform stands it above the flame, leans it downwind, fades it by intensity (see smoke_visuals).
-pub fn smoke_plume_mesh() -> Mesh {
-    let (cols, rows) = (5usize, 12usize);
-    let mut pos: Vec<[f32; 3]> = Vec::new();
-    let mut nor: Vec<[f32; 3]> = Vec::new();
-    let mut uv: Vec<[f32; 2]> = Vec::new();
-    let mut col: Vec<[f32; 4]> = Vec::new();
-    let mut idx: Vec<u32> = Vec::new();
-    let grey = [0.24f32, 0.23, 0.22];
+// Smoke RGBA at height fy (0 base .. 1 top): warm fire-lit underside -> cool dark grey body (dark so it reads
+// as smoke, not bright fog); alpha fades in just off the flame, peaks, wisps out at top. t-independent (built
+// once; only positions animate per frame).
+fn smoke_shade(fy: f32) -> [f32; 4] {
+    let warm = [0.42, 0.21, 0.09]; // fire-lit base glow
+    let grey = [0.16, 0.155, 0.15]; // cool smoke body
+    let m = (fy / 0.30).min(1.0);
+    let c = [warm[0] + (grey[0] - warm[0]) * m, warm[1] + (grey[1] - warm[1]) * m, warm[2] + (grey[2] - warm[2]) * m];
+    let va = (fy / 0.15).clamp(0.0, 1.0) * (1.0 - fy).powf(1.3) * 0.65; // fade in -> peak -> wisp out
+    [c[0], c[1], c[2], va]
+}
+
+// Crossed-X smoke column (X trick, ALPHA-blend so it darkens). CURLS as it rises: a wave travels UP the column
+// over time -> billowing; steady downwind lean; width undulates in puffy lumps that scroll up. push positions
+// always; nor/uv/col only when `full` (static attrs, built once). Local Y 0..1; transform stands it above fire.
+fn smoke_geom(pos: &mut Vec<[f32; 3]>, nor: &mut Vec<[f32; 3]>, uv: &mut Vec<[f32; 2]>, col: &mut Vec<[f32; 4]>, idx: &mut Vec<u32>, full: bool, t: f32, cellphase: f32) {
+    let (cols, rows) = (5usize, 16usize);
     let stride = (cols + 1) as u32;
     for plane in 0..2 {
         let vbase = pos.len() as u32;
         for r in 0..=rows {
             let fy = r as f32 / rows as f32;
-            // fade in just above the fire, billow, then wisp out: ramp up -> peak -> fade to 0 at top
-            let va = (fy / 0.18).clamp(0.0, 1.0) * (1.0 - fy).powf(1.3) * 0.6;
-            let spread = 0.5 + 0.9 * fy; // plume widens as it rises
+            let ph = fy * 3.0 - t * 0.06 + cellphase; // billow wave travels up over time
+            let curl_x = ph.sin() * 0.35 * fy + 0.28 * fy; // curl grows with height + steady downwind lean
+            let curl_z = (ph * 0.8 + 1.7).sin() * 0.30 * fy;
+            let lump = 1.0 + 0.30 * (fy * 7.0 - t * 0.06 + cellphase).sin(); // puffy width undulation, scrolls up
+            let spread = (0.45 + 0.95 * fy) * lump;
             for cc in 0..=cols {
                 let fxn = cc as f32 / cols as f32 - 0.5;
                 let fx = fxn * spread;
-                let hf = (fxn * std::f32::consts::PI).cos().max(0.0);
-                let a = va * hf;
-                let p = if plane == 0 { [fx, fy, 0.0] } else { [0.0, fy, fx] };
-                let n = if plane == 0 { [0.0, 0.0, 1.0] } else { [1.0, 0.0, 0.0] };
+                let p = if plane == 0 { [curl_x + fx, fy, curl_z] } else { [curl_x, fy, curl_z + fx] };
                 pos.push(p);
-                nor.push(n);
-                uv.push([fxn + 0.5, 1.0 - fy]);
-                col.push([grey[0], grey[1], grey[2], a]); // grey RGB; alpha carries the plume shape
+                if full {
+                    let sh = smoke_shade(fy);
+                    let hf = (fxn * std::f32::consts::PI).cos().max(0.0); // soft sides
+                    nor.push(if plane == 0 { [0.0, 0.0, 1.0] } else { [1.0, 0.0, 0.0] });
+                    uv.push([fxn + 0.5, 1.0 - fy]);
+                    col.push([sh[0], sh[1], sh[2], sh[3] * hf]);
+                }
             }
         }
-        for r in 0..rows as u32 {
-            for cc in 0..cols as u32 {
-                let i = vbase + r * stride + cc;
-                idx.extend_from_slice(&[i, i + 1, i + stride + 1, i, i + stride + 1, i + stride]);
+        if full {
+            for r in 0..rows as u32 {
+                for cc in 0..cols as u32 {
+                    let i = vbase + r * stride + cc;
+                    idx.extend_from_slice(&[i, i + 1, i + stride + 1, i, i + stride + 1, i + stride]);
+                }
             }
         }
     }
+}
+
+pub fn smoke_plume_mesh() -> Mesh {
+    let (mut pos, mut nor, mut uv, mut col, mut idx) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    smoke_geom(&mut pos, &mut nor, &mut uv, &mut col, &mut idx, true, 0.0, 0.0);
     let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, pos);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, nor);
@@ -2089,14 +2105,19 @@ pub fn smoke_plume_mesh() -> Mesh {
     mesh
 }
 
-// Pool slot for an animated flame cluster (assigned to the Nth active fire cell each frame, FLAME_POOL of
-// them). Smoke is one per grid cell (static-ish, no per-frame vertex anim needed).
+// Per-frame curled positions (same vertex order as smoke_plume_mesh) -> overwrite POSITION to billow + rise.
+fn smoke_plume_positions(t: f32, cellphase: f32) -> Vec<[f32; 3]> {
+    let (mut pos, mut nor, mut uv, mut col, mut idx) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    smoke_geom(&mut pos, &mut nor, &mut uv, &mut col, &mut idx, false, t, cellphase);
+    pos
+}
+
+// Pool slots: each owns a mesh, assigned to the Nth active fire cell each frame (FLAME_POOL of each), so only
+// burning cells pay the per-frame vertex rebuild. Flame = cluster of X tongues; smoke = curling X column.
 #[derive(Component)]
 pub struct FlamePool(pub usize);
 #[derive(Component)]
-pub struct SmokeCell {
-    pub cell: usize,
-}
+pub struct SmokePool(pub usize);
 
 // Flame BODIES: assign the pool to active land fire cells (stable order by cell index), animate each. Per slot:
 // stand on the cell surface, scale by intensity, sway + flicker brightness, and OVERWRITE the mesh positions so
@@ -2144,38 +2165,45 @@ fn fire_sheet_visuals(
     }
 }
 
-// SMOKE: drive the pooled crossed-X grey plumes. Per cell: hide if cold/ocean, else sit above the flame, lean
-// downwind + sway, scale taller with intensity, fade overall opacity by intensity*flicker. Alpha-blend.
+// SMOKE: assign the pool to active fire cells (same order as flames -> co-located), animate each. Per slot: sit
+// above the flame, stand the column up, scale taller with intensity, fade opacity by intensity, and OVERWRITE
+// positions so the plume curls + billows upward. Alpha-blend. Unused slots hidden.
 fn smoke_visuals(
     fire: Res<Fire>,
     gen: Res<GenState>,
+    mut meshes: ResMut<Assets<Mesh>>,
     mut mats: ResMut<Assets<StandardMaterial>>,
-    mut q: Query<(&SmokeCell, &MeshMaterial3d<StandardMaterial>, &mut Transform, &mut Visibility)>,
+    mut q: Query<(&SmokePool, &Mesh3d, &MeshMaterial3d<StandardMaterial>, &mut Transform, &mut Visibility)>,
 ) {
     let t = gen.tick as f32;
-    for (sc, mat, mut tf, mut vis) in &mut q {
-        let f = fire.cell[sc.cell];
-        let surf = grid_cell_surface(sc.cell);
-        let up = surf.normalize_or_zero();
-        if f < 0.1 || crate::sphere::is_ocean(up) {
+    let mut active: Vec<(usize, f32)> = Vec::new();
+    for c in 0..fire.cell.len() {
+        let f = fire.cell[c];
+        if f >= 0.1 && !crate::sphere::is_ocean(grid_cell_surface(c).normalize_or_zero()) {
+            active.push((c, f));
+        }
+    }
+    for (sp, mesh3d, mat, mut tf, mut vis) in &mut q {
+        if sp.0 >= active.len() {
             *vis = Visibility::Hidden;
             continue;
         }
+        let (c, f) = active[sp.0];
+        let surf = grid_cell_surface(c);
+        let up = surf.normalize_or_zero();
         *vis = Visibility::Visible;
-        let flick = 0.5 + 0.5 * (t * 0.13 + sc.cell as f32 * 1.1).sin(); // slower than flame
-        let wob = (t * 0.10 + sc.cell as f32 * 1.7).sin();
-        let (east, north) = crate::sphere::tangent_frame(up);
         let flame_h = 0.7 + 2.0 * f; // base sits near the flame top
-        let w = 0.6 + 1.0 * f;
-        let hgt = 2.5 + 3.5 * f;
-        // lean downwind (fixed east bias) + sway -> plume drifts, never a rigid pillar
-        let lean = (up + east * 0.30 + north * wob * 0.18).normalize_or_zero();
-        tf.translation = surf + up * (0.04 + flame_h * 0.55);
-        tf.rotation = Quat::from_rotation_arc(Vec3::Y, lean);
+        let w = 0.7 + 1.1 * f;
+        let hgt = 3.0 + 4.0 * f; // tall plume
+        tf.translation = surf + up * (0.04 + flame_h * 0.5);
+        tf.rotation = Quat::from_rotation_arc(Vec3::Y, up);
         tf.scale = Vec3::new(w, hgt, w);
+        if let Some(m) = meshes.get_mut(&mesh3d.0) {
+            m.insert_attribute(Mesh::ATTRIBUTE_POSITION, smoke_plume_positions(t, c as f32 * 0.7));
+        }
         if let Some(m) = mats.get_mut(mat) {
-            let op = (0.35 + 0.55 * f) * (0.8 + 0.2 * flick); // denser smoke from hotter fire
-            m.base_color = Color::srgba(1.0, 1.0, 1.0, op); // multiplies the baked grey+alpha plume
+            let op = (0.30 + 0.55 * f).min(0.85); // denser smoke from hotter fire (capped)
+            m.base_color = Color::srgba(1.0, 1.0, 1.0, op);
         }
     }
 }
