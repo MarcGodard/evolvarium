@@ -511,6 +511,7 @@ struct PartSdf {
     len: f32,
     r0: f32, // base radius
     r1: f32, // tip radius (r0*taper) for Segment
+    min_r: f32, // floor on every radius/half-extent: thinner than a grid cell -> sampler shreds it. Set post-grid.
     color: [f32; 3],
 }
 impl PartSdf {
@@ -522,6 +523,7 @@ impl PartSdf {
             len: part.length,
             r0: part.radius,
             r1: part.radius * part.taper,
+            min_r: 0.0,
             color: part.color,
         }
     }
@@ -537,17 +539,23 @@ impl PartSdf {
             len,
             r0: r,
             r1: r,
+            min_r: 0.0, // bridge r already floored to grid step by caller
             color,
         }
     }
-    // signed distance from world point p to this part's surface
+    // signed distance from world point p to this part's surface. All radii floored to min_r so sub-cell-thin
+    // parts (thin plate fins, spindly legs) render as clean limbs instead of grid-shredded shards.
     fn dist(&self, p: Vec3) -> f32 {
         let lp = self.inv_rot * (p - self.origin); // part-local, base at origin, axis +Y
+        let m = self.min_r;
         match self.shape {
-            ShapeKind::Segment => sd_round_cone_y(lp, self.len, self.r0, self.r1),
-            ShapeKind::Sphere => (lp - Vec3::Y * self.r0).length() - self.r0, // push_sphere centered at Y*r
+            ShapeKind::Segment => sd_round_cone_y(lp, self.len, self.r0.max(m), self.r1.max(m)),
+            ShapeKind::Sphere => {
+                let r = self.r0.max(m);
+                (lp - Vec3::Y * r).length() - r // push_sphere centered at Y*r
+            }
             ShapeKind::Plate => {
-                let he = Vec3::new(self.r0, self.len * 0.5, (PLATE_THICK * self.r0).max(0.04));
+                let he = Vec3::new(self.r0.max(m), self.len * 0.5, (PLATE_THICK * self.r0).max(m));
                 let q = (lp - Vec3::Y * (self.len * 0.5)).abs() - he;
                 q.max(Vec3::ZERO).length() + q.max_element().min(0.0)
             }
@@ -658,6 +666,13 @@ pub fn build_body_mesh(p: &Phenotype, center_y: f32) -> Mesh {
     let nz = ((dim.z / cell).ceil() as usize).clamp(SKIN_CELLS_MIN, SKIN_CELLS_MAX);
     let step = Vec3::new(dim.x / nx as f32, dim.y / ny as f32, dim.z / nz as f32);
     let gpos = |i: usize, j: usize, l: usize| lo + Vec3::new(i as f32 * step.x, j as f32 * step.y, l as f32 * step.z);
+
+    // Floor every part radius to ~grid step: a feature thinner than a cell gets sampled at scattered crossings
+    // -> shredded/distorted (thin plate fins worst). Floored, thin parts read as clean slightly-fatter limbs.
+    let min_r = 0.8 * step.max_element();
+    for s in parts.iter_mut() {
+        s.min_r = min_r;
+    }
 
     // Connect every part to its parent so the skin is one piece (smin alone leaves far/thin-necked parts as
     // separate blobs). Connector goes from the child base into the parent center (overlaps parent solid ->
