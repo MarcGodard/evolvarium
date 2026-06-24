@@ -1783,7 +1783,7 @@ pub fn grass_step(
     if gen.headless {
         return;
     }
-    let season = (gen.tick as f32 / GEN_TICKS as f32 * SEASON_FREQ).sin();
+    let season = (crate::sphere::t_years(gen.tick) * std::f32::consts::TAU).sin();
     let count = q.iter().count();
     let tick = gen.tick;
     let seed = gen.seed;
@@ -1969,7 +1969,7 @@ pub fn plant_step(
         None => (PLANT_MIN, PLANT_CAP, TREE_CAP),
     };
     // season drifts on global tick clock (advances both modes; generation frozen in continuous)
-    let season = (gen.tick as f32 / GEN_TICKS as f32 * SEASON_FREQ).sin(); // -1 dry .. +1 wet
+    let season = (crate::sphere::t_years(gen.tick) * std::f32::consts::TAU).sin(); // -1 dry .. +1 wet
     let mut plant_count = q.iter().filter(|(.., t)| t.is_none()).count();
     let tree_count = q.iter().filter(|(.., t)| t.is_some()).count();
     // coarse start-of-tick repro gates. Serial gated each birth by `count + births.len() < cap` (and

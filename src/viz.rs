@@ -1415,8 +1415,10 @@ fn day_night_lighting(
     mut moons: Query<&mut Transform, (With<Moon>, Without<SunLight>, Without<SunDisc>)>,
     mut discs: Query<&mut Transform, (With<SunDisc>, Without<SunLight>, Without<Moon>)>,
 ) {
-    // visual sky time = sim tick + offset (offset lets walk pick sunny hour without moving sim)
-    let vtick = (gen.tick as i64 + offset.0).rem_euclid(crate::sphere::DAY_TICKS as i64) as u32;
+    // visual sky time = sim tick + offset (offset lets walk pick sunny hour without moving sim). FULL tick
+    // (not mod DAY_TICKS): the Tychos sun carries a yearly ecliptic term, so reducing to one day would erase
+    // seasons from the lit sky.
+    let vtick = (gen.tick as i64 + offset.0).max(0) as u32;
     let sd = crate::sphere::sun_dir(vtick);
     for mut tf in &mut suns {
         // ROTATE directional light in place (only direction matters). Light carries NoFrustumCulling -> stays
@@ -1475,7 +1477,7 @@ fn walk_ambient(
         return;
     }
     let Ok(w) = walkers.single() else { return };
-    let vtick = (gen.tick as i64 + offset.0).rem_euclid(crate::sphere::DAY_TICKS as i64) as u32;
+    let vtick = (gen.tick as i64 + offset.0).max(0) as u32; // full tick: keep seasons (see day_night_lighting)
     let day = crate::sphere::daylight_at(w.dir.normalize_or_zero(), vtick); // 0 night .. 1 noon overhead
     // low fill so strong directional sun (100k lux) keeps shadows + 3D shading; lit surfaces stay bright.
     // High fill washed shadows flat.
@@ -1493,14 +1495,16 @@ fn toggle_shadows(keys: Res<ButtonInput<KeyCode>>, mut show: ResMut<ShowShadows>
     }
 }
 
-// Tick offset putting sun overhead surface dir `d` (local noon). Sun sweeps longitude: ground track angle
-// = 2*PI*tick/DAY_TICKS in x-z plane, so match d longitude angle.
+// Tick offset putting sun overhead surface dir `d` (local noon). Derived from the actual sun dir (Tychos
+// model): daily spin advances the sun's horizontal bearing by -TAU/DAY_TICKS per tick, so rotate the
+// current sun bearing onto d's bearing. Model-agnostic (reads sun_dir, not a hardcoded longitude formula).
 pub fn noon_offset(d: Vec3, tick: u32) -> i64 {
     use std::f32::consts::TAU;
-    let target = d.z.atan2(d.x).rem_euclid(TAU); // longitude of walk point
-    let want = (target / TAU * crate::sphere::DAY_TICKS as f32).round() as i64;
-    let have = (tick as i64).rem_euclid(crate::sphere::DAY_TICKS as i64);
-    (want - have).rem_euclid(crate::sphere::DAY_TICKS as i64)
+    let s = crate::sphere::sun_dir(tick);
+    let sun_bear = s.z.atan2(s.x);
+    let d_bear = d.z.atan2(d.x);
+    let off = ((sun_bear - d_bear) / TAU * crate::sphere::DAY_TICKS as f32).round() as i64;
+    off.rem_euclid(crate::sphere::DAY_TICKS as i64)
 }
 
 // Precip streaks (immediate-mode gizmos, no entities). Where raining (cloud-driven, sampled on lat/lon
@@ -1927,8 +1931,7 @@ fn update_sky(
         space
     } else {
         let dir = walkers.single().map(|w| w.dir.normalize_or_zero()).unwrap_or(Vec3::Y);
-        let day = crate::sphere::DAY_TICKS as i64;
-        let vtick = (gen.tick as i64 + offset.0).rem_euclid(day) as u32;
+        let vtick = (gen.tick as i64 + offset.0).max(0) as u32; // full tick: keep seasons
         let d = crate::sphere::daylight_at(dir, vtick);
         if underwater.0 {
             // submerged: murky blue-green horizon, darker than open sky + dims with daylight
@@ -2130,10 +2133,9 @@ fn update_daycycle(
         return;
     }
     let dir = walkers.single().map(|w| w.dir.normalize_or_zero()).unwrap_or(Vec3::Y);
-    let day = crate::sphere::DAY_TICKS as i64;
-    let vtick = (gen.tick as i64 + offset.0).rem_euclid(day) as u32;
+    let vtick = (gen.tick as i64 + offset.0).max(0) as u32; // full tick: keep seasons
     let d = crate::sphere::daylight_at(dir, vtick);
-    let ahead = crate::sphere::daylight_at(dir, ((vtick as i64 + 30).rem_euclid(day)) as u32);
+    let ahead = crate::sphere::daylight_at(dir, vtick + 30);
     let rising = ahead > d;
     let (label, c) = if d < 0.04 {
         ("NIGHT", Color::srgb(0.55, 0.62, 0.95))
@@ -2754,9 +2756,12 @@ mod tests {
     use super::noon_offset;
     use bevy::prelude::Vec3;
 
-    // noon_offset must put sun ~overhead walk point -> daylight ~ |horizontal| of d.
+    // noon_offset must put the sun on the walk point's meridian = the BRIGHTEST moment of that day. (With
+    // real seasons the noon sun can be low at high latitude in winter, so it is no longer ~overhead; the
+    // robust invariant is that noon is the daily daylight peak and the point is lit.)
     #[test]
     fn noon_offset_lights_the_walk_point() {
+        let dt = crate::sphere::DAY_TICKS as i64;
         for d in [
             Vec3::new(0.30, 0.50, 0.40),   // homeland
             Vec3::new(0.95, 0.30, -0.05),  // mountain A
@@ -2766,12 +2771,16 @@ mod tests {
             let d = d.normalize();
             for tick in [0u32, 600, 1234, 9_000_000] {
                 let off = noon_offset(d, tick);
-                let vtick = (tick as i64 + off).rem_euclid(crate::sphere::DAY_TICKS as i64) as u32;
-                let day = crate::sphere::daylight_at(d, vtick);
-                // sun overhead -> daylight ~= horizontal extent of d (sqrt(x^2+z^2)); must be clearly lit.
-                let horiz = (d.x * d.x + d.z * d.z).sqrt();
-                assert!(day > horiz - 0.05, "d={d:?} tick={tick} day={day} horiz={horiz}");
-                assert!(day > 0.25, "walk point should be daylit at noon, got {day} for d={d:?}");
+                // noon_offset applies to the FULL tick (Tychos sun has a yearly term; mod-DAY_TICKS samples
+                // a different season). vtick = tick + off.
+                let base = (tick as i64 + off).max(0);
+                let noon = crate::sphere::daylight_at(d, base as u32);
+                assert!(noon > 0.2, "walk point should be daylit at noon, got {noon} for d={d:?} tick={tick}");
+                // noon is the daily peak: >= daylight at every other hour of the same day.
+                for h in 1..24 {
+                    let other = crate::sphere::daylight_at(d, (base + h * dt / 24).max(0) as u32);
+                    assert!(noon + 2e-3 >= other, "noon {noon} < hour {h} {other} for d={d:?} tick={tick}");
+                }
             }
         }
     }

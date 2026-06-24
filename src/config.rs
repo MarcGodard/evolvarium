@@ -320,7 +320,7 @@ pub const HABITAT_KILL: f32 = 0.03; // per-tick death scale in poor sites (deep 
 // splits land vs aquatic plants. Trees can't be aquatic at all (DROWN_TREE).
 pub const DROWN_KILL: f32 = 0.06;   // per-tick death scale for non-aquatic plant fully submerged
 pub const DROWN_TREE: f32 = 0.5;    // per-tick death for tree in water (trees land-only, no kelp forests)
-pub const SEASON_FREQ: f32 = 0.4; // seasonal wet/dry oscillation speed (radians per generation)
+// wet/dry season now phase-locked to the astronomical year (sphere::t_years); see sim.rs season term.
 // --- new plant genes (real-life flora: aquatic depth, drought, climate niche, ecology) ---
 pub const WATER_LIGHT_ATTEN: f32 = 0.85; // sunlight lost over full water column: deep sea dim, so only
                                          // shade plants (low light_pref, e.g. kelp) thrive deep; sun-lovers

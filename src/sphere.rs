@@ -29,8 +29,12 @@ pub const MOON_ORBIT: f32 = 6.0 * PLANET_R; // orbit radius (Earth ~60 R; compre
 pub const SUN_DIST: f32 = 60.0 * PLANET_R; // sun far (directional light); billboard sized to match moon angular size
 pub const SUN_R: f32 = SUN_DIST / MOON_ORBIT * MOON_R; // billboard radius -> same on-sky size as moon
 pub const DAY_TICKS: u32 = 2400; // ticks per planet rotation (one day). Same cadence as old flat day.
-pub const MOON_PERIOD_DAYS: f32 = 8.0; // moon orbits once per 8 days (visible monthly cycle, sped up)
-pub const AXIAL_TILT: f32 = 0.41; // ~23.5 deg radians: seasons + keeps poles cold
+pub const AXIAL_TILT: f32 = 0.41; // ~23.5 deg radians (matches TSN Earth -23.439): seasons + keeps poles cold
+// Calendar: mean year = orrery::MEAN_YEAR_DAYS = 360 d = MONTHS_PER_YEAR x MONTH_DAYS. Actual year length
+// breathes with Sirius distance (orrery::year_len_days, ~332..390); the calendar GRID uses the clean mean so
+// dates stay monotonic, the live variation surfaces as an astronomical readout (viz). Day = DAY_TICKS ticks.
+pub const MONTH_DAYS: u32 = 30;
+pub const MONTHS_PER_YEAR: u32 = 12;
 
 // --- planet magnetic field (tilted geomagnetic dipole) ---
 // Magnetic north tilted off spin axis (+Y). Offset -> nonzero compass declination + auroral oval off
@@ -379,24 +383,49 @@ pub fn random_dir_in_cap(rng: &mut crate::rng::Rng, center: Vec3, cap_rad: f32) 
 
 // ---------- sun + moon ----------
 
-/// Sun dir (unit) at `tick`: planet spins about tilted axis, so sun sweeps longitudes once per DAY_TICKS.
-/// Tilt keeps sub-solar latitude near equator -> poles stay cold.
-pub fn sun_dir(tick: u32) -> Vec3 {
-    let a = (tick as f32 / DAY_TICKS as f32) * std::f32::consts::TAU;
-    // sun in equatorial plane, lifted by axial tilt so high latitudes get glancing rays
-    Vec3::new(a.cos(), AXIAL_TILT.sin() * (a * 0.13).sin(), a.sin()).normalize()
+/// Elapsed time in mean-years (real time; drives orrery precession + body angles). 1 = one 360-day year.
+pub fn t_years(tick: u32) -> f32 {
+    tick as f32 / (crate::orrery::MEAN_YEAR_DAYS * DAY_TICKS as f32)
 }
 
-/// Moon dir (unit) at `tick`: orbits slower than day on slightly inclined plane, so drifts against
-/// day/night cycle (visible phases as it catches up to / falls behind sun).
+/// Map a geocentric ECLIPTIC dir (orrery output, ~in ecliptic plane) into the planet-fixed sky: tilt the
+/// ecliptic by the axial tilt (so the sun's sub-solar point drifts +/-tilt in latitude over the year =
+/// real seasons), then spin once per DAY_TICKS (day/night). Sun/moon/planets all go through this.
+pub fn ecliptic_to_sky(ecl: Vec3, tick: u32) -> Vec3 {
+    let daily = (tick as f32 / DAY_TICKS as f32) * std::f32::consts::TAU;
+    (Quat::from_rotation_y(daily) * Quat::from_rotation_x(AXIAL_TILT) * ecl).normalize_or_zero()
+}
+
+/// Sun dir (unit) at `tick`. Delegates to the Tychos model: yearly ecliptic sun dir (seasons via tilt) +
+/// daily spin. Sub-solar latitude band identical to the old fake (+/-sin AXIAL_TILT) so climate is preserved;
+/// only the season CADENCE changes (was a ~7.7-day wobble, now one ~360-day year).
+pub fn sun_dir(tick: u32) -> Vec3 {
+    ecliptic_to_sky(crate::orrery::sun_ecliptic_dir(t_years(tick)), tick)
+}
+
+/// Moon dir (unit) at `tick`: real Tychos geocentric moon (~monthly, was a fixed 8-day circle), through the
+/// same sky transform so it rises/sets with the day and shows phases as it drifts against the sun.
 pub fn moon_dir(tick: u32) -> Vec3 {
-    let period = DAY_TICKS as f32 * MOON_PERIOD_DAYS;
-    let a = (tick as f32 / period) * std::f32::consts::TAU;
-    Vec3::new(a.cos(), 0.18 * a.sin(), a.sin() * 0.98).normalize()
+    ecliptic_to_sky(crate::orrery::moon_ecliptic_dir(t_years(tick)), tick)
 }
 
 pub fn moon_pos(tick: u32) -> Vec3 {
     moon_dir(tick) * MOON_ORBIT
+}
+
+/// Calendar date string from `tick`. Calendar grid uses the clean mean year (12 mo x 30 d); Sirius-driven
+/// year-length variation is shown separately as an astronomical readout (viz).
+pub fn fmt_date(tick: u32) -> String {
+    let year_days = MONTH_DAYS * MONTHS_PER_YEAR; // 360
+    let d = tick / DAY_TICKS; // whole days since epoch
+    let yr = d / year_days;
+    let rem = d % year_days;
+    format!("Yr {} Mon {} Day {}", yr + 1, rem / MONTH_DAYS + 1, rem % MONTH_DAYS + 1)
+}
+
+/// Age (ticks) as days, for HUD. Internal age stays in ticks; display only.
+pub fn fmt_age_days(ticks: u32) -> String {
+    format!("{:.1}d", ticks as f32 / DAY_TICKS as f32)
 }
 
 /// Local daylight 0..1 at surface dir `d` for tick: how much point faces sun.

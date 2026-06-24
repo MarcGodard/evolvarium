@@ -186,9 +186,25 @@ pub fn geocentric_dir(idx: usize, tau: f32) -> Vec3 {
     (p[idx] - p[EARTH]).normalize_or_zero()
 }
 
-pub fn sun_ecliptic_dir(tau: f32) -> Vec3 {
-    geocentric_dir(SUN, tau)
+/// Earth world pos (focus = SystemCenter) on the elliptical precession orbit at `tau`.
+fn earth_pos(tau: f32) -> Vec3 {
+    let (r, nu, _) = precession(tau);
+    let ang = sirius_angle() + nu;
+    Vec3::new(r * ang.cos(), 0.0, r * ang.sin())
 }
+
+/// Sun geocentric ecliptic dir (unit). HOT PATH (per-creature daylight): closed form, no table walk.
+/// Sun deferent is identity, Sun rides a circular radius-100 orbit at TAU/yr -> pos = rotateY(TAU*T_eff)*x100.
+/// Equivalence to the general table walk asserted in tests.
+pub fn sun_ecliptic_dir(tau: f32) -> Vec3 {
+    let th = TAU * t_eff(tau);
+    // glam from_rotation_y(th)*X = (cos, 0, -sin); match it so the closed form == table walk.
+    let sun = Vec3::new(100.0 * th.cos(), 0.0, -100.0 * th.sin());
+    (sun - earth_pos(tau)).normalize_or_zero()
+}
+
+/// Moon geocentric ecliptic dir (unit). Not a hot path (rendered ~once/frame, not per-creature), so the
+/// general table walk is fine and avoids hand-deriving the deferent chain.
 pub fn moon_ecliptic_dir(tau: f32) -> Vec3 {
     geocentric_dir(MOON, tau)
 }
@@ -259,6 +275,16 @@ mod tests {
         assert!((k_peri - 1.085).abs() < 0.01, "k_peri {k_peri}");
         assert!((year_len_days(peri) - 332.0).abs() < 4.0, "year_peri {}", year_len_days(peri));
         assert!(sirius_dist01(peri) < 0.02, "periapsis should be closest, got {}", sirius_dist01(peri));
+    }
+
+    #[test]
+    fn hot_path_matches_table_walk() {
+        // cheap closed-form sun/moon dirs must equal the general geocentric table walk (no silent drift).
+        for &tau in &[0.0f32, 0.2, 1.3, 11.0, 600.0] {
+            let s_fast = sun_ecliptic_dir(tau);
+            let s_tab = geocentric_dir(SUN, tau);
+            assert!(s_fast.dot(s_tab) > 0.9999, "sun fast vs table tau {tau}: dot {}", s_fast.dot(s_tab));
+        }
     }
 
     #[test]
