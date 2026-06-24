@@ -112,10 +112,13 @@ fn viewer_panel(mut contexts: EguiContexts, state: Option<Res<ViewerState>>, mut
     let pi = std::f32::consts::PI;
 
     // slider over any f32 lvalue ($place): read a copy, write back ONLY when egui reports the value changed.
+    // fixed_decimals -> the value box is constant width (a varying-width number nudged the row past the
+    // scrollbar threshold each drag-frame -> flicker). Keep labels SHORT for the same reason (slider text
+    // doesn't wrap; an overflowing row toggles the scrollbar and re-flows the layout every multipass).
     macro_rules! sl {
         ($ui:expr, $label:expr, $lo:expr, $hi:expr, $place:expr) => {{
             let mut v = $place;
-            if $ui.add(egui::Slider::new(&mut v, $lo..=$hi).text($label)).changed() {
+            if $ui.add(egui::Slider::new(&mut v, $lo..=$hi).fixed_decimals(2).text($label)).changed() {
                 $place = v;
             }
         }};
@@ -125,21 +128,22 @@ fn viewer_panel(mut contexts: EguiContexts, state: Option<Res<ViewerState>>, mut
         // (SidePanel is full window height already; don't set_min_height here -> in multipass it re-flows the
         // layout each pass and makes sliders jump/reset while dragging.)
         ui.heading("Genome");
+        ui.spacing_mut().slider_width = 120.0; // fixed slider width + short labels -> rows never overflow the panel
         ui.label(if state.released { "released into sim (edits still rebuild this creature)" } else { "T = release into sim" });
         ui.separator();
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             // SHAPE comes from the generative body graph, not these scalars -> reshape via "Body graph (shape)".
             egui::CollapsingHeader::new("Appearance").default_open(true).show(ui, |ui| {
-                sl!(ui, "size (whole-body scale)", 0.0, 1.0, g.size);
-                sl!(ui, "eyes (count 1..6)", 0.0, 1.0, g.eyes);
-                sl!(ui, "head (eye size)", 0.0, 1.0, g.head);
+                ui.label("size scales body; eyes=count; head=eye size. Reshape the BODY in 'Body graph' below.");
+                sl!(ui, "size", 0.0, 1.0, g.size);
+                sl!(ui, "eyes", 0.0, 1.0, g.eyes);
+                sl!(ui, "head", 0.0, 1.0, g.head);
                 sl!(ui, "skin_hue", 0.0, 1.0, g.skin_hue);
                 sl!(ui, "skin_sat", 0.0, 1.0, g.skin_sat);
-                ui.label("↓ to reshape the BODY, use 'Body graph (shape)' below");
             });
             egui::CollapsingHeader::new("Traits (stats, no mesh change)").show(ui, |ui| {
-                sl!(ui, "height (reach)", 0.0, 1.0, g.height);
-                sl!(ui, "limbs (leg count)", 0.0, 1.0, g.limbs);
+                sl!(ui, "height", 0.0, 1.0, g.height);
+                sl!(ui, "limbs", 0.0, 1.0, g.limbs);
             });
             egui::CollapsingHeader::new("Locomotion & niche").show(ui, |ui| {
                 sl!(ui, "swim", 0.0, 1.0, g.swim);
@@ -224,17 +228,17 @@ fn viewer_panel(mut contexts: EguiContexts, state: Option<Res<ViewerState>>, mut
                 for i in 0..g.body.edges.len() {
                     ui.separator();
                     ui.label(format!("edge {i}: node {} -> node {}", g.body.edges[i].from, g.body.edges[i].to));
-                    sl!(ui, "along (up parent)", 0.0, 1.0, g.body.edges[i].along);
-                    sl!(ui, "around (side)", -pi, pi, g.body.edges[i].around);
-                    sl!(ui, "pitch (tilt)", -1.5, 1.5, g.body.edges[i].pitch);
+                    sl!(ui, "along", 0.0, 1.0, g.body.edges[i].along);
+                    sl!(ui, "around", -pi, pi, g.body.edges[i].around);
+                    sl!(ui, "pitch", -1.5, 1.5, g.body.edges[i].pitch);
                     sl!(ui, "roll", -pi, pi, g.body.edges[i].roll);
-                    sl!(ui, "scale (per recursion)", 0.2, 1.0, g.body.edges[i].scale);
+                    sl!(ui, "scale", 0.2, 1.0, g.body.edges[i].scale);
                     let mut refl = g.body.edges[i].reflect;
-                    if ui.checkbox(&mut refl, "reflect (mirror to other side)").changed() {
+                    if ui.checkbox(&mut refl, "reflect").changed() {
                         g.body.edges[i].reflect = refl;
                     }
                     let mut rec = g.body.edges[i].recurse as i32;
-                    if ui.add(egui::Slider::new(&mut rec, 0..=5).text("recurse (chain length)")).changed() {
+                    if ui.add(egui::Slider::new(&mut rec, 0..=5).text("recurse")).changed() {
                         g.body.edges[i].recurse = rec as u8;
                     }
                 }
