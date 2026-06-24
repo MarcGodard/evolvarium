@@ -112,7 +112,7 @@ impl Plugin for VizPlugin {
                     toggle_legend,
                     (god_disturbances, crate::sim::save_world_key, crate::sim::save_on_window_close),
                     draw_selection,
-                    (minimap_sync_cam, minimap_input, minimap_rebuild, minimap_dynamic),
+                    (minimap_sync_cam, minimap_visibility, minimap_input, minimap_rebuild, minimap_dynamic),
                     (phylogeny_classify, toggle_phylo, update_phylo_panel),
                 ),
             );
@@ -263,6 +263,23 @@ fn minimap_sync_cam(
                 ..default()
             });
         }
+    }
+}
+
+// Minimap is an ORBIT-view aid only: deactivate its camera + hide its label in orrery/walk modes.
+fn minimap_visibility(
+    mode: Res<crate::camera::CameraMode>,
+    mut cam: Query<&mut Camera, With<MinimapCam>>,
+    mut label: Query<&mut Visibility, With<MinimapLabel>>,
+) {
+    let show = *mode == crate::camera::CameraMode::Orbit;
+    if let Ok(mut c) = cam.single_mut() {
+        if c.is_active != show {
+            c.is_active = show;
+        }
+    }
+    if let Ok(mut v) = label.single_mut() {
+        *v = if show { Visibility::Inherited } else { Visibility::Hidden };
     }
 }
 
