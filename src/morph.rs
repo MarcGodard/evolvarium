@@ -488,147 +488,256 @@ impl BodyGraph {
     }
 }
 
-// ---- generative mesh: one merged, vertex-colored mesh per developed body ----
-
+// ---- generative mesh: ONE tight skin per developed body (metaball / implicit surface) ----
+//
+// Old path stacked hard primitives (frustum + UV-sphere + box) -> visible seams + gaps at joints. New path
+// treats each part as a signed-distance primitive (round-cone / sphere / box), smooth-MIN-unions them into a
+// single field, and marching-tetrahedra polygonizes the f=0 isosurface. smin both CLOSES gaps (overlapping
+// fields fuse) and ROUNDS seams (blend radius fillets every joint) -> one continuous skin. Cost is a one-time
+// per-unique-body build (cached by body_hash upstream in viz), so the grid sweep is fine.
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
 
-const RADIAL: usize = 8; // radial segments for tubes/spheres (low = cheap; bodies are small on screen)
+const SKIN_BLEND: f32 = 0.42; // smin radius as fraction of mean part radius. Higher = meltier joints.
+const SKIN_CELLS_MAX: usize = 40; // hard cap on grid cells per axis (bounds tri count + build cost)
+const SKIN_CELLS_MIN: usize = 10;
 
-struct MeshBuf {
-    pos: Vec<[f32; 3]>,
-    nrm: Vec<[f32; 3]>,
-    col: Vec<[f32; 4]>,
-    idx: Vec<u32>,
-    y_off: f32, // shift all verts down by this so the body is vertically centered on the entity origin
+// One part as a signed-distance primitive in WORLD body-local space. Caches the part's inverse placement
+// (rigid: tf has unit scale, morph.rs) so world->part-local is one rotation+translate.
+struct PartSdf {
+    inv_rot: Quat, // tf.rotation.inverse(): world dir -> part-local
+    origin: Vec3,  // tf.translation
+    shape: ShapeKind,
+    len: f32,
+    r0: f32, // base radius
+    r1: f32, // tip radius (r0*taper) for Segment
+    color: [f32; 3],
 }
-impl MeshBuf {
-    fn new() -> Self {
-        MeshBuf { pos: vec![], nrm: vec![], col: vec![], idx: vec![], y_off: 0.0 }
-    }
-    fn vert(&mut self, tf: &Transform, p: Vec3, n: Vec3, c: [f32; 4]) -> u32 {
-        let mut wp = tf.transform_point(p);
-        wp.y -= self.y_off;
-        let wn = (tf.rotation * n).normalize_or_zero();
-        let i = self.pos.len() as u32;
-        self.pos.push([wp.x, wp.y, wp.z]);
-        self.nrm.push([wn.x, wn.y, wn.z]);
-        self.col.push(c);
-        i
-    }
-    fn tri(&mut self, a: u32, b: u32, c: u32) {
-        self.idx.extend_from_slice(&[a, b, c]);
-    }
-}
-
-// Build ONE merged mesh for a whole developed body. Each part emits a parametric primitive in its local
-// frame (base at origin, +Y axis), transformed by its placement, with the part color as vertex color (the
-// StandardMaterial base_color multiplies it -> genome-level tints still apply).
-pub fn build_body_mesh(p: &Phenotype, center_y: f32) -> Mesh {
-    let mut b = MeshBuf::new();
-    b.y_off = center_y;
-    for part in &p.parts {
-        let c = [part.color[0], part.color[1], part.color[2], 1.0];
-        match part.shape {
-            ShapeKind::Segment => push_frustum(&mut b, &part.tf, part.radius, part.radius * part.taper, part.length, c),
-            ShapeKind::Sphere => push_sphere(&mut b, &part.tf, part.radius, part.length, c),
-            ShapeKind::Plate => push_plate(&mut b, &part.tf, part.radius, part.length, c),
+impl PartSdf {
+    fn of(part: &PlacedPart) -> Self {
+        PartSdf {
+            inv_rot: part.tf.rotation.inverse(),
+            origin: part.tf.translation,
+            shape: part.shape,
+            len: part.length,
+            r0: part.radius,
+            r1: part.radius * part.taper,
+            color: part.color,
         }
     }
+    // signed distance from world point p to this part's surface
+    fn dist(&self, p: Vec3) -> f32 {
+        let lp = self.inv_rot * (p - self.origin); // part-local, base at origin, axis +Y
+        match self.shape {
+            ShapeKind::Segment => sd_round_cone_y(lp, self.len, self.r0, self.r1),
+            ShapeKind::Sphere => (lp - Vec3::Y * self.r0).length() - self.r0, // push_sphere centered at Y*r
+            ShapeKind::Plate => {
+                let he = Vec3::new(self.r0, self.len * 0.5, (PLATE_THICK * self.r0).max(0.04));
+                let q = (lp - Vec3::Y * (self.len * 0.5)).abs() - he;
+                q.max(Vec3::ZERO).length() + q.max_element().min(0.0)
+            }
+        }
+    }
+}
+
+// Round-cone SDF (iq), axis = +Y, apex a = origin (radius r1), b = (0,len,0) (radius r2). Two-radius capsule:
+// exact tapered tube w/ rounded caps -> the Segment skin.
+fn sd_round_cone_y(p: Vec3, len: f32, r1: f32, r2: f32) -> f32 {
+    let l2 = (len * len).max(1e-6);
+    let rr = r1 - r2;
+    let a2 = l2 - rr * rr;
+    let il2 = 1.0 / l2;
+    let y = p.y * len;
+    let z = y - l2;
+    let radial2 = p.x * p.x + p.z * p.z;
+    let x2 = l2 * l2 * radial2;
+    let y2 = y * y * l2;
+    let z2 = z * z * l2;
+    let k = rr.signum() * rr * rr * x2;
+    if z.signum() * a2 * z2 > k {
+        return (x2 + z2).sqrt() * il2 - r2;
+    }
+    if y.signum() * a2 * y2 < k {
+        return (x2 + y2).sqrt() * il2 - r1;
+    }
+    ((x2 * a2 * il2).max(0.0).sqrt() + y * rr) * il2 - r1
+}
+
+// Polynomial smooth-min (iq). k = blend radius; k<=0 -> hard min.
+fn smin(a: f32, b: f32, k: f32) -> f32 {
+    if k <= 1e-5 {
+        return a.min(b);
+    }
+    let h = (0.5 + 0.5 * (b - a) / k).clamp(0.0, 1.0);
+    (b * (1.0 - h) + a * h) - k * h * (1.0 - h)
+}
+
+// Body field: smooth-union of all part SDFs. f<0 inside, f=0 surface.
+fn body_field(parts: &[PartSdf], p: Vec3, k: f32) -> f32 {
+    let mut d = f32::INFINITY;
+    for (i, s) in parts.iter().enumerate() {
+        let di = s.dist(p);
+        d = if i == 0 { di } else { smin(d, di, k) };
+    }
+    d
+}
+
+// Nearest part's color for a surface vertex (hard min, not smin -> crisp per-part tint).
+fn nearest_color(parts: &[PartSdf], p: Vec3) -> [f32; 4] {
+    let mut best = f32::INFINITY;
+    let mut col = [0.6, 0.6, 0.62];
+    for s in parts {
+        let d = s.dist(p);
+        if d < best {
+            best = d;
+            col = s.color;
+        }
+    }
+    [col[0], col[1], col[2], 1.0]
+}
+
+// Build ONE tight-skin mesh wrapping the whole developed body. Verts shifted down by center_y so the body
+// centers on the entity origin (matches old convention). Vertex color = nearest part tint (StandardMaterial
+// base_color still multiplies -> genome hue applies). Triangle soup w/ gradient normals -> smooth shading.
+pub fn build_body_mesh(p: &Phenotype, center_y: f32) -> Mesh {
+    let mut pos: Vec<[f32; 3]> = Vec::new();
+    let mut nrm: Vec<[f32; 3]> = Vec::new();
+    let mut col: Vec<[f32; 4]> = Vec::new();
+    let mut idx: Vec<u32> = Vec::new();
+
+    let parts: Vec<PartSdf> = p.parts.iter().map(PartSdf::of).collect();
+    if parts.is_empty() {
+        let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, pos);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, nrm);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, col);
+        mesh.insert_indices(Indices::U32(idx));
+        return mesh;
+    }
+
+    // bbox (base + tip of each part, expanded by radius) and blend radius from mean radius
+    let mut lo = Vec3::splat(f32::INFINITY);
+    let mut hi = Vec3::splat(f32::NEG_INFINITY);
+    let mut rad_sum = 0.0;
+    let mut rad_min = f32::INFINITY;
+    for part in &p.parts {
+        let base = part.tf.translation;
+        let tip = part.tf.transform_point(Vec3::Y * part.length);
+        let r = part.radius.max(part.radius * part.taper);
+        lo = lo.min((base - Vec3::splat(r)).min(tip - Vec3::splat(r)));
+        hi = hi.max((base + Vec3::splat(r)).max(tip + Vec3::splat(r)));
+        rad_sum += part.radius;
+        rad_min = rad_min.min(part.radius);
+    }
+    let mean_r = rad_sum / p.parts.len() as f32;
+    let k = (SKIN_BLEND * mean_r).clamp(0.04, 0.35);
+    let pad = k + 0.6 * mean_r; // smin bulges the surface out past raw bbox; pad so it isn't clipped
+    lo -= Vec3::splat(pad);
+    hi += Vec3::splat(pad);
+
+    // cubic grid: cell ~ half the thinnest part so fins/limbs get sampled; clamp axis counts to bound cost
+    let cell = (rad_min * 0.5).clamp(0.06, 0.22);
+    let dim = (hi - lo).max(Vec3::splat(cell));
+    let nx = ((dim.x / cell).ceil() as usize).clamp(SKIN_CELLS_MIN, SKIN_CELLS_MAX);
+    let ny = ((dim.y / cell).ceil() as usize).clamp(SKIN_CELLS_MIN, SKIN_CELLS_MAX);
+    let nz = ((dim.z / cell).ceil() as usize).clamp(SKIN_CELLS_MIN, SKIN_CELLS_MAX);
+    let step = Vec3::new(dim.x / nx as f32, dim.y / ny as f32, dim.z / nz as f32);
+    let gpos = |i: usize, j: usize, l: usize| lo + Vec3::new(i as f32 * step.x, j as f32 * step.y, l as f32 * step.z);
+
+    // sample the field on every grid corner once
+    let stride_y = nx + 1;
+    let stride_z = stride_y * (ny + 1);
+    let mut fld = vec![0.0f32; (nx + 1) * (ny + 1) * (nz + 1)];
+    for l in 0..=nz {
+        for j in 0..=ny {
+            for i in 0..=nx {
+                fld[i + j * stride_y + l * stride_z] = body_field(&parts, gpos(i, j, l), k);
+            }
+        }
+    }
+    let at = |i: usize, j: usize, l: usize| fld[i + j * stride_y + l * stride_z];
+
+    // gradient (central diff) -> outward normal (SDF rises outward)
+    let geps = (cell * 0.5).max(0.01);
+    let grad = |p: Vec3| -> Vec3 {
+        let dx = body_field(&parts, p + Vec3::X * geps, k) - body_field(&parts, p - Vec3::X * geps, k);
+        let dy = body_field(&parts, p + Vec3::Y * geps, k) - body_field(&parts, p - Vec3::Y * geps, k);
+        let dz = body_field(&parts, p + Vec3::Z * geps, k) - body_field(&parts, p - Vec3::Z * geps, k);
+        Vec3::new(dx, dy, dz).normalize_or_zero()
+    };
+
+    // cube -> 6 tetrahedra along the 0-6 diagonal. Corner offsets (cube local).
+    const CORNER: [(usize, usize, usize); 8] =
+        [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0), (0, 0, 1), (1, 0, 1), (1, 1, 1), (0, 1, 1)];
+    const TETS: [[usize; 4]; 6] = [[0, 5, 1, 6], [0, 1, 2, 6], [0, 2, 3, 6], [0, 3, 7, 6], [0, 7, 4, 6], [0, 4, 5, 6]];
+
+    let mut emit = |a: Vec3, b: Vec3, c: Vec3| {
+        let gn = (b - a).cross(c - a); // geometric normal
+        let avg = grad(a) + grad(b) + grad(c); // desired outward
+        let (p0, p1, p2) = if gn.dot(avg) < 0.0 { (a, c, b) } else { (a, b, c) }; // fix winding
+        for v in [p0, p1, p2] {
+            let n = grad(v);
+            let mut vv = v;
+            vv.y -= center_y;
+            idx.push(pos.len() as u32);
+            pos.push([vv.x, vv.y, vv.z]);
+            nrm.push([n.x, n.y, n.z]);
+            col.push(nearest_color(&parts, v));
+        }
+    };
+
+    for l in 0..nz {
+        for j in 0..ny {
+            for i in 0..nx {
+                // gather 8 cube corners (pos + field val)
+                let mut cp = [Vec3::ZERO; 8];
+                let mut cv = [0.0f32; 8];
+                for (n, &(di, dj, dl)) in CORNER.iter().enumerate() {
+                    cp[n] = gpos(i + di, j + dj, l + dl);
+                    cv[n] = at(i + di, j + dj, l + dl);
+                }
+                for t in &TETS {
+                    march_tet([cp[t[0]], cp[t[1]], cp[t[2]], cp[t[3]]], [cv[t[0]], cv[t[1]], cv[t[2]], cv[t[3]]], &mut emit);
+                }
+            }
+        }
+    }
+
     let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
-    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, b.pos);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, b.nrm);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, b.col);
-    mesh.insert_indices(Indices::U32(b.idx));
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, pos);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, nrm);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, col);
+    mesh.insert_indices(Indices::U32(idx));
     mesh
 }
 
-// Tapered tube along +Y from y=0 (radius r0) to y=len (radius r1), with end caps. Side normals ~radial.
-fn push_frustum(b: &mut MeshBuf, tf: &Transform, r0: f32, r1: f32, len: f32, c: [f32; 4]) {
-    let tau = std::f32::consts::TAU;
-    let mut ring0 = [0u32; RADIAL];
-    let mut ring1 = [0u32; RADIAL];
-    for k in 0..RADIAL {
-        let a = tau * k as f32 / RADIAL as f32;
-        let (s, co) = a.sin_cos();
-        let n = Vec3::new(s, 0.0, co);
-        ring0[k] = b.vert(tf, Vec3::new(s * r0, 0.0, co * r0), n, c);
-        ring1[k] = b.vert(tf, Vec3::new(s * r1, len, co * r1), n, c);
-    }
-    for k in 0..RADIAL {
-        let kn = (k + 1) % RADIAL;
-        b.tri(ring0[k], ring0[kn], ring1[kn]);
-        b.tri(ring0[k], ring1[kn], ring1[k]);
-    }
-    // caps (fans)
-    let cap0 = b.vert(tf, Vec3::ZERO, Vec3::NEG_Y, c);
-    let cap1 = b.vert(tf, Vec3::Y * len, Vec3::Y, c);
-    for k in 0..RADIAL {
-        let kn = (k + 1) % RADIAL;
-        b.tri(cap0, ring0[kn], ring0[k]);
-        b.tri(cap1, ring1[k], ring1[kn]);
-    }
-}
-
-// UV sphere of radius r, centered at y=r (rests on the attach). `len` unused except to keep the call uniform.
-fn push_sphere(b: &mut MeshBuf, tf: &Transform, r: f32, _len: f32, c: [f32; 4]) {
-    let stacks = RADIAL.max(6);
-    let slices = RADIAL;
-    let center = Vec3::Y * r;
-    let pi = std::f32::consts::PI;
-    let tau = std::f32::consts::TAU;
-    let mut grid = vec![0u32; (stacks + 1) * (slices + 1)];
-    for i in 0..=stacks {
-        let phi = pi * i as f32 / stacks as f32; // 0..pi
-        let (sp, cp) = phi.sin_cos();
-        for j in 0..=slices {
-            let th = tau * j as f32 / slices as f32;
-            let (st, ct) = th.sin_cos();
-            let n = Vec3::new(sp * st, cp, sp * ct);
-            grid[i * (slices + 1) + j] = b.vert(tf, center + n * r, n, c);
-        }
-    }
-    for i in 0..stacks {
-        for j in 0..slices {
-            let a = grid[i * (slices + 1) + j];
-            let d = grid[i * (slices + 1) + j + 1];
-            let e = grid[(i + 1) * (slices + 1) + j];
-            let f = grid[(i + 1) * (slices + 1) + j + 1];
-            b.tri(a, e, f);
-            b.tri(a, f, d);
-        }
-    }
-}
-
-// Flat plate (fin/wing): spans Y in [0,len], X in [-hw,hw], thin Z. hw = r (half-width).
-fn push_plate(b: &mut MeshBuf, tf: &Transform, r: f32, len: f32, c: [f32; 4]) {
-    let hw = r;
-    let hz = (PLATE_THICK * r).max(0.01);
-    let corners = [
-        // (x, y, z, nx, ny, nz) faces: front/back dominate
-        Vec3::new(-hw, 0.0, hz),
-        Vec3::new(hw, 0.0, hz),
-        Vec3::new(hw, len, hz),
-        Vec3::new(-hw, len, hz),
-        Vec3::new(-hw, 0.0, -hz),
-        Vec3::new(hw, 0.0, -hz),
-        Vec3::new(hw, len, -hz),
-        Vec3::new(-hw, len, -hz),
-    ];
-    let face = |b: &mut MeshBuf, q: [usize; 4], n: Vec3| {
-        let v0 = b.vert(tf, corners[q[0]], n, c);
-        let v1 = b.vert(tf, corners[q[1]], n, c);
-        let v2 = b.vert(tf, corners[q[2]], n, c);
-        let v3 = b.vert(tf, corners[q[3]], n, c);
-        b.tri(v0, v1, v2);
-        b.tri(v0, v2, v3);
+// Marching tetrahedra: split inside (val<0) from outside, emit the crossing polygon. 1-or-3 inside -> 1 tri;
+// 2 inside -> quad (2 tris). Crossing point = linear iso-interp along the edge.
+fn march_tet(p: [Vec3; 4], v: [f32; 4], emit: &mut impl FnMut(Vec3, Vec3, Vec3)) {
+    let cross = |a: usize, b: usize| -> Vec3 {
+        let t = v[a] / (v[a] - v[b]); // v[a],v[b] opposite signs -> t in (0,1)
+        p[a] + (p[b] - p[a]) * t
     };
-    face(b, [0, 1, 2, 3], Vec3::Z); // front
-    face(b, [5, 4, 7, 6], Vec3::NEG_Z); // back
-    face(b, [4, 0, 3, 7], Vec3::NEG_X); // left
-    face(b, [1, 5, 6, 2], Vec3::X); // right
-    face(b, [3, 2, 6, 7], Vec3::Y); // top
-    face(b, [4, 5, 1, 0], Vec3::NEG_Y); // bottom
+    let ins: Vec<usize> = (0..4).filter(|&n| v[n] < 0.0).collect();
+    let out: Vec<usize> = (0..4).filter(|&n| v[n] >= 0.0).collect();
+    match ins.len() {
+        1 => {
+            let a = ins[0];
+            emit(cross(a, out[0]), cross(a, out[1]), cross(a, out[2]));
+        }
+        3 => {
+            let a = out[0];
+            emit(cross(a, ins[0]), cross(a, ins[1]), cross(a, ins[2]));
+        }
+        2 => {
+            let (a, b) = (ins[0], ins[1]);
+            let (c, d) = (out[0], out[1]);
+            let (ac, ad, bc, bd) = (cross(a, c), cross(a, d), cross(b, c), cross(b, d));
+            emit(ac, ad, bd);
+            emit(ac, bd, bc);
+        }
+        _ => {} // 0 or 4 inside: no surface in this tet
+    }
 }
 
 // Stable hash of a body graph for the render mesh cache (f32 bit patterns + enum tags + indices, FNV-1a).
