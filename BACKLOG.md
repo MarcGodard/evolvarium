@@ -140,9 +140,10 @@ pholmq/TSN (GPL-2.0) @ commit 49fd49c (pinned in `orrery.rs` + `stars.rs` commen
 - [x] **Render** (`viz.rs`): bird body-plan branch (`flight>0.5`) = swept flat wings + tucked legs; altitude
       renders for free (sim writes Transform.translation). Verified `--capture` (wings + birds aloft + fish).
       Pop stable: fresh fliered world `--gens=3` and migrated saved snapshot both hold ~70-90.
-- [ ] **Showcase seed predates flight**: default `cargo run` loads `evolved-continuous.json` (flight=0) -> no
-      birds until evolution. `cargo run -- --no-load` shows birds now. FOLLOW-UP: evolve+save a new showcase
-      seed with fliers so the default world opens with birds.
+- [x] **Showcase seed predates flight** (DONE 2026-06-24): default `cargo run` now loads `evolved-showcase.json`
+      -- a `--diverse` gens=8 co-evolve thinned to a genome-only seed (200 = 45 fliers up to flight 0.92 +
+      55 swimmers + 100 land), complex morph bodies (mean ~5.3 graph nodes), reseeds a fresh world that grows
+      to carrying cap. Default world opens WITH birds. `evolved-morph.json` kept as a curated `--load` alt.
 - [x] **Bird looks (2026-06-22)**: flapping wings (`Wing` comp + `flap_wings` rotates each about the shoulder
       root on the forward axis; freq from body `size` -> hummingbird flutter vs hawk beats), dedicated swept
       tapered wing mesh (`wing_mesh`, double-sided), bird tail fan, new cosmetic `beak` gene (forward cone =
@@ -359,9 +360,9 @@ pholmq/TSN (GPL-2.0) @ commit 49fd49c (pinned in `orrery.rs` + `stars.rs` commen
 - [x] God-control P = populate the WHOLE planet: plants + trees + creatures scattered globally, each placed
       in habitat it can survive (swimmers in sea w/ high swim, alpine in mountains, climate-matched temp,
       aquatic flora in water, trees on habitable land). sim::seed_planet. Joins B (creature clone burst).
-- [ ] Stronger diversity: now that aquatic has a real food base + swimmers can be seeded, run a --mating long
-      seed on the NEW world (50% ocean + mountains) so the showcase holds aquatic + alpine + land niches.
-      Consider making --mating the default once seeds are re-evolved under it.
+- [x] Stronger diversity (2026-06-24): the new default `evolved-showcase.json` is a multi-niche co-evolved
+      world (fliers + swimmers + alpine + land) holding across the 50%-ocean + mountains planet. See the
+      showcase-seed item above. (--mating-as-default still open to consider.)
 - [ ] **Visual lightning during storms**: render forked lightning bolts in heavy-rain/storm cells (additive
       glowing polyline + branches, brief flash + fade), with a screen/ambient light pop on strike. Tie to the
       weather field (high cloud + rain -> chance per storm cell) so storms feel alive. Reuse the existing
