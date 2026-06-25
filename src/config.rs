@@ -497,9 +497,8 @@ pub const ARMOR_BASAL: f32 = 0.5; // energy/sec basal at full armor
 // venom: toxic flesh deters predators -> predator eating venomous prey gains far less (sickening kill).
 pub const VENOM_DETER: f32 = 0.9;   // fraction of predation gain removed at full prey venom
 pub const VENOM_UPKEEP: f32 = 0.3;  // energy/sec basal at full venom (making toxins costs)
-// limbs: more legs = land traction (small ground-speed bonus) but more move cost per limb. (Rendered leg
+// limbs: legs grip land (see LAND_TRACTION_FLOOR gate below) but more move cost per limb. (Rendered leg
 // COUNT now comes from the generative body graph, morph.rs, not a scalar gene.)
-pub const LIMB_TRACTION: f32 = 0.25; // max land-speed bonus fraction at full limbs
 pub const LIMB_MOVE_COST: f32 = 0.5; // move-cost mult add at full limbs (more legs to drive)
 // climb (arboreal): nimble -> evades predators; reaches fruit trees w/o tall body; arboreal build wastes
 // energy on open flat ground.
@@ -532,7 +531,12 @@ pub const MORPH_REACH_REF: f32 = 2.2;   // reference body reach (above = taller 
 pub const MORPH_TISSUE_COST: f32 = 0.05; // energy/sec per developed part above ref (running more tissue)
 pub const MORPH_MASS_BASAL: f32 = 0.12;  // energy/sec per mass-unit above ref (bigger body, higher basal)
 pub const MORPH_MASS_MOVE: f32 = 0.25;   // move-cost mult add per mass-unit above ref (heavy = costly to push)
-pub const MORPH_TRACTION: f32 = 0.03;    // land-speed mult per ground-contact above ref (more legs = grip)
+// STRONG embodied-locomotion pressure (2026-06-25): ground speed REQUIRES traction from real legs (evolved
+// body-graph ground-contacts). A legless blob crawls at this floor; ~MORPH_GC_REF leg-tips on the ground ->
+// full speed. So a creature that can't forage/flee at 0.18x MUST grow legs (morphology) to survive -> real
+// legged locomotion is selected, not gliding blobs. Small limbs-gene cushion in sim keeps blobs alive while
+// leg geometry evolves. Faded out in water/air (swim/flight drive movement there). Balance-sensitive.
+pub const LAND_TRACTION_FLOOR: f32 = 0.18; // legless land-speed fraction (lower = stronger pressure)
 pub const MORPH_FIN: f32 = 0.04;         // swim-speed mult per unit fin area (caudal/pectoral thrust)
 pub const MORPH_DRAG: f32 = 0.05;        // swim-speed mult LOSS per frontal-area unit above ref (bluff body)
 pub const MORPH_WING_RELIEF: f32 = 0.06; // flight-cost fraction removed per unit wing area (lift), capped

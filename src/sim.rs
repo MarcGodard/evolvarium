@@ -2824,14 +2824,19 @@ pub fn live_step(
         // metabolic tempo: frugal (metab>0.5) trades top speed for cheaper basal; fast (metab<0.5) reverse
         // (morph + wing_load hoisted above, near the flier check)
         let metab_f = genome.metab - 0.5; // -0.5 fast .. +0.5 frugal
-        // shape -> locomotion: extra legs grip land, fins thrust in water, a bluff cross-section drags in water
-        let morph_land = 1.0 + MORPH_TRACTION * (morph.ground_contacts as f32 - MORPH_GC_REF) * (1.0 - wet_here);
+        // shape -> locomotion. STRONG land pressure: ground speed needs TRACTION from real legs (evolved
+        // ground-contacts). Legless blob crawls (LAND_TRACTION_FLOOR); ~MORPH_GC_REF leg-tips -> full speed.
+        // Small limbs-gene cushion (0.4) so a blob isn't instantly starved before leg geometry evolves. Faded
+        // out aloft/in water (swim/flight drive movement there) -> only bites when actually walking on land.
+        let legs = (morph.ground_contacts as f32 / MORPH_GC_REF).max(0.4 * genome.limbs).clamp(0.0, 1.0);
+        let traction = LAND_TRACTION_FLOOR + (1.0 - LAND_TRACTION_FLOOR) * legs;
+        let on_ground = ((1.0 - wet_here) * (1.0 - air_here)).clamp(0.0, 1.0);
+        let land_mult = 1.0 - on_ground * (1.0 - traction); // grounded legless -> traction; aloft/water -> 1.0
         let morph_water = 1.0 + (MORPH_FIN * morph.fin_area - MORPH_DRAG * (morph.frontal_area - MORPH_AREA_REF).max(0.0)) * wet_here;
         let speed = MOVE_SPEED
             * (1.0 + SWIM_SPEED * genome.swim * wet_here) // swimmers fast in water
             * (1.0 + FLIGHT_SPEED * genome.flight * air_here) // fliers fast aloft (gene x altitude)
-            * (1.0 + LIMB_TRACTION * genome.limbs * (1.0 - wet_here)) // more legs = land traction (ground speed)
-            * morph_land.max(0.4) // body-shape land traction (ground-contact count)
+            * land_mult // legged land traction (legless = crawl) -> selects for real locomotion
             * morph_water.max(0.4) // body-shape water thrust/drag (fins vs bluff cross-section)
             * (1.0 - 0.5 * metab_f)
             * (1.0 + SPRINT_BOOST * sprint); // sprint: burst speed for chase/flee
