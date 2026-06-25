@@ -116,7 +116,7 @@ impl Plugin for VizPlugin {
                     toggle_sensors,
                     draw_sensors,
                     (add_plant_visuals, size_plants, add_grass_visuals, add_seaweed_visuals, size_creatures),
-                    (day_night_lighting, update_sun_glow, time_of_day, toggle_shadows, walk_ambient, update_daycycle, track_underwater, update_sky, toggle_underwater_tint, animate_ocean, update_globe_climate, update_aurora_curtains, rotate_sky_stars, position_sky_planets, fade_sky_stars),
+                    (day_night_lighting, update_sun_glow, time_of_day, toggle_shadows, walk_ambient, update_daycycle, track_underwater, update_sky, toggle_underwater_tint, animate_ocean, update_globe_climate, update_aurora_curtains, rotate_sky_stars, position_sky_planets, fade_sky_stars, ocean_opacity),
                     (rain_visuals, lightning_visuals),
                     (fire_visuals, fire_sheet_visuals, smoke_visuals),
                     meteor_visuals,
@@ -2748,6 +2748,26 @@ fn animate_ocean(gen: Res<GenState>, mut q: Query<&mut Transform, With<Ocean>>) 
     let s = 1.004 + 0.002 * (gen.tick as f32 * 0.03).sin();
     for mut tf in &mut q {
         tf.scale = Vec3::splat(s);
+    }
+}
+
+// Ocean opacity by camera mode: OPAQUE in orbit/orrery (transparent-over-seabed sorting shimmers at the far
+// camera + wide water area), but MOSTLY TRANSPARENT in WALK so you see fish/seabed through the surface near
+// shore. Walk camera is close (good depth precision, small water area) + the seabed is floor-dropped clear of
+// the shell, so the see-through stays stable there. Mutates the shared Ocean material only on a real change
+// (alpha_mode flip rebuilds the pipeline, so don't touch it every frame).
+fn ocean_opacity(
+    mode: Res<crate::camera::CameraMode>,
+    q: Query<&MeshMaterial3d<StandardMaterial>, With<Ocean>>,
+    mut mats: ResMut<Assets<StandardMaterial>>,
+) {
+    let walk = *mode == crate::camera::CameraMode::Walk;
+    let (want_mode, want_alpha) = if walk { (AlphaMode::Blend, 0.32) } else { (AlphaMode::Opaque, 1.0) };
+    let Ok(h) = q.single() else { return };
+    let Some(m) = mats.get_mut(&h.0) else { return };
+    if m.alpha_mode != want_mode || (m.base_color.alpha() - want_alpha).abs() > 0.01 {
+        m.alpha_mode = want_mode;
+        m.base_color = Color::srgba(1.0, 1.0, 1.0, want_alpha); // white tint: vertex colors carry water hue
     }
 }
 
