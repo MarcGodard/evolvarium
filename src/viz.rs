@@ -1874,7 +1874,8 @@ fn rain_visuals(gen: Res<GenState>, mut gizmos: Gizmos) {
 // onset tick, fading across FLASH_TICKS, then dark for the rest of the cell's PERIOD.
 fn lightning_visuals(gen: Res<GenState>, mut gizmos: Gizmos, mut strikes: ResMut<Strikes>) {
     use std::f32::consts::{FRAC_PI_2, PI, TAU};
-    strikes.0.clear(); // rebuilt each frame; thunder audio reads onset positions
+    // NOTE: Strikes is an accumulator drained by the audio layer (thunder_audio), NOT cleared here -> avoids a
+    // clear-vs-write race with the L god-key, which also pushes a strike.
     const STORM_RAIN: f32 = 0.55; // only heavy downpours thunder (> LIGHTNING_RAIN 0.4)
     const WARM_TEMP: f32 = 0.65; // warm storms only (mirror rain_visuals snow line; cold storms rarely thunder)
     const PERIOD: u32 = 80; // ticks per cell strike window
@@ -2632,6 +2633,7 @@ fn god_disturbances(
     mut creatures: Query<(&Genome, &mut Alive), With<Creature>>,
     mut commands: Commands,
     mut rng: ResMut<crate::rng::Rng>,
+    mut strikes: ResMut<Strikes>,
 ) {
     if *mode == crate::camera::CameraMode::Orrery {
         return; // B/P/L/K are orrery overlay toggles in orrery mode; god controls only on the planet
@@ -2666,6 +2668,7 @@ fn god_disturbances(
             }
         }
         fire.cell[best] = 1.0;
+        strikes.0.push(grid_cell_surface(best)); // feed the audio layer -> thunder crack on the L strike
         info!("god: lightning strike -> wildfire ignited");
     }
     if keys.just_pressed(KeyCode::KeyK) {

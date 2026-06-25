@@ -104,6 +104,39 @@ fn noise_bed(seed: u32, cut: f32, crackle: f32) -> Arc<[u8]> {
     wav_bytes(&loopify(s, SR as usize / 12))
 }
 
+// Underwater ambience: deep muffled rumble + sparse rising bubble blips. Distinct from surf -> "everything
+// sounds different down here". Loops.
+fn sub_bed() -> Arc<[u8]> {
+    let n = (SR as f32 * BED_SECS) as usize;
+    let mut rng = Lcg(5);
+    let mut lp = 0.0f32;
+    let mut s = vec![0.0f32; n];
+    for v in s.iter_mut() {
+        lp += 0.02 * (rng.f() - lp); // very dark muffled rumble
+        *v = lp * 2.0;
+    }
+    let mut i = 0usize; // sparse bubble blips: short rising sine pops
+    loop {
+        i += (SR as f32 * (0.25 + rng.f().abs() * 0.6)) as usize;
+        if i >= n {
+            break;
+        }
+        let f0 = 300.0 + rng.f().abs() * 500.0;
+        let blen = ((SR as f32 * 0.08) as usize).min(n - i);
+        for k in 0..blen {
+            let t = k as f32 / SR as f32;
+            let env = (-t * 30.0).exp();
+            s[i + k] += (t * f0 * (1.0 + t * 6.0) * std::f32::consts::TAU).sin() * env * 0.25; // rising chirp
+        }
+    }
+    let peak = s.iter().fold(1e-4f32, |m, v| m.max(v.abs()));
+    let g = 0.55 / peak;
+    for v in &mut s {
+        *v *= g;
+    }
+    wav_bytes(&loopify(s, SR as usize / 12))
+}
+
 // Decaying call tone: sine at `freq` + a fifth, exponential decay + vibrato. ~0.3s one-shot.
 fn call_tone(freq: f32) -> Arc<[u8]> {
     let n = (SR as f32 * 0.3) as usize;
@@ -147,6 +180,7 @@ enum Bed {
     Rain,
     Surf,
     Fire,
+    Sub, // underwater: muffled deep hum + bubbles (replaces ALL land beds when the listener is submerged)
 }
 
 #[derive(Component)]
@@ -174,6 +208,7 @@ fn setup_audio(mut commands: Commands, mut sources: ResMut<Assets<AudioSource>>)
         (Bed::Rain, noise_bed(2, 0.5, 0.0)),
         (Bed::Surf, noise_bed(3, 0.03, 0.0)),
         (Bed::Fire, noise_bed(4, 0.25, 1.0)),
+        (Bed::Sub, sub_bed()),
     ];
     for (kind, bytes) in beds {
         let h = sources.add(AudioSource { bytes });
@@ -213,28 +248,34 @@ fn ambient_mix(
     mode: Res<crate::camera::CameraMode>,
     gen: Res<GenState>,
     fire: Res<Fire>,
+    underwater: Res<crate::viz::Underwater>,
     walkers: Query<&crate::camera::WalkCam>,
     mut beds: Query<(&AmbientBed, &mut AudioSink)>,
 ) {
     let ground = cam_ground(&mode, &walkers);
-    let (mut t_wind, mut t_rain, mut t_surf, mut t_fire) = (0.0f32, 0.0, 0.0, 0.0);
+    let (mut t_wind, mut t_rain, mut t_surf, mut t_fire, mut t_sub) = (0.0f32, 0.0, 0.0, 0.0, 0.0);
+    // Submerged: kill ALL land beds, run the muffled underwater bed instead -> sound is wholly different below.
     if let Some(d) = ground {
-        let rain = crate::sphere::rain_at(d, gen.tick);
-        // surf: sample a few offsets -> fraction ocean nearby (hear the coast, not just standing in water).
-        let mut ocean = 0.0;
-        for k in 0..6 {
-            let a = k as f32 * std::f32::consts::TAU / 6.0;
-            let off = (Vec3::new(a.cos(), 0.0, a.sin()) * 0.05).normalize_or_zero();
-            let probe = (d + off * 0.05).normalize_or_zero();
-            if crate::sphere::is_ocean(probe) {
-                ocean += 1.0 / 6.0;
+        if underwater.0 {
+            t_sub = 0.55;
+        } else {
+            let rain = crate::sphere::rain_at(d, gen.tick);
+            // surf: sample a few offsets -> fraction ocean nearby (hear the coast, not just standing in water).
+            let mut ocean = 0.0;
+            for k in 0..6 {
+                let a = k as f32 * std::f32::consts::TAU / 6.0;
+                let off = (Vec3::new(a.cos(), 0.0, a.sin()) * 0.05).normalize_or_zero();
+                let probe = (d + off * 0.05).normalize_or_zero();
+                if crate::sphere::is_ocean(probe) {
+                    ocean += 1.0 / 6.0;
+                }
             }
+            let fire_here = fire.get(crate::sphere::surface_pos(d, 0.0));
+            t_wind = 0.05 + 0.18 * rain; // breeze always; storm picks up wind
+            t_rain = (rain * 1.1).min(1.0) * 0.5;
+            t_surf = ocean * 0.45;
+            t_fire = (fire_here * 1.5).min(1.0) * 0.5;
         }
-        let fire_here = fire.get(crate::sphere::surface_pos(d, 0.0));
-        t_wind = 0.05 + 0.18 * rain; // breeze always; storm picks up wind
-        t_rain = (rain * 1.1).min(1.0) * 0.5;
-        t_surf = ocean * 0.45;
-        t_fire = (fire_here * 1.5).min(1.0) * 0.5;
     }
     for (bed, mut sink) in &mut beds {
         let target = match bed.0 {
@@ -242,6 +283,7 @@ fn ambient_mix(
             Bed::Rain => t_rain,
             Bed::Surf => t_surf,
             Bed::Fire => t_fire,
+            Bed::Sub => t_sub,
         };
         // lerp current -> target (~0.5s glide) so swells are smooth, not stepped.
         let cur = sink.volume().to_linear();
@@ -257,6 +299,7 @@ fn creature_calls(
     gen: Res<GenState>,
     assets: Res<AudioAssets>,
     mut log: ResMut<CallLog>,
+    underwater: Res<crate::viz::Underwater>,
     cam: Query<&GlobalTransform, With<Camera3d>>,
     callers: Query<(Entity, &GlobalTransform, &Genome, &crate::components::Brain), With<Creature>>,
 ) {
@@ -279,11 +322,16 @@ fn creature_calls(
         })
         .collect();
     cand.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal));
+    // underwater listener: calls muffled -> slower+lower (speed<1) + quieter. "Sound is different down here."
+    let (speed, vmul) = if underwater.0 { (0.55, 0.55) } else { (1.0, 1.0) };
     for (e, pos, pitch, loud) in cand.into_iter().take(CALL_MAX_PER_FRAME) {
         let bin = ((pitch * (CALL_PITCHES - 1) as f32).round() as usize).min(CALL_PITCHES - 1);
         commands.spawn((
             AudioPlayer(assets.calls[bin].clone()),
-            PlaybackSettings::DESPAWN.with_spatial(true).with_volume(Volume::Linear(loud.clamp(0.2, 1.0))),
+            PlaybackSettings::DESPAWN
+                .with_spatial(true)
+                .with_volume(Volume::Linear((loud.clamp(0.2, 1.0)) * vmul))
+                .with_speed(speed),
             Transform::from_translation(pos),
         ));
         log.last.insert(e, gen.tick);
@@ -296,33 +344,38 @@ fn creature_calls(
 }
 
 // Thunder one-shot when lightning strikes near the camera. Reads strike events from the viz lightning system.
+// Thunder one-shot when lightning strikes near the camera. Strikes is an ACCUMULATOR (filled by viz
+// lightning_visuals at strike onset + the L god-key); this DRAINS it so writers never need a per-frame clear
+// (avoids a clear-vs-write race) and so both natural + god-triggered strikes fire.
 fn thunder_audio(
     mut commands: Commands,
     gen: Res<GenState>,
     assets: Res<AudioAssets>,
     mut log: ResMut<CallLog>,
-    strikes: Option<Res<crate::viz::Strikes>>,
+    mut strikes: ResMut<crate::viz::Strikes>,
     cam: Query<&GlobalTransform, With<Camera3d>>,
 ) {
-    let (Some(strikes), Ok(cam_t)) = (strikes, cam.single()) else { return };
-    if strikes.0.is_empty() || gen.tick.saturating_sub(log.last_strike_tick) < 8 {
-        return; // rate-limit: at most one thunder per ~8 ticks
-    }
-    let cam_pos = cam_t.translation();
-    // nearest strike to the camera
-    let Some(nearest) = strikes.0.iter().min_by(|a, b| {
-        a.distance_squared(cam_pos).partial_cmp(&b.distance_squared(cam_pos)).unwrap_or(std::cmp::Ordering::Equal)
-    }) else {
-        return;
-    };
-    let d = nearest.distance(cam_pos);
-    if d > THUNDER_RADIUS {
+    if strikes.0.is_empty() {
         return;
     }
-    let vol = (1.0 - d / THUNDER_RADIUS).clamp(0.0, 1.0).powi(2); // distant strikes faint
-    commands.spawn((
-        AudioPlayer(assets.thunder.clone()),
-        PlaybackSettings::DESPAWN.with_volume(Volume::Linear(vol * 0.9)),
-    ));
-    log.last_strike_tick = gen.tick;
+    if let Ok(cam_t) = cam.single() {
+        if gen.tick.saturating_sub(log.last_strike_tick) >= 8 {
+            // rate-limit: at most one thunder per ~8 ticks
+            let cam_pos = cam_t.translation();
+            let nearest = strikes
+                .0
+                .iter()
+                .copied()
+                .min_by(|a, b| a.distance_squared(cam_pos).partial_cmp(&b.distance_squared(cam_pos)).unwrap_or(std::cmp::Ordering::Equal));
+            if let Some(n) = nearest {
+                let d = n.distance(cam_pos);
+                if d <= THUNDER_RADIUS {
+                    let vol = (1.0 - d / THUNDER_RADIUS).clamp(0.0, 1.0).powi(2) * 0.85 + 0.12; // floor -> distant storms still rumble
+                    commands.spawn((AudioPlayer(assets.thunder.clone()), PlaybackSettings::DESPAWN.with_volume(Volume::Linear(vol))));
+                    log.last_strike_tick = gen.tick;
+                }
+            }
+        }
+    }
+    strikes.0.clear(); // drain regardless (rate-limit drops extras)
 }
