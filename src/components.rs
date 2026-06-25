@@ -158,6 +158,8 @@ pub struct Brain {
     pub defend: f32,  // NN brace intent 0..1: raises defense, costs mobility
     pub voice: f32,   // NN call intensity 0..1 (out[7]) stashed this tick -> read by next tick's hearing snapshot + audio
     // (1-tick delay, same pattern as prev_dist/fight_reward).
+    pub memory: Vec<f32>, // MEM_CELLS recurrent registers: this tick's memory-output values (out[MEM_OUT_START..]),
+    // read back as globals next tick. 1-tick delay (same pattern as voice). 0 = latent.
     // pending combat reward set by predation_step (kill/defend/whiff), consumed + cleared next live_step
     // learn() call. 1-tick delay, same pattern as prev_dist.
     pub fight_reward: f32,

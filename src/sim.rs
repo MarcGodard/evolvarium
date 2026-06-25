@@ -704,7 +704,7 @@ pub(crate) fn spawn_creature(commands: &mut Commands, g: Genome, pos: Vec3, rng:
     let mut g = g;
     g.ensure_net_shape();
     let h = rng.range(-std::f32::consts::PI, std::f32::consts::PI);
-    let brain = Brain { net: g.net.clone(), prev_dist: f32::INFINITY, attack: 0.0, defend: 0.0, voice: 0.0, fight_reward: 0.0 };
+    let brain = Brain { net: g.net.clone(), prev_dist: f32::INFINITY, attack: 0.0, defend: 0.0, voice: 0.0, fight_reward: 0.0, memory: vec![0.0; crate::genome::MEM_CELLS] };
     let diet = diet_state(&g);
     commands.spawn((
         Creature,
@@ -1154,7 +1154,7 @@ pub fn restore_full_world(
         let d = Vec3::from_array(c.dir).normalize_or_zero();
         let alt = c.alt.max(0.0);
         let p = crate::sphere::surface_pos(d, CREATURE_Y + alt);
-        let brain = Brain { net: g.net.clone(), prev_dist: f32::INFINITY, attack: 0.0, defend: 0.0, voice: 0.0, fight_reward: 0.0 };
+        let brain = Brain { net: g.net.clone(), prev_dist: f32::INFINITY, attack: 0.0, defend: 0.0, voice: 0.0, fight_reward: 0.0, memory: vec![0.0; crate::genome::MEM_CELLS] };
         let mut reserves = [RESERVE_REQ; NUTRIENTS];
         for (i, r) in c.reserves.iter().take(NUTRIENTS).enumerate() {
             reserves[i] = *r;
@@ -1400,7 +1400,7 @@ pub fn spawn_world_headless(
         let mut g = g;
         g.ensure_net_shape(); // migrate older saved nets to current brain-input width
         let h = rng.range(-std::f32::consts::PI, std::f32::consts::PI);
-        let brain = Brain { net: g.net.clone(), prev_dist: f32::INFINITY, attack: 0.0, defend: 0.0, voice: 0.0, fight_reward: 0.0 };
+        let brain = Brain { net: g.net.clone(), prev_dist: f32::INFINITY, attack: 0.0, defend: 0.0, voice: 0.0, fight_reward: 0.0, memory: vec![0.0; crate::genome::MEM_CELLS] };
         let mut diet = diet_state(&g);
         if skip_warmup {
             diet.age = (rng.f32() * 600.0) as u32;
@@ -1671,7 +1671,7 @@ pub fn spawn_world_render(
         let mut g = g;
         g.ensure_net_shape(); // migrate older saved nets to current brain-input width
         let h = rng.range(-std::f32::consts::PI, std::f32::consts::PI);
-        let brain = Brain { net: g.net.clone(), prev_dist: f32::INFINITY, attack: 0.0, defend: 0.0, voice: 0.0, fight_reward: 0.0 };
+        let brain = Brain { net: g.net.clone(), prev_dist: f32::INFINITY, attack: 0.0, defend: 0.0, voice: 0.0, fight_reward: 0.0, memory: vec![0.0; crate::genome::MEM_CELLS] };
         let mut diet = diet_state(&g);
         if skip_warmup {
             diet.age = (rng.f32() * 600.0) as u32;
@@ -2774,7 +2774,12 @@ pub fn live_step(
         // hearing globals (LAST, matching ensure_net_shape padding order). ~0 when nothing audible / deaf:
         input.push(hear_loud); // loudest freq-matched caller within earshot (0..1, noise-floor-masked) -> alert
         input.push(hear_bear); // bearing to it (-1..1) -> orient toward/away
-        input.push(ambient_loud); // environmental noise (LAST global): rain/storm/fire indicator + masks calls
+        input.push(ambient_loud); // environmental noise: rain/storm/fire indicator + masks calls
+        // memory read-back globals (LAST, matching ensure_net_shape padding order): last tick's memory writes.
+        // 1-tick delay (Brain.memory stashed below). 0 = latent (and = pad fill for migrated nets).
+        for &m in &brain.memory {
+            input.push(m);
+        }
 
         // think (per-life learned brain, dynamic topology matching this genome's sensor count)
         let (h, out) = forward(&brain.net, &input);
@@ -2791,6 +2796,10 @@ pub fn live_step(
         // voice: NN-directed call (out[7]). Emit only above gate (no faint chatter); stashed for NEXT tick's
         // hearing snapshot (1-tick delay) + the audio layer. Emit pitch is anatomical (1-size), applied listener-side.
         brain.voice = if out[7] > VOICE_GATE { out[7] } else { 0.0 };
+        // stash recurrent memory writes (out[MEM_OUT_START..]) for next tick's read-back globals (1-tick delay).
+        for i in 0..crate::genome::MEM_CELLS {
+            brain.memory[i] = out[crate::genome::MEM_OUT_START + i];
+        }
         // fatigue saps usable output (tired = sluggish); intended effort still costs full MOVE_COST below, so
         // flailing while exhausted is a net loss -> resting to recover is the only way out. Bracing (defend)
         // immobilizes: trade ground speed for a harder-to-kill stance.

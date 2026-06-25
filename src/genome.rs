@@ -8,7 +8,13 @@ use serde::{Deserialize, Serialize};
 
 pub const MIN_HIDDEN: usize = 2; // floor
 pub const MAX_HIDDEN: usize = 16; // ceiling (bounds per-neuron upkeep cost)
-pub const OUTPUTS: usize = 8; // [thrust 0..1, turn -1..1, attack, defend, eat, sprint, climb, voice]; idx>=2 = 0..1 intents (climb: 0=descend, 1=climb; voice: NN call intensity, emit pitch is anatomical from size)
+// Recurrent memory: MEM_CELLS registers. Net WRITES them as extra outputs (idx MEM_OUT_START..) and READS
+// last tick's values back as extra globals (1-tick delay via Brain.memory, same pattern as voice/prev_dist).
+// Bounded (sigmoid 0..1 -> no blow-up). MEM_CELLS = 0 -> pure feedforward (the "gate behind a setting", spec
+// 04). Memory biased off on migrated nets (OUTPUT_MIGRATE_BIAS) so old seeds behave identically.
+pub const MEM_CELLS: usize = 3;
+pub const MEM_OUT_START: usize = 8; // out[8..8+MEM_CELLS] = memory writes (after the 8 fixed motors)
+pub const OUTPUTS: usize = 8 + MEM_CELLS; // [thrust 0..1, turn -1..1, attack, defend, eat, sprint, climb, voice, mem*MEM_CELLS]; idx>=2 = 0..1 (sigmoid). memory cells 0..1 = what to remember (read back next tick)
 pub const NFOOD: usize = 4; // plant FAMILY count (hue + kind label only; NOT metabolic axis)
 pub const NUTRIENTS: usize = 10; // distinct nutrients = metabolic axis (regulatory uptake genome, see 14/05)
 
@@ -16,16 +22,17 @@ pub const MIN_SENSORS: usize = 1;
 pub const MAX_SENSORS: usize = 8;
 pub const SIG_PER_SENSOR: usize = 2; // each sensor reports [inv-dist, food type/readiness]
 // Global (non-sensor) brain inputs, appended after per-sensor signals. Column order:
-// [energy, daylight, fatigue, bias, toxic_load, shade, threat_dist, threat_bearing, wet, mag_lat, compass, altitude, hear_loud, hear_bearing, ambient_loud]
+// [energy, daylight, fatigue, bias, toxic_load, shade, threat_dist, threat_bearing, wet, mag_lat, compass, altitude, hear_loud, hear_bearing, ambient_loud, mem*MEM_CELLS]
 // energy+daylight+fatigue -> diurnal/nocturnal rest; toxic_load -> avoid poison; shade -> seek canopy in heat;
 // threat_dist/bearing -> flee bigger predator; wet -> in water; mag_lat+compass -> magnetic nav (gated by
 // `magneto` gene); altitude -> own height aloft (fliers manage climb/descend); hear_loud+hear_bearing ->
 // OMNIDIRECTIONAL acoustic sense (loudest freq-matched caller, works in dark/behind terrain; gated by `hearing`
 // acuity); ambient_loud -> environmental NOISE (rain/storm incoming, nearby fire, water) = indicator + masks
 // hear_loud (a call must beat the noise floor). GOTCHA: M4 widened 4 -> 9; magneto added 2 -> 11; flight added 1
-// -> 12; hearing added 2 -> 14; ambient added 1 -> 15. NEW globals always appended LAST so pad_ih_inputs (inserts
+// -> 12; hearing added 2 -> 14; ambient added 1 -> 15; memory added MEM_CELLS (read-back of last tick's writes).
+// NEW globals always appended LAST so pad_ih_inputs (inserts
 // before bias) aligns old saved nets correctly. Old saved nets zero-padded for new columns on load, see ensure_net_shape.
-pub const GLOBAL_INPUTS: usize = 15;
+pub const GLOBAL_INPUTS: usize = 15 + MEM_CELLS;
 pub const CONE_HALF: f32 = 0.7; // sensor FOV half-angle (rad)
 const RANGE_MIN: f32 = 4.0;
 const RANGE_MAX: f32 = 48.0; // long-range vision possible (big world); energy cost = trade-off (see sim SENSE_COST)
@@ -220,10 +227,19 @@ fn pad_ih_inputs(net: &mut Net, want_in: usize, fill: f32) {
 // new outputs existed: combat+effort OFF (strong negative bias -> sigmoid ~0, no unearned ATTACK_COST /
 // SPRINT_COST / brace-drag), EAT ON (positive bias -> sigmoid ~1, still feeds on contact like pre-eat-gate
 // code). Fresh founders use random_net instead (varied combat outputs) so emergence works. Indices:
-// [thrust, turn, attack, defend, eat, sprint, climb, voice]; 0/1 never padded (always present). climb biased
-// negative -> migrated net sinks to ground (no unearned flight). voice biased negative -> migrated net mostly
-// silent (no unearned VOICE_COST), evolution turns calling on when it pays.
-const OUTPUT_MIGRATE_BIAS: [f32; OUTPUTS] = [0.0, 0.0, -4.0, -4.0, 4.0, -4.0, -4.0, -3.0];
+// [thrust, turn, attack, defend, eat, sprint, climb, voice, mem*MEM_CELLS]; 0/1 never padded (always present).
+// climb biased negative -> migrated net sinks to ground (no unearned flight). voice biased negative -> migrated
+// net mostly silent. memory cells biased negative -> emit ~0 -> read-back 0 -> old seeds behave identically.
+// const fn so the array stays correct when MEM_CELLS changes (memory entries default to the -4 fill).
+const fn output_migrate_bias() -> [f32; OUTPUTS] {
+    let mut b = [-4.0; OUTPUTS]; // off by default (attack/defend/sprint/climb + memory cells)
+    b[0] = 0.0; // thrust (never padded, kept neutral)
+    b[1] = 0.0; // turn
+    b[4] = 4.0; // eat ON (feeds on contact like pre-eat-gate code)
+    b[7] = -3.0; // voice (mostly silent)
+    b
+}
+const OUTPUT_MIGRATE_BIAS: [f32; OUTPUTS] = output_migrate_bias();
 
 // Grow NET ho layer to want_rows (migrate seed saved when OUTPUTS smaller, e.g. pre-combat 2-output nets).
 // New output row = hidden+1 long (matches live hidden count): zero hidden->output weights + per-output
@@ -767,7 +783,7 @@ mod tests {
 
     #[test]
     fn ensure_net_shape_grows_old_output_rows() {
-        // simulate PRE-COMBAT save (OUTPUTS was 2) by truncating ho to 2 rows, then migrate to OUTPUTS=6.
+        // simulate PRE-COMBAT save (OUTPUTS was 2) by truncating ho to 2 rows, then migrate to current OUTPUTS.
         let mut rng = Rng::seed(11);
         let mut g = Genome::random(&mut rng);
         g.net.ho.truncate(2);
@@ -780,11 +796,40 @@ mod tests {
         for row in g.net.ho.iter().chain(g.plast.ho.iter()) {
             assert_eq!(row.len(), hidden_plus_bias, "new output rows are hidden+1 wide");
         }
-        // forward + learn at OUTPUTS=6 must not panic (migration covers both layers)
+        // forward + learn at current OUTPUTS must not panic (migration covers both layers)
         let want = n_inputs(g.n_sensors());
         let input = vec![0.1f32; want];
         let (h, out) = forward(&g.net, &input);
         learn(&mut g.net, &g.plast, &input, &h, &out, 1.0, 0.04);
+    }
+
+    #[test]
+    fn ensure_net_shape_migrates_pre_memory_nets() {
+        // simulate a PRE-MEMORY seed: strip the MEM_CELLS read-back input cols + the MEM_CELLS memory output
+        // rows, then migrate. Memory must come back biased off (emit ~0) so the old seed behaves identically.
+        if MEM_CELLS == 0 {
+            return; // recurrence gated off -> nothing to migrate
+        }
+        let mut rng = Rng::seed(13);
+        let mut g = Genome::random(&mut rng);
+        let want = n_inputs(g.n_sensors());
+        for row in g.net.ih.iter_mut().chain(g.plast.ih.iter_mut()) {
+            let at = row.len() - 1 - MEM_CELLS; // strip last MEM_CELLS input cols (before bias)
+            row.drain(at..at + MEM_CELLS);
+        }
+        g.net.ho.truncate(OUTPUTS - MEM_CELLS); // drop memory output rows
+        g.plast.ho.truncate(OUTPUTS - MEM_CELLS);
+        g.ensure_net_shape();
+        assert_eq!(g.net.ho.len(), OUTPUTS, "memory output rows restored");
+        for row in g.net.ih.iter() {
+            assert_eq!(row.len(), want + 1, "memory read-back input cols restored");
+        }
+        // migrated memory outputs biased off -> sigmoid(bias) ~0 with zero input
+        let input = vec![0.0f32; want];
+        let (_, out) = forward(&g.net, &input);
+        for i in 0..MEM_CELLS {
+            assert!(out[MEM_OUT_START + i] < 0.1, "migrated memory cell emits ~0, got {}", out[MEM_OUT_START + i]);
+        }
     }
 
     #[test]
