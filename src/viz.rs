@@ -117,7 +117,7 @@ impl Plugin for VizPlugin {
                     draw_sensors,
                     (add_plant_visuals, size_plants, add_grass_visuals, add_seaweed_visuals, size_creatures),
                     (day_night_lighting, update_sun_glow, time_of_day, toggle_shadows, walk_ambient, update_daycycle, track_underwater, update_sky, toggle_underwater_tint, animate_ocean, update_globe_climate, update_aurora_curtains, rotate_sky_stars, position_sky_planets, fade_sky_stars),
-                    rain_visuals,
+                    (rain_visuals, lightning_visuals),
                     (fire_visuals, fire_sheet_visuals, smoke_visuals),
                     meteor_visuals,
                     update_clouds,
@@ -1694,6 +1694,78 @@ fn rain_visuals(gen: Res<GenState>, mut gizmos: Gizmos) {
     }
 }
 
+// Lightning: brief jagged bolts over heavy WARM-storm cells. Render-only immediate gizmos (like rain_visuals),
+// timed by tick-bucketed hashes -> deterministic, no per-frame RNG, no entity churn. Cosmetic storm flavor
+// tied to the rain field (same cells where sim lightning can ignite fire), independent of the sim's own
+// ignition roll. Per strike: jagged cloud->ground channel + a fork + a ground starburst flash, bright at the
+// onset tick, fading across FLASH_TICKS, then dark for the rest of the cell's PERIOD.
+fn lightning_visuals(gen: Res<GenState>, mut gizmos: Gizmos) {
+    use std::f32::consts::{FRAC_PI_2, PI, TAU};
+    const STORM_RAIN: f32 = 0.55; // only heavy downpours thunder (> LIGHTNING_RAIN 0.4)
+    const WARM_TEMP: f32 = 0.65; // warm storms only (mirror rain_visuals snow line; cold storms rarely thunder)
+    const PERIOD: u32 = 80; // ticks per cell strike window
+    const FLASH_TICKS: u32 = 8; // bolt visible this many ticks, then dark the rest of PERIOD
+    const P_STRIKE: f32 = 0.08; // fraction of eligible cells firing per window -> sparse (few bolts at once)
+    const SEGS: usize = 7; // jagged channel segments (cloud base -> ground)
+    let (rows, cols) = (44usize, 88usize);
+    let top_r = cloud_alt(); // bolt head at cloud base
+    for j in 0..rows {
+        for i in 0..cols {
+            let lat = -FRAC_PI_2 + PI * (j as f32 + 0.5) / rows as f32;
+            let lon = -PI + TAU * (i as f32 + 0.5) / cols as f32;
+            let d = crate::sphere::lonlat_to_pos(lon, lat, 0.0).normalize();
+            if crate::sphere::rain_at(d, gen.tick) < STORM_RAIN || crate::sphere::base_temperature(d) < WARM_TEMP {
+                continue;
+            }
+            let cell = (j * cols + i) as u32;
+            let phase = (hash01(cell ^ 0x9E37) * PERIOD as f32) as u32; // desync cells (no synchronized flash)
+            let tt = gen.tick.wrapping_add(phase);
+            let age = tt % PERIOD;
+            if age >= FLASH_TICKS {
+                continue; // dark most of the cycle
+            }
+            let window = tt / PERIOD; // strike index -> sparsity gate + per-strike geometry seed
+            if hash01(cell.wrapping_mul(2654435761).wrapping_add(window)) > P_STRIKE {
+                continue;
+            }
+            let seed = cell ^ window.wrapping_mul(0x85EB);
+            let (east, north) = crate::sphere::tangent_frame(d);
+            let foot = crate::sphere::surface_pos(d, 0.0);
+            let top = d * top_r;
+            let fade = 1.0 - age as f32 / FLASH_TICKS as f32; // 1 at onset -> 0 at end
+            let a = (0.55 + 0.45 * fade).min(1.0);
+            let core = Color::srgba(0.90, 0.94, 1.0, a); // hot blue-white channel
+            // jagged channel: lerp top->foot, lateral zig-zag widest mid-channel, 0 at the ground (foot exact)
+            let mut prev = top;
+            let mut mid = foot;
+            for s in 1..=SEGS {
+                let f = s as f32 / SEGS as f32;
+                let amp = 3.2 * (f * (1.0 - f) * 4.0).min(1.0);
+                let h1 = hash01(seed.wrapping_add(s as u32 * 31)) - 0.5;
+                let h2 = hash01(seed.wrapping_add(s as u32 * 71) ^ 0xAB) - 0.5;
+                let p = top.lerp(foot, f) + east * h1 * amp + north * h2 * amp;
+                gizmos.line(prev, p, core);
+                if s == SEGS / 2 {
+                    mid = p;
+                }
+                prev = p;
+            }
+            // fork: short branch off the mid node, angling down + sideways
+            let bdir = (foot - mid).normalize_or_zero();
+            let bside = east * (hash01(seed ^ 0x33) - 0.5) + north * (hash01(seed ^ 0x77) - 0.5);
+            gizmos.line(mid, mid + bdir * 6.0 + bside * 5.0, Color::srgba(0.85, 0.90, 1.0, a * 0.7));
+            // ground flash: tangent starburst at the foot (illumination pop), grows as it fades
+            let burst = Color::srgba(0.80, 0.88, 1.0, a * 0.6);
+            let rad = 1.5 + 3.5 * (1.0 - fade);
+            for k in 0..6 {
+                let ang = TAU * k as f32 / 6.0;
+                let dir = east * ang.cos() + north * ang.sin();
+                gizmos.line(foot + d * 0.2, foot + d * 0.2 + dir * rad, burst);
+            }
+        }
+    }
+}
+
 // Drifting clouds as solid translucent puffs (not wireframe). Fixed grid of flattened white spheres rides
 // shell well above tallest trees; each frame opacity + size track cloud field which scrolls with wind ->
 // clouds form, drift, dissolve. cloud_alt() clears terrain + trees.
@@ -2667,7 +2739,10 @@ fn toggle_underwater_tint(
 
 // Breathe slow swell on ocean shell (subtle radial scale wobble = living tide). Cosmetic.
 fn animate_ocean(gen: Res<GenState>, mut q: Query<&mut Transform, With<Ocean>>) {
-    let s = 1.0 + 0.004 * (gen.tick as f32 * 0.03).sin();
+    // Swell stays STRICTLY above sea level (min scale 1.002 -> shell ~0.16u above PLANET_R). Old [0.996,1.004]
+    // dipped the shell below PLANET_R half the cycle -> transparent shell went coplanar with sea-level coastal
+    // terrain -> z-fight flicker (water<->terrain) along shorelines. Floor above 1.0 keeps the shell on top.
+    let s = 1.004 + 0.002 * (gen.tick as f32 * 0.03).sin();
     for mut tf in &mut q {
         tf.scale = Vec3::splat(s);
     }

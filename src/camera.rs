@@ -30,12 +30,34 @@ impl Plugin for OrbitCameraPlugin {
                     apply_orbit,
                     apply_walk,
                     follow_camera,
+                    update_camera_near,
                     update_shadow_mode,
                     update_shadow_cascade,
                     update_planet_caster,
                 )
                     .chain(),
             );
+    }
+}
+
+// Raise the near plane in ORBIT so depth precision survives the far camera. Default near (0.1) with far=12000
+// crushes the depth buffer at orbit range -> the transparent ocean shell can't separate from the shallow
+// seafloor terrain -> z-fight flicker (orbit-only; up-close walk geometry sits where 0.1 has plenty of
+// precision). Nearest planet geometry is ~(center_dist - PLANET_R) away, so a near at ~40% of that reclaims
+// precision without clipping the near limb. Walk/orrery keep the tight 0.1 (close ground needs it). Runs after
+// apply_orbit/follow_camera so it reads the final camera transform. Scoped to the main cam (With<OrbitCam>) so
+// the minimap camera is untouched.
+fn update_camera_near(mode: Res<CameraMode>, mut q: Query<(&Transform, &mut Projection), With<OrbitCam>>) {
+    let Ok((t, mut proj)) = q.single_mut() else { return };
+    if let Projection::Perspective(p) = &mut *proj {
+        let near = if *mode == CameraMode::Orbit {
+            ((t.translation.length() - crate::sphere::PLANET_R) * 0.4).clamp(0.5, 200.0)
+        } else {
+            0.1
+        };
+        if (p.near - near).abs() > 0.01 {
+            p.near = near;
+        }
     }
 }
 
