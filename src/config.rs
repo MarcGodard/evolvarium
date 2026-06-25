@@ -121,6 +121,12 @@ pub const DROWN_DEPTH: f32 = 0.25;     // min submersion (0 coast .. 1 abyss) be
 // holding altitude burns energy and big wings are clumsy on the ground (mirror SWIM_LAND_COST). Conservative
 // costs in this visuals-first pass: flight must NOT become a free escape valve (balance-phase follow-up).
 pub const FLIGHT_KNEE: f32 = 0.35;      // min flight gene to leave the ground (below = grounded walker)
+// Wing loading = body mass / wing area (the real physics gate). Cube-square law: mass ~ size^3, wing area ~
+// size^2, so loading ~ size -> big bodies need disproportionately bigger wings. Above MAX the wings can't lift
+// the mass -> grounded even WITH the flight gene (real cap on flyer size: elephants don't fly). Flight needs
+// BOTH flight gene >= FLIGHT_KNEE AND wing_loading <= this. Calibrated (see sim::wing_loading dist) so winged
+// gene-fliers stay aloft, wingless/heavy ones drop. Raise = heavier fliers allowed; lower = stricter.
+pub const MAX_WING_LOADING: f32 = 12.0;
 pub const MAX_FLIGHT_ALT: f32 = 6.0;    // altitude ceiling (surface-offset units above CREATURE_Y)
 pub const FLIGHT_SPEED: f32 = 3.0;      // top-speed bonus fraction at full flight when fully airborne. High (>SWIM_SPEED): birds are the FASTEST movers, zipping aloft (air = less drag than water/ground). At full flight x airborne -> ~4x a walker's speed. Tunable in balance phase.
 pub const FLIGHT_CLIMB_RATE: f32 = 4.0; // altitude units/sec gained/lost at full climb/descend intent

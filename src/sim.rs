@@ -2458,8 +2458,20 @@ struct LiveBatch {
 //   swimmer (flight<KNEE, swim>=SWIM_DROWN_MIN): ceil>0 ONLY in deep enough water; over DRY land ceil==0
 //     -> a swimmer on land is pinned to the surface, can NEVER rise into the air
 //   walker (flight<KNEE, swim<DROWN_MIN): ceil==0 always (grounded)
-pub fn vertical_envelope(flight: f32, swim: f32, elev: f32) -> (f32, f32) {
-    if flight >= FLIGHT_KNEE {
+// Wing loading = body mass / wing area (lift surface). High -> too heavy for the wings to lift -> can't fly.
+// wing_area floored to avoid div-by-zero: a wingless body reads near-infinite loading (grounded).
+pub fn wing_loading(m: &crate::morph::Morphometrics) -> f32 {
+    m.mass / m.wing_area.max(1e-3)
+}
+
+// Can it actually fly? Needs the flight gene (muscles/intent) AND low enough wing loading (geometry can lift
+// the mass). The loading gate is the cube-square cap: big body + small wings -> grounded despite the gene.
+pub fn is_flier(flight: f32, wing_loading: f32) -> bool {
+    flight >= FLIGHT_KNEE && wing_loading <= MAX_WING_LOADING
+}
+
+pub fn vertical_envelope(flight: f32, swim: f32, elev: f32, wing_loading: f32) -> (f32, f32) {
+    if is_flier(flight, wing_loading) {
         (FLIGHT_CLIMB_RATE, MAX_FLIGHT_ALT * flight) // sky: higher flight gene -> higher ceiling
     } else if swim >= SWIM_DROWN_MIN {
         // -elev = water column above seafloor (>0 in sea). Rise toward waterline, stay submerged (CREATURE_Y
@@ -2470,11 +2482,11 @@ pub fn vertical_envelope(flight: f32, swim: f32, elev: f32) -> (f32, f32) {
     }
 }
 
-// Drown gate: only a grounded NON-flier in deep water drowns. A flier (flight>=KNEE) FLOATS on the surface
-// (duck) + takes off again; a creature aloft (alt>=GROUND_EPS) isn't submerged. Keeps fliers from dying in
-// water without trapping them there (buoyancy lifts them off). Pairs with vertical_envelope.
-pub fn can_drown(flight: f32, swim: f32, alt: f32) -> bool {
-    swim < SWIM_DROWN_MIN && flight < FLIGHT_KNEE && alt < GROUND_EPS
+// Drown gate: only a grounded NON-flier in deep water drowns. A real flier (gene + wings) FLOATS on the
+// surface (duck) + takes off again; a creature aloft (alt>=GROUND_EPS) isn't submerged. A wingless/heavy
+// flight-gene creature is NOT a real flier -> drowns like a walker. Pairs with vertical_envelope.
+pub fn can_drown(flight: f32, swim: f32, alt: f32, wing_loading: f32) -> bool {
+    swim < SWIM_DROWN_MIN && !is_flier(flight, wing_loading) && alt < GROUND_EPS
 }
 
 // per-tick life: sense -> think -> move -> eat -> metabolism -> learn.
@@ -2578,7 +2590,11 @@ pub fn live_step(
         let mut sd = vec![f32::INFINITY; n_s]; // nearest dist per sensor
         let mut skind = vec![0u8; n_s]; // food kind of nearest sensor-food
         let mut nearest_tree_d2 = f32::INFINITY; // nearest tree (canopy shade), any kind
-        let flier = genome.flight >= FLIGHT_KNEE; // bird: picks fruit from the canopy by HORIZONTAL distance (any altitude)
+        // body geometry (cached at spawn; cheap fallback). wing_load gates flight (cube-square): heavy body +
+        // small wings can't fly. Computed here once, reused for locomotion + envelope + drown below.
+        let morph = genome.morph.unwrap_or_else(|| crate::morph::Morphometrics::of(&genome.body));
+        let wing_load = wing_loading(&morph);
+        let flier = is_flier(genome.flight, wing_load); // bird: flight gene AND wings; picks fruit from canopy
         let _r = max_range.max(NEAR_QUERY);
         // scan a neighborhood of food-grid (lon/lat) cells around this creature. SPAN cells each way covers
         // sensor + near-query radius at this grid res. (Longitude doesn't wrap here + pole cells narrow -> minor
@@ -2715,9 +2731,8 @@ pub fn live_step(
         // flailing while exhausted is a net loss -> resting to recover is the only way out. Bracing (defend)
         // immobilizes: trade ground speed for a harder-to-kill stance.
         let move_thrust = thrust * (1.0 - FATIGUE_DRAG * diet.fatigue) * (1.0 - BRACE_DRAG * out[3]);
-        // M5: geometry-derived stats of the evolved body (cached on genome at spawn; cheap fallback if absent)
-        let morph = genome.morph.unwrap_or_else(|| crate::morph::Morphometrics::of(&genome.body));
         // metabolic tempo: frugal (metab>0.5) trades top speed for cheaper basal; fast (metab<0.5) reverse
+        // (morph + wing_load hoisted above, near the flier check)
         let metab_f = genome.metab - 0.5; // -0.5 fast .. +0.5 frugal
         // shape -> locomotion: extra legs grip land, fins thrust in water, a bluff cross-section drags in water
         let morph_land = 1.0 + MORPH_TRACTION * (morph.ground_contacts as f32 - MORPH_GC_REF) * (1.0 - wet_here);
@@ -2740,7 +2755,7 @@ pub fn live_step(
         // water column toward the waterline. Ceiling set by medium; gravity sinks fliers, swimmers ~neutral
         // buoyancy (hover, gentler vertical). Land creatures: ceiling 0 -> pinned to surface (no behavior change).
         let rise = (out[6] - 0.5) * 2.0; // -1 sink/dive .. +1 climb
-        let (climb_rate, ceil) = vertical_envelope(genome.flight, genome.swim, h1);
+        let (climb_rate, ceil) = vertical_envelope(genome.flight, genome.swim, h1, wing_load);
         // brain climbs/descends, then neutral buoyancy relaxes toward cruise -> a neutral brain hovers aloft /
         // mid-water (visible birds + fish); landing to eat = a sustained descend that overcomes buoyancy.
         let cruise = FLIGHT_CRUISE * ceil;
@@ -2807,7 +2822,7 @@ pub fn live_step(
         // sinks to abyss, unforageable). FLIERS exempt: a winged creature (flight >= FLIGHT_KNEE) FLOATS on the
         // surface like a duck + can take off again (also lets a raptor dive to snatch a surface fish without
         // drowning). It still can't FORAGE submerged (needs swim), so water is no home -> doesn't reside there.
-        if can_drown(genome.flight, genome.swim, loco.alt) {
+        if can_drown(genome.flight, genome.swim, loco.alt, wing_load) {
             // grounded NON-flier only: a flier crossing/floating over open ocean doesn't drown
             let sub = ((crate::sphere::SEA_LEVEL - crate::sphere::elevation01(nd)) / crate::sphere::SEA_LEVEL).clamp(0.0, 1.0);
             if sub > DROWN_DEPTH {
@@ -3668,14 +3683,58 @@ mod tests {
     const LAND_ELEVS: [f32; 3] = [8.0, 2.0, 0.0];
     const WATER_ELEVS: [f32; 2] = [-3.0, -12.0];
 
-    // Flier reaches the sky over ANY terrain (land OR sea below) -> never trapped on the ground/water.
+    #[test]
+    #[ignore] // TEMP calibration: cargo test calibrate_wing -- --ignored --nocapture
+    fn calibrate_wing() {
+        let txt = std::fs::read_to_string("evolved-showcase.json").unwrap();
+        let v: serde_json::Value = serde_json::from_str(&txt).unwrap();
+        let mut all: Vec<f32> = vec![];
+        let mut fliers: Vec<f32> = vec![];
+        let mut masses: Vec<f32> = vec![];
+        for c in v["creatures"].as_array().unwrap() {
+            let g: crate::genome::Genome = serde_json::from_value(c.clone()).unwrap();
+            let m = crate::morph::Morphometrics::of(&g.body);
+            let wl = m.mass / m.wing_area.max(1e-3);
+            all.push(wl);
+            masses.push(m.mass);
+            if g.flight >= FLIGHT_KNEE { fliers.push(wl); }
+        }
+        all.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        fliers.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        masses.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let pct = |v: &[f32], p: f32| v[((v.len() as f32 * p) as usize).min(v.len() - 1)];
+        println!("MASS    n={} min={:.3} p50={:.3} max={:.3}", masses.len(), masses[0], pct(&masses, 0.5), masses[masses.len() - 1]);
+        println!("WL all  n={} p10={:.2} p50={:.2} p90={:.2} max={:.2}", all.len(), pct(&all, 0.1), pct(&all, 0.5), pct(&all, 0.9), all[all.len() - 1]);
+        println!("WL flier n={} p10={:.2} p50={:.2} p90={:.2} max={:.2}", fliers.len(), pct(&fliers, 0.1), pct(&fliers, 0.5), pct(&fliers, 0.9), fliers[fliers.len() - 1]);
+        for t in [2.0, 4.0, 6.0, 8.0, 12.0, 20.0] {
+            let pass = fliers.iter().filter(|&&w| w <= t).count();
+            println!("  MAX={:.0} -> {}/{} gene-fliers keep flying", t, pass, fliers.len());
+        }
+    }
+
+    // wing-loaded enough to fly (well under MAX_WING_LOADING) vs too heavy for its wings.
+    const LIGHT_WING: f32 = 1.0;
+    const HEAVY_WING: f32 = MAX_WING_LOADING + 5.0;
+
+    // A real flier (flight gene + adequate wings) reaches the sky over ANY terrain -> never trapped.
     #[test]
     fn flier_has_sky_ceiling_everywhere() {
         for &e in LAND_ELEVS.iter().chain(WATER_ELEVS.iter()) {
-            let (rate, ceil) = vertical_envelope(0.85, 0.05, e);
+            let (rate, ceil) = vertical_envelope(0.85, 0.05, e, LIGHT_WING);
             assert!(ceil > 0.5, "flier ceil should be aloft over elev {e}, got {ceil}");
             assert!(rate > 0.0, "flier needs a climb rate over elev {e}");
         }
+    }
+
+    // Cube-square gate: flight gene but wings too small for the mass -> grounded (walker), can drown.
+    #[test]
+    fn heavy_wings_ground_the_flier() {
+        assert!(!is_flier(0.85, HEAVY_WING), "high flight gene but overloaded wings must NOT fly");
+        for &e in &LAND_ELEVS {
+            let (_, ceil) = vertical_envelope(0.85, 0.05, e, HEAVY_WING);
+            assert_eq!(ceil, 0.0, "overloaded flier must be ground-pinned over land elev {e}, got {ceil}");
+        }
+        assert!(can_drown(0.85, 0.05, 0.0, HEAVY_WING), "overloaded non-flier in water drowns like a walker");
     }
 
     // INVARIANT "swimmers don't settle in air": a swimmer (no flight) over dry land has ZERO ceiling -> pinned
@@ -3683,11 +3742,11 @@ mod tests {
     #[test]
     fn swimmer_pinned_on_land_floats_in_water() {
         for &e in &LAND_ELEVS {
-            let (_, ceil) = vertical_envelope(0.05, 0.9, e);
+            let (_, ceil) = vertical_envelope(0.05, 0.9, e, HEAVY_WING);
             assert_eq!(ceil, 0.0, "swimmer must be ground-pinned over dry land elev {e}, got ceil {ceil}");
         }
         // deep water: column opens (waterline above the submerged margin)
-        let (_, deep) = vertical_envelope(0.05, 0.9, -12.0);
+        let (_, deep) = vertical_envelope(0.05, 0.9, -12.0, HEAVY_WING);
         assert!(deep > 0.0, "swimmer should have a water column in deep sea, got {deep}");
     }
 
@@ -3695,7 +3754,7 @@ mod tests {
     #[test]
     fn walker_grounded_everywhere() {
         for &e in LAND_ELEVS.iter().chain(WATER_ELEVS.iter()) {
-            let (rate, ceil) = vertical_envelope(0.1, 0.1, e);
+            let (rate, ceil) = vertical_envelope(0.1, 0.1, e, LIGHT_WING);
             assert_eq!((rate, ceil), (0.0, 0.0), "walker must be pinned over elev {e}");
         }
     }
@@ -3704,10 +3763,10 @@ mod tests {
     // any altitude (floats like a duck, takes off again). Only a grounded non-flier in water drowns.
     #[test]
     fn drown_gate_spares_fliers_and_swimmers() {
-        assert!(can_drown(0.0, 0.0, 0.0), "grounded walker on water surface drowns");
-        assert!(!can_drown(0.85, 0.05, 0.0), "flier on the surface floats, never drowns");
-        assert!(!can_drown(0.85, 0.05, 3.0), "flier aloft never drowns");
-        assert!(!can_drown(0.05, 0.9, 0.0), "swimmer is at home in water, never drowns");
-        assert!(!can_drown(0.0, 0.0, GROUND_EPS + 0.1), "anything airborne isn't submerged");
+        assert!(can_drown(0.0, 0.0, 0.0, LIGHT_WING), "grounded walker on water surface drowns");
+        assert!(!can_drown(0.85, 0.05, 0.0, LIGHT_WING), "real flier on the surface floats, never drowns");
+        assert!(!can_drown(0.85, 0.05, 3.0, LIGHT_WING), "real flier aloft never drowns");
+        assert!(!can_drown(0.05, 0.9, 0.0, HEAVY_WING), "swimmer is at home in water, never drowns");
+        assert!(!can_drown(0.0, 0.0, GROUND_EPS + 0.1, LIGHT_WING), "anything airborne isn't submerged");
     }
 }
