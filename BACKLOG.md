@@ -363,6 +363,17 @@ pholmq/TSN (GPL-2.0) @ commit 49fd49c (pinned in `orrery.rs` + `stars.rs` commen
 - [x] Stronger diversity (2026-06-24): the new default `evolved-showcase.json` is a multi-niche co-evolved
       world (fliers + swimmers + alpine + land) holding across the 50%-ocean + mountains planet. See the
       showcase-seed item above. (--mating-as-default still open to consider.)
+- [x] **Niche x climate diversity seed (2026-06-25)**: `tools/tune-diversity.workflow.js` fanned out 12 agents
+      (flying/land/water/highland x warm/temperate/cold), each evolving 50 hardy survivors in a COMPETITIVE
+      mini-world (finite food + grazers + a predator sub-cohort), holding niche+climate identity + showing
+      brain development (evolvable sensors/hidden + recurrent memory under predation). All 12 hit 50; merged ->
+      `evolved-diversity.json` (600 = exactly 50/combo; all 4 niches + 3 climates each >30; brains hidden 2-7,
+      sensors 1-7). Live planet co-evolution (`--gens=10 --load`) grew it to cap 2000 and held with NO niche
+      rescue in steady state (self-sustaining, unlike the showcase which needs aerial rescue): land 1044,
+      aquatic 525, highland 288, flying 143; cold 233/temp 887/warm 880. Under planet competition brains got
+      LEANER (hidden 3.2, sensors 1.4) = no-free-lunch efficiency vs the abundant mini-worlds. Survivors saved
+      to `evolved-diversity-coevo.json` (local, 67MB full-world, not committed). Harness change: best_creatures
+      harvest cap 12 -> 50. Friction logged: flying-temperate couldn't hold flight identity under competition.
 - [x] **Visual lightning during storms (2026-06-24)**: `viz::lightning_visuals` draws jagged blue-white bolts
       (cloud-base -> ground channel + a fork + a ground starburst flash, bright at onset, fades over FLASH_TICKS)
       over heavy WARM-storm cells (rain > 0.55, mirrors the rain field where sim lightning also ignites fire).
