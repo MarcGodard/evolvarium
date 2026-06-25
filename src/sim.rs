@@ -704,7 +704,7 @@ pub(crate) fn spawn_creature(commands: &mut Commands, g: Genome, pos: Vec3, rng:
     let mut g = g;
     g.ensure_net_shape();
     let h = rng.range(-std::f32::consts::PI, std::f32::consts::PI);
-    let brain = Brain { net: g.net.clone(), prev_dist: f32::INFINITY, attack: 0.0, defend: 0.0, fight_reward: 0.0 };
+    let brain = Brain { net: g.net.clone(), prev_dist: f32::INFINITY, attack: 0.0, defend: 0.0, voice: 0.0, fight_reward: 0.0 };
     let diet = diet_state(&g);
     commands.spawn((
         Creature,
@@ -1154,7 +1154,7 @@ pub fn restore_full_world(
         let d = Vec3::from_array(c.dir).normalize_or_zero();
         let alt = c.alt.max(0.0);
         let p = crate::sphere::surface_pos(d, CREATURE_Y + alt);
-        let brain = Brain { net: g.net.clone(), prev_dist: f32::INFINITY, attack: 0.0, defend: 0.0, fight_reward: 0.0 };
+        let brain = Brain { net: g.net.clone(), prev_dist: f32::INFINITY, attack: 0.0, defend: 0.0, voice: 0.0, fight_reward: 0.0 };
         let mut reserves = [RESERVE_REQ; NUTRIENTS];
         for (i, r) in c.reserves.iter().take(NUTRIENTS).enumerate() {
             reserves[i] = *r;
@@ -1400,7 +1400,7 @@ pub fn spawn_world_headless(
         let mut g = g;
         g.ensure_net_shape(); // migrate older saved nets to current brain-input width
         let h = rng.range(-std::f32::consts::PI, std::f32::consts::PI);
-        let brain = Brain { net: g.net.clone(), prev_dist: f32::INFINITY, attack: 0.0, defend: 0.0, fight_reward: 0.0 };
+        let brain = Brain { net: g.net.clone(), prev_dist: f32::INFINITY, attack: 0.0, defend: 0.0, voice: 0.0, fight_reward: 0.0 };
         let mut diet = diet_state(&g);
         if skip_warmup {
             diet.age = (rng.f32() * 600.0) as u32;
@@ -1508,6 +1508,7 @@ pub fn spawn_world_render(
     commands.insert_resource(crate::viz::CreatureParts {
         eye: meshes.add(Sphere::new(0.5).mesh().ico(1).unwrap()),
         wing: meshes.add(crate::viz::wing_mesh()),
+        ear: meshes.add(crate::viz::ear_mesh()),
     });
     // per-form plant mesh library: one silhouette per plant::form (viz::add_plant_visuals picks by genome).
     // Round forms = icospheres; tall/leafy = procedural frond clumps; lily pad = flat disc.
@@ -1670,7 +1671,7 @@ pub fn spawn_world_render(
         let mut g = g;
         g.ensure_net_shape(); // migrate older saved nets to current brain-input width
         let h = rng.range(-std::f32::consts::PI, std::f32::consts::PI);
-        let brain = Brain { net: g.net.clone(), prev_dist: f32::INFINITY, attack: 0.0, defend: 0.0, fight_reward: 0.0 };
+        let brain = Brain { net: g.net.clone(), prev_dist: f32::INFINITY, attack: 0.0, defend: 0.0, voice: 0.0, fight_reward: 0.0 };
         let mut diet = diet_state(&g);
         if skip_warmup {
             diet.age = (rng.f32() * 600.0) as u32;
@@ -2532,6 +2533,21 @@ pub fn live_step(
         .filter(|(_, _, _, _, _, a, _, _, _, _)| a.0)
         .map(|(e, t, _, _, _, _, g, _, _, _)| (e, t.translation, signature(g), g.bite + SIZE_COMBAT * g.size, body_radius(g)))
         .collect();
+    // voice snapshot for the hearing sense: (entity, pos, emit_pitch=1-size, loudness=last-tick call). Emission
+    // is computed INSIDE the parallel loop below, so listeners read LAST tick's call from Brain.voice (1-tick
+    // delay, same pattern as prev_dist). Only actual callers (voice>0) -> cheap scan.
+    let voice_snap: Vec<(Entity, Vec3, f32, f32)> = cq
+        .iter()
+        .filter(|(_, _, _, _, _, a, _, b, _, _)| a.0 && b.voice > 0.0)
+        .map(|(e, t, _, _, _, _, g, b, _, _)| (e, t.translation, 1.0 - g.size, b.voice))
+        .collect();
+    // per-cell creature crowding -> density-dependent grazing income (grass+seaweed graze drop where creatures
+    // pack in). Makes carrying capacity EMERGENT (food self-limits pop below CREATURE_CAP) instead of riding the
+    // hard cap. All live creatures binned per SOIL_RES cell; own cell counts self (subtract 1 in the factor).
+    let mut crowd = vec![0.0f32; SOIL_RES * SOIL_RES];
+    for (_, pos, _, _, _) in &cre_snap {
+        crowd[grid_cell(*pos)] += 1.0;
+    }
     // per-niche live counts: continuous repro tapers on the breeder's OWN niche fill (NICHE_CAP), not global
     // pop -> each habitat self-limits independently so no niche grabs the shared cap (was winner-take-all).
     let mut niche_pop = [0usize; crate::niche::NICHE_COUNT];
@@ -2682,6 +2698,41 @@ pub fn live_step(
         } else {
             (0.0, 0.0)
         };
+        // HEARING (omnidirectional, gated by `hearing` acuity): scan callers (last tick's voice_snap). Each
+        // contributes loudness x freq-match (hear_freq vs emitter size-pitch) x linear distance falloff. No cone,
+        // no line-of-sight -> hears in the dark / behind terrain. Sum -> hear_loud; loudest -> hear_bear.
+        let hear_radius = HEAR_RADIUS * (0.3 + genome.hearing);
+        let hr2 = hear_radius * hear_radius;
+        let mut hear_loud = 0.0f32;
+        let mut hear_best = 0.0f32;
+        let mut hear_pos = Vec3::ZERO;
+        for (ve, vp, pitch, loud) in &voice_snap {
+            if *ve == entity {
+                continue; // don't hear self
+            }
+            let d2 = pos.distance_squared(*vp);
+            if d2 >= hr2 {
+                continue; // out of earshot
+            }
+            let fm = 1.0 - (genome.hear_freq - *pitch).abs() / FREQ_WIDTH;
+            if fm <= 0.0 {
+                continue; // freq mismatch -> inaudible to this listener's tuned band
+            }
+            let falloff = 1.0 - d2.sqrt() / hear_radius; // 1 near .. 0 at edge
+            let amp = *loud * fm * falloff;
+            hear_loud += amp;
+            if amp > hear_best {
+                hear_best = amp;
+                hear_pos = *vp;
+            }
+        }
+        hear_loud = (hear_loud * genome.hearing).min(1.0); // acuity scales perceived loudness, cap 1
+        let hear_bear = if hear_best > 0.0 {
+            let to = hear_pos - pos;
+            wrap_angle(to.dot(east).atan2(to.dot(north)) - head.0) / std::f32::consts::PI
+        } else {
+            0.0
+        };
 
         // magnetoreception (gated by `magneto` gene): expression scales both inputs + upkeep cost, so a
         // switched-off sense feeds ~0 (brain ignores) for ~0 cost.
@@ -2714,7 +2765,10 @@ pub fn live_step(
         // magneto globals (last, matching ensure_net_shape padding order). ~0 when sense off:
         input.push(crate::sphere::mag_latitude(pdir) * mexpr); // magnetic latitude "map" (-1 .. +1)
         input.push(wrap_angle(crate::sphere::mag_north_bearing(pdir) - head.0) / std::f32::consts::PI * mexpr); // compass: rel bearing to magnetic north
-        input.push(air_here); // own altitude fraction (LAST global, see GLOBAL_INPUTS): flier/diver manages climb/descend
+        input.push(air_here); // own altitude fraction: flier/diver manages climb/descend
+        // hearing globals (LAST, matching ensure_net_shape padding order). ~0 when nothing audible / deaf:
+        input.push(hear_loud); // loudest freq-matched caller within earshot (0..1) -> omnidirectional alert
+        input.push(hear_bear); // bearing to it (-1..1) -> orient toward/away
 
         // think (per-life learned brain, dynamic topology matching this genome's sensor count)
         let (h, out) = forward(&brain.net, &input);
@@ -2728,6 +2782,9 @@ pub fn live_step(
         brain.attack = out[2];
         brain.defend = out[3];
         let sprint = out[5]; // burst-effort 0..1: faster chase OR flee, paid in energy + fatigue below
+        // voice: NN-directed call (out[7]). Emit only above gate (no faint chatter); stashed for NEXT tick's
+        // hearing snapshot (1-tick delay) + the audio layer. Emit pitch is anatomical (1-size), applied listener-side.
+        brain.voice = if out[7] > VOICE_GATE { out[7] } else { 0.0 };
         // fatigue saps usable output (tired = sluggish); intended effort still costs full MOVE_COST below, so
         // flailing while exhausted is a net loss -> resting to recover is the only way out. Bracing (defend)
         // immobilizes: trade ground speed for a harder-to-kill stance.
@@ -2878,6 +2935,8 @@ pub fn live_step(
             + FAT_UPKEEP * genome.adiposity * fat_frac // carrying fat costs upkeep (no free lunch)
             + SPRINT_COST * sprint // burst effort burns extra fuel
             + ATTACK_COST * brain.attack // committing to an attack costs energy whether or not it lands (the stabilizer replacing the hunger gate)
+            + HEAR_UPKEEP * genome.hearing // ears + auditory processing run all the time (no free hearing)
+            + VOICE_COST * brain.voice // calling this tick burns fuel (out[7]) -> selection gates vocalizing
             + STRESS_COST * diet.fatigue)
             * dt);
         // fast store leaks even at rest (volatile -> can't bank quick energy, use-it-or-lose-it)
@@ -3115,9 +3174,11 @@ pub fn live_step(
         if out[4] > EAT_GATE && energy.total() < GRAZE_FULL {
             let gdir = np.normalize_or_zero();
             let herbivory = 1.0 - genome.carnivory; // herbivore gut digests the carpet; a carnivore can't
+            // crowding penalty: shared trickle thins where grazers pack in (density-dependent carrying cap).
+            let crowd_factor = 1.0 / (1.0 + (crowd[grid_cell(np)] - 1.0).max(0.0) / GRAZE_CROWD_K);
             let hab = crate::sphere::plant_habitability(gdir);
             if !crate::sphere::is_ocean(gdir) && hab > GRASS_HAB_MIN {
-                let gain = GRASS_GRAZE * hab * herbivory * genome.uptake[GRASS_FORAGE_IDX] * dt; // grass: grazer staple where it's grassy
+                let gain = GRASS_GRAZE * hab * herbivory * genome.uptake[GRASS_FORAGE_IDX] * dt * crowd_factor; // grass: grazer staple where it's grassy
                 energy.add_sugar(gain, SUGAR_CAP, fat_max);
                 // refill grass FORAGE nutrient x gut tuning: grazer with uptake on grass axis stays fed; mismatched
                 // gut gets energy but still starves of deficiency (no free lunch).
@@ -3133,7 +3194,7 @@ pub fn live_step(
                 let e01 = crate::sphere::elevation01(gdir);
                 let depth = ((crate::sphere::SEA_LEVEL - e01) / crate::sphere::SEA_LEVEL).clamp(0.0, 1.0);
                 let band = 0.5 + 0.5 * depth; // richer the deeper/more-submerged
-                let gain = SEAWEED_GRAZE * band * herbivory * genome.uptake[SEAWEED_FORAGE_IDX] * dt;
+                let gain = SEAWEED_GRAZE * band * herbivory * genome.uptake[SEAWEED_FORAGE_IDX] * dt * crowd_factor;
                 energy.add_sugar(gain, SUGAR_CAP, fat_max);
                 let r = &mut diet.reserves[SEAWEED_FORAGE_IDX]; // kelp forage nutrient, gut-matched like grass above
                 *r = (*r + GRAZE_NUTRIENT * genome.uptake[SEAWEED_FORAGE_IDX] * herbivory * band * dt).min(RESERVE_CAP);

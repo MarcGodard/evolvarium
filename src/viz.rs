@@ -556,6 +556,7 @@ const BODY_RENDER: f32 = 0.34; // graph-units -> world-units normalization (mid-
 pub struct CreatureParts {
     pub eye: Handle<Mesh>,
     pub wing: Handle<Mesh>, // shared flapping-wing mesh (fliers only)
+    pub ear: Handle<Mesh>,  // shared pointed-ear cone (all creatures, sized by `hearing` gene)
 }
 
 // Skin color + body-plan scale from genome (M4). Shared by add_creature_visuals + restyle_creatures ->
@@ -587,7 +588,20 @@ fn size_creatures(mut q: Query<(&DietState, &Genome, &mut Transform), With<Creat
     for (diet, g, mut tf) in &mut q {
         let mature_ticks = CREATURE_MATURE_TICKS * g.maturity_scale(); // big bodies grow in slower (match breeding age)
         let grow = (CREATURE_BORN_SCALE + (1.0 - CREATURE_BORN_SCALE) * diet.age as f32 / mature_ticks).min(1.0);
-        tf.scale = Vec3::splat(body_scale(g) * grow); // uniform: generative body carries the shape
+        let scale = body_scale(g) * grow;
+        tf.scale = Vec3::splat(scale); // uniform: generative body carries the shape
+        // Seat grounded land creatures on terrain. Body mesh is CENTER-anchored, sim pins all land creatures at
+        // fixed CREATURE_Y -> tiny bodies (half-height < CREATURE_Y) hover, big bodies sink. Render-only: rest body
+        // CENTER at half-height*scale above ground so feet plant at any size. Skips fliers/swimmers (own altitude);
+        // direction preserved so sim's creature dir (translation.normalize) is untouched -> no gameplay drift.
+        if g.flight < crate::config::FLIGHT_KNEE && g.swim < 0.5 {
+            let d = tf.translation.normalize_or_zero();
+            if d != Vec3::ZERO {
+                let m = g.morph.unwrap_or_else(|| crate::morph::Morphometrics::of(&g.body));
+                let half = (m.bbox_max.y - m.bbox_min.y) * 0.5;
+                tf.translation = crate::sphere::surface_pos(d, scale * half * 0.9); // 0.9: slight sink -> feet planted
+            }
+        }
     }
 }
 
@@ -612,6 +626,7 @@ fn add_creature_visuals(
         let (body_mesh, was_built) = cache.get_or_build(g, &mut meshes);
         commands.entity(e).insert((Mesh3d(body_mesh), MeshMaterial3d(materials.add(color))));
         spawn_eyes(&mut commands, e, g, &parts.eye, &mut materials);
+        spawn_ears(&mut commands, e, g, &parts.ear, &mut materials); // all creatures, sized by hearing gene
         spawn_wings(&mut commands, e, g, &parts.wing, &mut materials); // fliers only (gene + wing loading)
         if was_built {
             built += 1;
@@ -651,6 +666,42 @@ fn spawn_eyes(commands: &mut Commands, parent: Entity, g: &Genome, eye_mesh: &Ha
             .spawn((Mesh3d(eye_mesh.clone()), MeshMaterial3d(eye_mat.clone()), Transform { translation: Vec3::new(ex, ey, ez), scale: Vec3::splat(eye_d), ..default() }))
             .id();
         commands.entity(parent).add_child(eye);
+    }
+}
+
+// Unit pointed ear: cone apex up (+Y), base at the head. Scaled + splayed per-creature by spawn_ears.
+pub fn ear_mesh() -> Mesh {
+    Cone::new(0.5, 1.0).mesh().into()
+}
+
+// Two pointed ears flanking the head top, sized by `hearing` acuity (keen-eared = big ears). Cosmetic, render
+// only; reuses the head anchor (eye_anchor). Splayed outward, sat just behind the eyes.
+fn spawn_ears(commands: &mut Commands, parent: Entity, g: &Genome, ear_mesh: &Handle<Mesh>, materials: &mut Assets<StandardMaterial>) {
+    let pheno = crate::morph::develop(&g.body);
+    let m = crate::morph::Morphometrics::from_phenotype(&pheno);
+    let center_y = (m.bbox_min.y + m.bbox_max.y) * 0.5; // body mesh shifts verts down by this
+    let a = crate::morph::eye_anchor(&pheno);
+    let body = creature_look(g).0.to_srgba();
+    let mat = materials.add(Color::srgb(body.red * 0.8, body.green * 0.8, body.blue * 0.8)); // skin, a touch darker
+    let eh = a.radius * (0.7 + 1.6 * g.hearing); // ear height scales with acuity (visual cue to the gene)
+    let ew = a.radius * (0.35 + 0.5 * g.hearing);
+    for side in [-1.0f32, 1.0] {
+        let ex = side * a.half_w * 0.7;
+        let ey = (a.center.y - center_y) + a.radius * 0.6; // atop the head
+        let ez = a.center.z - a.radius * 0.1; // slightly back of the eyes
+        let ear = commands
+            .spawn((
+                Mesh3d(ear_mesh.clone()),
+                MeshMaterial3d(mat.clone()),
+                Transform {
+                    translation: Vec3::new(ex, ey, ez),
+                    rotation: Quat::from_rotation_z(side * -0.35), // splay outward
+                    scale: Vec3::new(ew, eh, ew * 0.5), // thin front-to-back
+                    ..default()
+                },
+            ))
+            .id();
+        commands.entity(parent).add_child(ear);
     }
 }
 

@@ -38,13 +38,14 @@ pub const REPRO_COST: f32 = 16.0; // energy parent spends per child (parent stay
 pub const BIRTH_ENERGY: f32 = 28.0; // offspring start energy: buffer so newborns establish before starving (raised: newborn die-off was R<1 driver pinning pop at floor)
 pub const P_REPRO_CREATURE: f32 = 0.025; // per-tick repro chance while eligible (x density taper)
 pub const REPRO_MIN_AGE: u32 = 180; // min ticks of life before breeding (newborns establish first; paces waves)
-pub const CREATURE_CAP: usize = 1100; // global pop ceiling. Scaled ~8.5x for the ~1000-creature world (live_step parallel). Food web supports it: probe held plants ~5800 at pop 1600, no crash. Per-niche caps bind first.
+pub const CREATURE_CAP: usize = 2000; // global pop SAFETY ceiling (raised 1100->2000). Intent: food/ecology is the real limiter (settles ~1100-1500), cap only catches runaway. Headless-only benefit; windowed viz draws every creature so high density costs FPS.
 // Per-niche carrying capacity (repro tapers on the breeder's OWN niche fill, not global pop) -> each habitat
 // fills independently so no single niche soaks the shared cap (was winner-take-all: one niche -> ~83% planet,
 // which one is seed-stochastic). Order = Niche::idx [aquatic,aerial,highland,cold,warm,land]. Aquatic biggest
 // (ocean ~half planet) but ~30% not 83%. Scaled ~7x from [45,15,16,18,22,36] for the ~1000-pop world; ratios
-// preserved so habitat balance holds. Sum (~1064) ~= CREATURE_CAP so global cap + niche caps both bind near 1000.
-pub const NICHE_CAP: [usize; 6] = [315, 105, 112, 126, 154, 252];
+// preserved so habitat balance holds. Scaled with CREATURE_CAP (x1.82, 1100->2000): sum (~1935) sits just
+// UNDER the 2000 global cap so both are SAFETY ceilings above the natural food-limited equilibrium (~1100-1500).
+pub const NICHE_CAP: [usize; 6] = [573, 191, 204, 229, 280, 458];
 pub const WARMUP_GENS: u32 = 12; // generational warm-up before continuous birth/death kicks in
 pub const CONT_LOG_TICKS: u32 = 600; // continuous-mode stats log interval (fine enough to watch a crash unfold)
 
@@ -222,6 +223,12 @@ pub const GRASS_FORAGE_IDX: usize = 0;   // grass nutrient axis (land grazers tu
 pub const SEAWEED_FORAGE_IDX: usize = 1; // kelp nutrient axis (sea grazers tune uptake[1])
 pub const GRAZE_NUTRIENT: f32 = 0.30;    // reserve refill/sec per unit uptake while grazing (> NUTRIENT_USE so tuned gut stays fed)
 pub const GRAZE_FULL: f32 = 38.0;        // grazing tops energy to here (ABOVE REPRO_THRESHOLD 30) so tuned grazer builds breeding surplus, not just clings at threshold
+// Density-dependent grazing: grass+seaweed income drops where creatures pack into a cell. K = extra creatures/
+// cell (above the lone grazer) at which trickle income halves; lower = stronger penalty. SOIL_RES=32 grid.
+// NOTE: this alone does NOT cap population at a natural carrying capacity (headless: pop still climbs to
+// CREATURE_CAP because plant biomass is non-depletable, flat ~4220 at any pop). It's mild local-density realism.
+// A real food-limited equilibrium needs depletable plant biomass (lower regrowth/cap) -- separate task.
+pub const GRAZE_CROWD_K: f32 = 2.0;
 
 // --- rocky land: scattered boulders (render-only dressing). Spawned once on rocky highland so rocky
 // terrain reads as field of stone with grass between rocks. Static -> no per-frame cost. ---
@@ -532,6 +539,14 @@ pub const MORPH_REACH_BROWSE: f32 = 0.18; // browse-reach added per body-reach u
 // to flee (threat_dist/threat_bearing inputs).
 pub const THREAT_RADIUS: f32 = 22.0; // bigger-combat creature within this sensed as threat
 pub const THREAT_MARGIN: f32 = 0.4;  // combat edge neighbor needs over you to register as threat
+// acoustics (M6): hearing = OMNIDIRECTIONAL sense (unlike vision cone). A listener hears an emitter loudest
+// when its hear_freq matches the emitter's size-pitch (1-size). Emission = NN out[7] (when/loud); emit pitch
+// anatomical. Predator-prey + communication arms-race lever. Genes: hearing (acuity/range), hear_freq (band).
+pub const HEAR_RADIUS: f32 = 40.0;   // base earshot (world units); actual range = this x (0.3 + hearing). Wider than vision: sound carries.
+pub const FREQ_WIDTH: f32 = 0.35;    // freq-match tolerance: |hear_freq - emit_pitch| past this = inaudible. Narrow -> sharp acoustic niches.
+pub const HEAR_UPKEEP: f32 = 0.18;   // energy/sec basal at full hearing acuity (cochlea + neural processing; no free ears)
+pub const VOICE_COST: f32 = 0.5;     // energy/sec at full call intensity (out[7]=1). Calling isn't free -> selection gates it to when it pays.
+pub const VOICE_GATE: f32 = 0.25;    // min out[7] to actually emit (below = silent). Avoids constant faint chatter + audio spam.
 // need for shade: in hot SUN (daylight x local temp) exposed creature overheats + burns energy; standing
 // in canopy shade (near tree) or being heat-tolerant build relieves it. `shade` brain input lets brains
 // learn to seek trees at midday.

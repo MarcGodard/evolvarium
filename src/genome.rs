@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 pub const MIN_HIDDEN: usize = 2; // floor
 pub const MAX_HIDDEN: usize = 16; // ceiling (bounds per-neuron upkeep cost)
-pub const OUTPUTS: usize = 7; // [thrust 0..1, turn -1..1, attack, defend, eat, sprint, climb]; idx>=2 = 0..1 intents (climb: 0=descend, 1=climb)
+pub const OUTPUTS: usize = 8; // [thrust 0..1, turn -1..1, attack, defend, eat, sprint, climb, voice]; idx>=2 = 0..1 intents (climb: 0=descend, 1=climb; voice: NN call intensity, emit pitch is anatomical from size)
 pub const NFOOD: usize = 4; // plant FAMILY count (hue + kind label only; NOT metabolic axis)
 pub const NUTRIENTS: usize = 10; // distinct nutrients = metabolic axis (regulatory uptake genome, see 14/05)
 
@@ -16,13 +16,15 @@ pub const MIN_SENSORS: usize = 1;
 pub const MAX_SENSORS: usize = 8;
 pub const SIG_PER_SENSOR: usize = 2; // each sensor reports [inv-dist, food type/readiness]
 // Global (non-sensor) brain inputs, appended after per-sensor signals. Column order:
-// [energy, daylight, fatigue, bias, toxic_load, shade, threat_dist, threat_bearing, wet, mag_lat, compass, altitude]
+// [energy, daylight, fatigue, bias, toxic_load, shade, threat_dist, threat_bearing, wet, mag_lat, compass, altitude, hear_loud, hear_bearing]
 // energy+daylight+fatigue -> diurnal/nocturnal rest; toxic_load -> avoid poison; shade -> seek canopy in heat;
 // threat_dist/bearing -> flee bigger predator; wet -> in water; mag_lat+compass -> magnetic nav (gated by
-// `magneto` gene); altitude -> own height aloft (fliers manage climb/descend). GOTCHA: M4 widened 4 -> 9;
-// magneto added 2 -> 11; flight added 1 -> 12. altitude is LAST so pad_ih_inputs (inserts before bias)
-// aligns old saved nets correctly. Old saved nets zero-padded for new columns on load, see ensure_net_shape.
-pub const GLOBAL_INPUTS: usize = 12;
+// `magneto` gene); altitude -> own height aloft (fliers manage climb/descend); hear_loud+hear_bearing ->
+// OMNIDIRECTIONAL acoustic sense (loudest freq-matched caller, works in dark/behind terrain; gated by `hearing`
+// acuity). GOTCHA: M4 widened 4 -> 9; magneto added 2 -> 11; flight added 1 -> 12; hearing added 2 -> 14. NEW
+// globals always appended LAST so pad_ih_inputs (inserts before bias) aligns old saved nets correctly. Old saved
+// nets zero-padded for new columns on load, see ensure_net_shape.
+pub const GLOBAL_INPUTS: usize = 14;
 pub const CONE_HALF: f32 = 0.7; // sensor FOV half-angle (rad)
 const RANGE_MIN: f32 = 4.0;
 const RANGE_MAX: f32 = 48.0; // long-range vision possible (big world); energy cost = trade-off (see sim SENSE_COST)
@@ -121,6 +123,15 @@ pub struct Genome {
     pub beak: f32,           // 0..1 snout/beak length (render only, NO sim effect): birds get a forward beak, other
                              // body plans a snout. Cosmetic, backfilled by ensure_cosmetic on old saves.
 
+    // --- acoustics (M6): hearing is a genetic SENSE; emission is NN-directed (out[7]), emit pitch anatomical
+    // from size. Both #[serde(default)] -> old saves load deaf/quiet, evolve into it. ---
+    #[serde(default = "d30")]
+    pub hearing: f32,        // 0..1 auditory acuity: scales earshot RADIUS + perceived loudness (hear_loud input)
+                             // + ear mesh size; costs HEAR_UPKEEP basal. Default 0.3.
+    #[serde(default = "half")]
+    pub hear_freq: f32,      // 0..1 tuned listening band center (0=low rumble .. 1=high squeak). Hears an emitter
+                             // loudest when this matches the emitter's size-pitch -> acoustic niches by size. Default 0.5.
+
     // M5 generative morphology: Karl-Sims part-graph that GROWS the body (see morph.rs). Drives the mesh +
     // geometry-derived stats (mass/drag/reach/wing/fin), so SHAPE is under selection, not the old cosmetic
     // scalars. serde default = single capsule -> old saves load + render as today's creature.
@@ -208,9 +219,10 @@ fn pad_ih_inputs(net: &mut Net, want_in: usize, fill: f32) {
 // new outputs existed: combat+effort OFF (strong negative bias -> sigmoid ~0, no unearned ATTACK_COST /
 // SPRINT_COST / brace-drag), EAT ON (positive bias -> sigmoid ~1, still feeds on contact like pre-eat-gate
 // code). Fresh founders use random_net instead (varied combat outputs) so emergence works. Indices:
-// [thrust, turn, attack, defend, eat, sprint, climb]; 0/1 never padded (always present). climb biased
-// negative -> migrated net sinks to ground (no unearned flight), matching pre-flight grounded behavior.
-const OUTPUT_MIGRATE_BIAS: [f32; OUTPUTS] = [0.0, 0.0, -4.0, -4.0, 4.0, -4.0, -4.0];
+// [thrust, turn, attack, defend, eat, sprint, climb, voice]; 0/1 never padded (always present). climb biased
+// negative -> migrated net sinks to ground (no unearned flight). voice biased negative -> migrated net mostly
+// silent (no unearned VOICE_COST), evolution turns calling on when it pays.
+const OUTPUT_MIGRATE_BIAS: [f32; OUTPUTS] = [0.0, 0.0, -4.0, -4.0, 4.0, -4.0, -4.0, -3.0];
 
 // Grow NET ho layer to want_rows (migrate seed saved when OUTPUTS smaller, e.g. pre-combat 2-output nets).
 // New output row = hidden+1 long (matches live hidden count): zero hidden->output weights + per-output
@@ -303,6 +315,8 @@ impl Genome {
             // is visible from gen 0 (not waiting many gens for mutation to cross 0.5). Rest stay low (ground-biased).
             flight: if rng.f32() < 0.15 { rng.range(0.55, 1.0) } else { rng.f32() * rng.f32() * 0.4 },
             beak: rng.f32() * rng.f32(), // skew short snouts; few long beaks/snouts
+            hearing: rng.f32(),       // span deaf..keen-eared -> selection finds acuity where it pays
+            hear_freq: rng.f32(),     // span listening bands (low rumble..high squeak) -> acoustic niches
             body: crate::morph::BodyGraph::random(rng), // generative body-graph (mesh + derived stats)
             morph: None, // populated at spawn (ensure_net_shape)
         }
@@ -422,6 +436,8 @@ impl Genome {
         c.magneto = pick(rng, a.magneto, b.magneto);
         c.flight = pick(rng, a.flight, b.flight);
         c.beak = pick(rng, a.beak, b.beak);
+        c.hearing = pick(rng, a.hearing, b.hearing);
+        c.hear_freq = pick(rng, a.hear_freq, b.hear_freq);
         for i in 0..NUTRIENTS {
             c.uptake[i] = pick(rng, a.uptake[i], b.uptake[i]);
         }
@@ -552,6 +568,12 @@ impl Genome {
         }
         if rng.f32() < rate {
             self.beak = (self.beak + rng.normal() * 0.12).clamp(0.0, 1.0);
+        }
+        if rng.f32() < rate {
+            self.hearing = (self.hearing + rng.normal() * 0.12).clamp(0.0, 1.0);
+        }
+        if rng.f32() < rate {
+            self.hear_freq = (self.hear_freq + rng.normal() * 0.12).clamp(0.0, 1.0);
         }
         // generative body-graph drift (param + structural; bounded inside morph::mutate)
         self.body.mutate(rng, rate);

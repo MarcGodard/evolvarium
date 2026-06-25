@@ -156,6 +156,8 @@ pub struct Brain {
     // combat intents stashed each tick in live_step (out[2]/out[3]), predation_step reads same-tick.
     pub attack: f32,  // NN attack intent 0..1: hunts above ATTACK_INTENT_THRESH
     pub defend: f32,  // NN brace intent 0..1: raises defense, costs mobility
+    pub voice: f32,   // NN call intensity 0..1 (out[7]) stashed this tick -> read by next tick's hearing snapshot + audio
+    // (1-tick delay, same pattern as prev_dist/fight_reward).
     // pending combat reward set by predation_step (kill/defend/whiff), consumed + cleared next live_step
     // learn() call. 1-tick delay, same pattern as prev_dist.
     pub fight_reward: f32,
