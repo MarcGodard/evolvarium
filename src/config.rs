@@ -127,7 +127,11 @@ pub const FLIGHT_KNEE: f32 = 0.35;      // min flight gene to leave the ground (
 // the mass -> grounded even WITH the flight gene (real cap on flyer size: elephants don't fly). Flight needs
 // BOTH flight gene >= FLIGHT_KNEE AND wing_loading <= this. Calibrated (see sim::wing_loading dist) so winged
 // gene-fliers stay aloft, wingless/heavy ones drop. Raise = heavier fliers allowed; lower = stricter.
-pub const MAX_WING_LOADING: f32 = 12.0;
+// Tightened 12 -> 6: at 12 the showcase flier wl median was ~11.3, so HALF the gene-fliers hovered with
+// near-zero wing area (looked like wingless floating balls). 6 grounds the under-winged (wl 6..12) -> they
+// walk (still Aerial by gene = niche bookkeeping unchanged, niche_of keys off the gene not is_flier), only
+// the genuinely-winged (~14/45 founders) fly. Adds selection pressure for real wing area. "Elephants don't fly."
+pub const MAX_WING_LOADING: f32 = 6.0;
 pub const MAX_FLIGHT_ALT: f32 = 6.0;    // altitude ceiling (surface-offset units above CREATURE_Y)
 pub const FLIGHT_SPEED: f32 = 3.0;      // top-speed bonus fraction at full flight when fully airborne. High (>SWIM_SPEED): birds are the FASTEST movers, zipping aloft (air = less drag than water/ground). At full flight x airborne -> ~4x a walker's speed. Tunable in balance phase.
 pub const FLIGHT_CLIMB_RATE: f32 = 4.0; // altitude units/sec gained/lost at full climb/descend intent

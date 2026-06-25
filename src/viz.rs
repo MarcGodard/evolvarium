@@ -766,7 +766,9 @@ fn spawn_wings(commands: &mut Commands, parent: Entity, g: &Genome, wing_mesh: &
         }
         let pos = part.tf.translation;
         let side = if pos.x >= 0.0 { 1.0 } else { -1.0 };
-        let span = (0.8 + 1.3 * (part.radius * 2.0 + part.length)).clamp(0.8, 3.0); // this plate's own size
+        // floor raised 0.8 -> 1.1: under the tighter wing-loading gate only genuinely-winged fliers fly, so a
+        // small one's wing should still read clearly (never a near-invisible sliver).
+        let span = (0.8 + 1.3 * (part.radius * 2.0 + part.length)).clamp(1.1, 3.0); // this plate's own size
         let chord = span * 0.8;
         let w = commands
             .spawn((
