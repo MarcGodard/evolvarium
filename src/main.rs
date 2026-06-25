@@ -404,7 +404,7 @@ fn setup_scene(
     // peeking past the planet silhouette -> a soft blue limb halo, no tint over the disc. Orbit-view only
     // (viz::atmosphere_visibility). Per-VERTEX color (multiplies base) is set each frame by viz::update_atmosphere:
     // bright day-side limb, dim night airglow, warm twilight band -> a day-biased glow, not a uniform ring.
-    let mut atmo_mesh = Sphere::new(sphere::PLANET_R * 1.14).mesh().ico(4).unwrap();
+    let mut atmo_mesh = Sphere::new(sphere::PLANET_R * 1.17).mesh().ico(4).unwrap();
     let nverts = atmo_mesh.count_vertices();
     atmo_mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, vec![[0.35f32, 0.55, 1.0, 1.0]; nverts]);
     commands.spawn((
