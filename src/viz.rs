@@ -116,7 +116,7 @@ impl Plugin for VizPlugin {
                     toggle_sensors,
                     draw_sensors,
                     (add_plant_visuals, size_plants, add_grass_visuals, add_seaweed_visuals, size_creatures),
-                    (day_night_lighting, update_sun_glow, time_of_day, toggle_shadows, walk_ambient, update_daycycle, track_underwater, update_sky, toggle_underwater_tint, animate_ocean, update_globe_climate, update_aurora_curtains, rotate_sky_stars, position_sky_planets, fade_sky_stars, ocean_opacity),
+                    (day_night_lighting, update_sun_glow, time_of_day, walk_day_drift, toggle_shadows, walk_ambient, update_daycycle, track_underwater, update_sky, toggle_underwater_tint, animate_ocean, update_globe_climate, update_aurora_curtains, rotate_sky_stars, position_sky_planets, fade_sky_stars, ocean_opacity),
                     (rain_visuals, lightning_visuals),
                     (fire_visuals, fire_sheet_visuals, smoke_visuals),
                     meteor_visuals,
@@ -1573,6 +1573,34 @@ fn time_of_day(
             offset.0 = noon_offset(w.dir, gen.tick);
         }
     }
+}
+
+// Walk-mode day pace: glide the VISUAL sun (+ stars/moon/sky, all read SunOffset) over a fixed real ~24-minute
+// day, decoupled from sim speed -> on the ground the sun moves like a real day instead of strobing when you
+// crank speed for evolution. Visual SunOffset only; creature rest + plant growth read raw gen.tick (untouched).
+// Compensates for the sim's own tick advance so vtick = gen.tick + offset moves at exactly the walk-day rate.
+const WALK_DAY_REAL_SECS: f64 = 24.0 * 60.0; // full day/night cycle = 24 real minutes (1 real min ~ 1 sky hour)
+fn walk_day_drift(
+    mode: Res<crate::camera::CameraMode>,
+    rtime: Res<Time<bevy::time::Real>>,
+    vtime: Res<Time<Virtual>>,
+    gen: Res<GenState>,
+    mut offset: ResMut<SunOffset>,
+    mut acc: Local<f64>,
+    mut last_tick: Local<Option<u32>>,
+) {
+    if *mode != crate::camera::CameraMode::Walk || vtime.is_paused() {
+        *last_tick = None; // re-baseline on next walk frame (don't jump the sun on resume)
+        *acc = 0.0;
+        return;
+    }
+    let sim_delta = last_tick.map_or(0, |t| gen.tick.wrapping_sub(t) as i64); // ticks the sim moved this frame
+    *last_tick = Some(gen.tick);
+    let rate = crate::sphere::DAY_TICKS as f64 / WALK_DAY_REAL_SECS; // target vtick advance (ticks/real-sec)
+    *acc += rtime.delta_secs_f64() * rate;
+    let want = acc.floor();
+    *acc -= want;
+    offset.0 += want as i64 - sim_delta; // vtick advances by `want`; cancel the sim's own advance
 }
 
 // Walk mode: camera ambient fill tracks local daylight so NIGHT GOES DARK (flat high ambient made
