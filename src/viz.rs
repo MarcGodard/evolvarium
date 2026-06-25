@@ -2762,7 +2762,7 @@ fn ocean_opacity(
     mut mats: ResMut<Assets<StandardMaterial>>,
 ) {
     let walk = *mode == crate::camera::CameraMode::Walk;
-    let (want_mode, want_alpha) = if walk { (AlphaMode::Blend, 0.32) } else { (AlphaMode::Opaque, 1.0) };
+    let (want_mode, want_alpha) = if walk { (AlphaMode::Blend, 0.62) } else { (AlphaMode::Opaque, 1.0) };
     let Ok(h) = q.single() else { return };
     let Some(m) = mats.get_mut(&h.0) else { return };
     if m.alpha_mode != want_mode || (m.base_color.alpha() - want_alpha).abs() > 0.01 {
