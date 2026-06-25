@@ -547,6 +547,13 @@ pub const FREQ_WIDTH: f32 = 0.35;    // freq-match tolerance: |hear_freq - emit_
 pub const HEAR_UPKEEP: f32 = 0.18;   // energy/sec basal at full hearing acuity (cochlea + neural processing; no free ears)
 pub const VOICE_COST: f32 = 0.5;     // energy/sec at full call intensity (out[7]=1). Calling isn't free -> selection gates it to when it pays.
 pub const VOICE_GATE: f32 = 0.25;    // min out[7] to actually emit (below = silent). Avoids constant faint chatter + audio spam.
+// ambient environmental NOISE a creature perceives at its spot. Feeds ambient_loud brain input (indicator:
+// react to incoming rain / nearby fire) AND masks creature-call hearing (calls must beat this noise floor ->
+// distinct from the environment). Weights blend the sources into 0..1.
+pub const AMBIENT_RAIN: f32 = 0.8;   // rain/storm contribution (the loud "weather coming" rumble)
+pub const AMBIENT_FIRE: f32 = 1.0;   // nearby fire roar (strongest -> audible threat indicator before you're IN it)
+pub const AMBIENT_SURF: f32 = 0.5;   // water/surf contribution (in/near water = constant wash)
+pub const AMBIENT_MASK: f32 = 0.8;   // how much the noise floor subtracts from heard call loudness (0..1 of ambient)
 // need for shade: in hot SUN (daylight x local temp) exposed creature overheats + burns energy; standing
 // in canopy shade (near tree) or being heat-tolerant build relieves it. `shade` brain input lets brains
 // learn to seek trees at midday.

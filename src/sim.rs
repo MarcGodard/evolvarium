@@ -2733,6 +2733,11 @@ pub fn live_step(
         } else {
             0.0
         };
+        // ambient environmental NOISE at this spot: rain/storm (weather coming) + nearby fire (threat) + water.
+        // Two roles: (1) ambient_loud brain input -> creatures react to incoming rain / nearby fire; (2) masks
+        // hear_loud -> a call must beat the noise floor to be heard (calls distinct from the environment).
+        let ambient_loud = (crate::sphere::rain_at(pdir, tick) * AMBIENT_RAIN + fire_r.get(pos) * AMBIENT_FIRE + wet_here * AMBIENT_SURF).min(1.0);
+        hear_loud = (hear_loud - ambient_loud * AMBIENT_MASK).max(0.0); // noise floor drowns faint calls
 
         // magnetoreception (gated by `magneto` gene): expression scales both inputs + upkeep cost, so a
         // switched-off sense feeds ~0 (brain ignores) for ~0 cost.
@@ -2767,8 +2772,9 @@ pub fn live_step(
         input.push(wrap_angle(crate::sphere::mag_north_bearing(pdir) - head.0) / std::f32::consts::PI * mexpr); // compass: rel bearing to magnetic north
         input.push(air_here); // own altitude fraction: flier/diver manages climb/descend
         // hearing globals (LAST, matching ensure_net_shape padding order). ~0 when nothing audible / deaf:
-        input.push(hear_loud); // loudest freq-matched caller within earshot (0..1) -> omnidirectional alert
+        input.push(hear_loud); // loudest freq-matched caller within earshot (0..1, noise-floor-masked) -> alert
         input.push(hear_bear); // bearing to it (-1..1) -> orient toward/away
+        input.push(ambient_loud); // environmental noise (LAST global): rain/storm/fire indicator + masks calls
 
         // think (per-life learned brain, dynamic topology matching this genome's sensor count)
         let (h, out) = forward(&brain.net, &input);

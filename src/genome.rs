@@ -16,15 +16,16 @@ pub const MIN_SENSORS: usize = 1;
 pub const MAX_SENSORS: usize = 8;
 pub const SIG_PER_SENSOR: usize = 2; // each sensor reports [inv-dist, food type/readiness]
 // Global (non-sensor) brain inputs, appended after per-sensor signals. Column order:
-// [energy, daylight, fatigue, bias, toxic_load, shade, threat_dist, threat_bearing, wet, mag_lat, compass, altitude, hear_loud, hear_bearing]
+// [energy, daylight, fatigue, bias, toxic_load, shade, threat_dist, threat_bearing, wet, mag_lat, compass, altitude, hear_loud, hear_bearing, ambient_loud]
 // energy+daylight+fatigue -> diurnal/nocturnal rest; toxic_load -> avoid poison; shade -> seek canopy in heat;
 // threat_dist/bearing -> flee bigger predator; wet -> in water; mag_lat+compass -> magnetic nav (gated by
 // `magneto` gene); altitude -> own height aloft (fliers manage climb/descend); hear_loud+hear_bearing ->
 // OMNIDIRECTIONAL acoustic sense (loudest freq-matched caller, works in dark/behind terrain; gated by `hearing`
-// acuity). GOTCHA: M4 widened 4 -> 9; magneto added 2 -> 11; flight added 1 -> 12; hearing added 2 -> 14. NEW
-// globals always appended LAST so pad_ih_inputs (inserts before bias) aligns old saved nets correctly. Old saved
-// nets zero-padded for new columns on load, see ensure_net_shape.
-pub const GLOBAL_INPUTS: usize = 14;
+// acuity); ambient_loud -> environmental NOISE (rain/storm incoming, nearby fire, water) = indicator + masks
+// hear_loud (a call must beat the noise floor). GOTCHA: M4 widened 4 -> 9; magneto added 2 -> 11; flight added 1
+// -> 12; hearing added 2 -> 14; ambient added 1 -> 15. NEW globals always appended LAST so pad_ih_inputs (inserts
+// before bias) aligns old saved nets correctly. Old saved nets zero-padded for new columns on load, see ensure_net_shape.
+pub const GLOBAL_INPUTS: usize = 15;
 pub const CONE_HALF: f32 = 0.7; // sensor FOV half-angle (rad)
 const RANGE_MIN: f32 = 4.0;
 const RANGE_MAX: f32 = 48.0; // long-range vision possible (big world); energy cost = trade-off (see sim SENSE_COST)
