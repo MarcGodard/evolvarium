@@ -362,6 +362,11 @@ pholmq/TSN (GPL-2.0) @ commit 49fd49c (pinned in `orrery.rs` + `stars.rs` commen
 - [ ] Stronger diversity: now that aquatic has a real food base + swimmers can be seeded, run a --mating long
       seed on the NEW world (50% ocean + mountains) so the showcase holds aquatic + alpine + land niches.
       Consider making --mating the default once seeds are re-evolved under it.
+- [ ] **Visual lightning during storms**: render forked lightning bolts in heavy-rain/storm cells (additive
+      glowing polyline + branches, brief flash + fade), with a screen/ambient light pop on strike. Tie to the
+      weather field (high cloud + rain -> chance per storm cell) so storms feel alive. Reuse the existing
+      L=lightning god-control strike path for the bolt VFX + occasional auto-ignition where it hits dry fuel
+      (ocean/ice firebreaks already gate fire). Render-only, fits the visuals-first phase.
 - [x] **Atmosphere rim/haze (2026-06-24)**: additive sky-blue shell just above the surface, FRONT-culled so
   the opaque globe occludes all but the thin ring past its silhouette -> soft blue limb halo in orbit view
   (`viz::Atmosphere` + `atmosphere_visibility`, orbit-only). Axial-tilt seasons already landed (Tychos sun).
