@@ -320,6 +320,13 @@ impl Genome {
         0.3 + 3.6 * self.size
     }
 
+    // Maturity-time multiplier from size: big bodies develop slower (offspring take longer to reach adult size
+    // + breeding age) -> a K-strategy cost balancing large creatures' combat dominance. Anchored ~1 at mid size
+    // so existing pacing holds; mouse ~0.4x (breeds fast), dino ~2x (slow). Scales repro_min_age + visual grow-in.
+    pub fn maturity_scale(&self) -> f32 {
+        0.4 + 1.6 * self.size
+    }
+
     // Rebuild net + plast as fresh random weights sized to CURRENT sensors (+ existing hidden count). Used
     // by scenario harness after overriding `sensors` so net shape matches before optional reflex prior.
     // (Bare scalar-only override keeps base net, so only called when sensors change.)

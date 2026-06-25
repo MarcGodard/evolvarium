@@ -3219,7 +3219,7 @@ pub fn live_step(
         // bounds population.
         let k = genome.parental;
         let repro_thr = REPRO_THRESHOLD * (0.8 + 0.4 * k);
-        let repro_min_age = (REPRO_MIN_AGE as f32 * (0.6 + 0.8 * k)) as u32;
+        let repro_min_age = (REPRO_MIN_AGE as f32 * (0.6 + 0.8 * k) * genome.maturity_scale()) as u32; // big = slow to mature
         let ni = crate::niche::niche_of(genome).idx(); // breeder's niche -> its OWN carrying cap governs repro
         let ncap = NICHE_CAP[ni].max(1) as f32;
         if live_continuous

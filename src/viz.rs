@@ -584,7 +584,8 @@ const CREATURE_MATURE_TICKS: f32 = 220.0; // grow to full size by this age (tick
 // (sets full scale on genome change); this just shrinks juveniles.
 fn size_creatures(mut q: Query<(&DietState, &Genome, &mut Transform), With<Creature>>) {
     for (diet, g, mut tf) in &mut q {
-        let grow = (CREATURE_BORN_SCALE + (1.0 - CREATURE_BORN_SCALE) * diet.age as f32 / CREATURE_MATURE_TICKS).min(1.0);
+        let mature_ticks = CREATURE_MATURE_TICKS * g.maturity_scale(); // big bodies grow in slower (match breeding age)
+        let grow = (CREATURE_BORN_SCALE + (1.0 - CREATURE_BORN_SCALE) * diet.age as f32 / mature_ticks).min(1.0);
         tf.scale = Vec3::splat(body_scale(g) * grow); // uniform: generative body carries the shape
     }
 }
