@@ -4,7 +4,7 @@
 //   G = draw sensor rays (evolved eye layout)
 use bevy::prelude::*;
 
-use crate::components::{Alive, Creature, DietState, Energy, Fitness, Food, Grass, Heading, Rot, Seaweed, Seed, Tree};
+use crate::components::{Alive, Creature, DietState, Energy, Fitness, Food, Grass, Heading, Locomotion, Rot, Seaweed, Seed, Tree};
 use crate::genome::{master_expression, Genome, NUTRIENTS};
 use crate::plant::{flower_color, form, plant_color, PlantGenome, PlantState};
 use crate::sim::{grid_cell_surface, Fire, GenState, GroundWater, EYE_MIN, EYE_SPAN, ROT_GONE};
@@ -350,8 +350,8 @@ fn minimap_marker(
     *vis = Visibility::Hidden;
 }
 
-// Master HUD toggle (H). The planet HUD (world stats, inspector hint, day cycle) is hidden when toggled off
-// OR in the orrery view. (Legend has its own toggle; minimap handled by minimap_visibility.)
+// Master HUD toggle (J). The planet HUD (world stats, inspector hint, day cycle) is hidden when toggled off
+// OR in the orrery view. (Legend is on H; minimap handled by minimap_visibility.)
 #[derive(Resource)]
 pub struct ShowHud(pub bool);
 impl Default for ShowHud {
@@ -361,7 +361,7 @@ impl Default for ShowHud {
 }
 
 fn toggle_hud(keys: Res<ButtonInput<KeyCode>>, mut show: ResMut<ShowHud>) {
-    if keys.just_pressed(KeyCode::KeyH) {
+    if keys.just_pressed(KeyCode::KeyJ) {
         show.0 = !show.0;
     }
 }
@@ -592,17 +592,18 @@ const CREATURE_MATURE_TICKS: f32 = 220.0; // grow to full size by this age (tick
 // whole body per frame by age factor (parts are children, scale with it); never touches genome `size`
 // or combat. Recomputes genome target scale x born->1.0 age lerp -> composes with restyle_creatures
 // (sets full scale on genome change); this just shrinks juveniles.
-fn size_creatures(mut q: Query<(&DietState, &Genome, &mut Transform), With<Creature>>) {
-    for (diet, g, mut tf) in &mut q {
+fn size_creatures(mut q: Query<(&DietState, &Genome, &Locomotion, &mut Transform), With<Creature>>) {
+    for (diet, g, loco, mut tf) in &mut q {
         let mature_ticks = CREATURE_MATURE_TICKS * g.maturity_scale(); // big bodies grow in slower (match breeding age)
         let grow = (CREATURE_BORN_SCALE + (1.0 - CREATURE_BORN_SCALE) * diet.age as f32 / mature_ticks).min(1.0);
         let scale = body_scale(g) * grow;
         tf.scale = Vec3::splat(scale); // uniform: generative body carries the shape
-        // Seat grounded land creatures on terrain. Body mesh is CENTER-anchored, sim pins all land creatures at
-        // fixed CREATURE_Y -> tiny bodies (half-height < CREATURE_Y) hover, big bodies sink. Render-only: rest body
-        // CENTER at half-height*scale above ground so feet plant at any size. Skips fliers/swimmers (own altitude);
-        // direction preserved so sim's creature dir (translation.normalize) is untouched -> no gameplay drift.
-        if g.flight < crate::config::FLIGHT_KNEE && g.swim < 0.5 {
+        // Seat GROUNDED creatures on terrain. Body mesh is CENTER-anchored, sim pins grounded creatures at fixed
+        // CREATURE_Y -> tiny bodies hover, big bodies sink. Render-only: rest body CENTER at half-height*scale
+        // above ground so the lowest point plants at any size. Gate on ACTUAL altitude (loco.alt ~0), not the
+        // swim gene: a swimmer STRANDED on dry land is grounded (alt 0) + must be seated too (else it floats);
+        // a swimmer in the water column (alt>0) keeps its own depth. Fliers (alt>0) keep their altitude.
+        if g.flight < crate::config::FLIGHT_KNEE && loco.alt < 0.3 {
             let d = tf.translation.normalize_or_zero();
             if d != Vec3::ZERO {
                 let m = g.morph.unwrap_or_else(|| crate::morph::Morphometrics::of(&g.body));
@@ -3126,7 +3127,7 @@ struct ShowLegend(bool);
 struct LegendText;
 
 const LEGEND: &str = "\
-EVOLVARIUM  -  legend   (press J to close)
+EVOLVARIUM  -  legend   (press H to close)
 
 TOP-CENTER (walk mode)
   time-of-day phase where you stand: NIGHT / DAWN /
@@ -3169,7 +3170,7 @@ CONTROLS
   G  sensor rays   SPACE  pause/resume   H  hide/show HUD
   1-5  speed presets (slow..fast)   + / -  fine speed
   B  seed creatures    P  populate whole planet
-  L  lightning fire    K  cull    J  this legend
+  L  lightning fire    K  cull    H  this legend
   M  cycle minimap field    Y  phylogeny (species tree)
   N  creature names (Latin, nearest in view)
   ORRERY (TAB to it): T traces, G grid, Z zodiac,
@@ -3195,14 +3196,14 @@ fn spawn_legend_ui(mut commands: Commands) {
     ));
 }
 
-// J toggles legend panel. Starts hidden; top-left hint tells player it exists. (H is the master HUD toggle;
-// K is "cull" on the planet.)
+// H toggles the legend/help panel (the intuitive "help" key). Starts hidden; top-left hint tells player it
+// exists. (J is the master HUD toggle; K is "cull" on the planet.)
 fn toggle_legend(
     keys: Res<ButtonInput<KeyCode>>,
     mut show: ResMut<ShowLegend>,
     mut q: Query<&mut Visibility, With<LegendText>>,
 ) {
-    if keys.just_pressed(KeyCode::KeyJ) {
+    if keys.just_pressed(KeyCode::KeyH) {
         show.0 = !show.0;
         for mut v in &mut q {
             *v = if show.0 { Visibility::Inherited } else { Visibility::Hidden };
@@ -3366,19 +3367,23 @@ fn toggle_phylo(keys: Res<ButtonInput<KeyCode>>, mut show: ResMut<ShowPhylo>, mu
 // --- Creature name labels (N toggle): floating Latin-binomial nameplates over the NEAREST creatures, so the
 // player can identify + find a kind ("that hovering thing is a Volans = a flier"). A bounded POOL of text
 // nodes is reassigned each frame to the closest creatures (no per-creature spawn churn). Render-only.
-const NAMEPLATES: usize = 24; // max labels shown at once (nearest creatures to the camera)
-const LABEL_RADIUS: f32 = 55.0; // only label creatures within this of the camera (keeps it readable + cheap)
+const NAMEPLATES: usize = 16; // max labels shown at once (nearest creatures to the camera)
+const LABEL_RADIUS: f32 = 22.0; // only label creatures THIS close (so the name clearly belongs to a visible creature, not a distant speck)
 
 #[derive(Resource, Default)]
 pub struct ShowLabels(pub bool);
 
-#[derive(Component)]
-struct CreatureLabel;
+// Each label STICKS to one creature (target) until that creature leaves range -> the name follows its creature
+// instead of the pool re-sorting every frame (which made labels jump/bounce between creatures).
+#[derive(Component, Default)]
+struct CreatureLabel {
+    target: Option<Entity>,
+}
 
 fn spawn_nameplates(mut commands: Commands) {
     for _ in 0..NAMEPLATES {
         commands.spawn((
-            CreatureLabel,
+            CreatureLabel::default(),
             Text::new(""),
             TextFont { font_size: 14.0, ..default() },
             TextColor(Color::srgb(1.0, 1.0, 0.9)), // near-white on a dark pill -> reads over grass + sky
@@ -3400,18 +3405,20 @@ fn toggle_labels(keys: Res<ButtonInput<KeyCode>>, mut show: ResMut<ShowLabels>) 
     }
 }
 
-// Assign the pool to the nearest living creatures, projecting each to screen for its nameplate. Off in orrery.
+// Each label sticks to its creature until it leaves range (no bouncing); free labels claim the nearest
+// un-labeled creature. Only CLOSE, on-screen creatures get a label so the name clearly belongs to one. Off in orrery.
 fn update_creature_labels(
     show: Res<ShowLabels>,
     mode: Res<crate::camera::CameraMode>,
     cam: Query<(&Camera, &GlobalTransform), With<crate::camera::OrbitCam>>,
-    creatures: Query<(&Transform, &Genome, &Alive), With<Creature>>,
-    mut labels: Query<(&mut Node, &mut Text, &mut Visibility), With<CreatureLabel>>,
+    creatures: Query<(Entity, &Transform, &Genome, &Alive), With<Creature>>,
+    mut labels: Query<(&mut CreatureLabel, &mut Node, &mut Text, &mut Visibility)>,
 ) {
     let active = show.0 && *mode != crate::camera::CameraMode::Orrery;
     let cam_ok = cam.single().ok();
     if !active || cam_ok.is_none() {
-        for (_, _, mut vis) in &mut labels {
+        for (mut lbl, _, _, mut vis) in &mut labels {
+            lbl.target = None;
             if *vis != Visibility::Hidden {
                 *vis = Visibility::Hidden;
             }
@@ -3421,10 +3428,10 @@ fn update_creature_labels(
     let (camera, cam_tf) = cam_ok.unwrap();
     let eye = cam_tf.translation();
     let vp = camera.logical_viewport_size().unwrap_or(Vec2::new(1920.0, 1080.0));
-    // nearest living creatures within radius THAT project ON-SCREEN (skip ones at the camera's feet / behind /
-    // off-frame so the pool isn't wasted on invisible creatures). Store the screen pos to place the label.
-    let mut near: Vec<(f32, Vec2, &Genome)> = Vec::new();
-    for (tf, g, alive) in &creatures {
+    // in-range, on-screen creatures + their projected label position (above the body along the surface normal)
+    let mut screen_of: std::collections::HashMap<Entity, Vec2> = std::collections::HashMap::new();
+    let mut cand: Vec<(Entity, f32)> = Vec::new();
+    for (e, tf, _g, alive) in &creatures {
         if !alive.0 {
             continue;
         }
@@ -3433,30 +3440,52 @@ fn update_creature_labels(
         if d2 >= LABEL_RADIUS * LABEL_RADIUS {
             continue;
         }
-        let up = world.normalize_or_zero(); // surface normal (planet at origin) -> lift label above the body
+        let up = world.normalize_or_zero();
         if let Ok(s) = camera.world_to_viewport(cam_tf, world + up * 1.4) {
             if s.x >= 0.0 && s.x <= vp.x && s.y >= 0.0 && s.y <= vp.y {
-                near.push((d2, s, g));
+                screen_of.insert(e, s);
+                cand.push((e, d2));
             }
         }
     }
-    near.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-    near.truncate(NAMEPLATES);
-    let mut it = near.iter();
-    for (mut node, mut text, mut vis) in &mut labels {
-        let mut visible = false;
-        if let Some((_, screen, g)) = it.next() {
-            node.left = Val::Px(screen.x + 4.0);
-            node.top = Val::Px(screen.y);
-            let name = crate::latin::latin_name(g);
-            if text.0 != name {
-                text.0 = name;
+    // Pass A: keep each label glued to its creature if still in range (just reposition); else release + hide.
+    let mut used: std::collections::HashSet<Entity> = std::collections::HashSet::new();
+    for (mut lbl, mut node, _text, mut vis) in &mut labels {
+        if let Some(e) = lbl.target {
+            if let Some(s) = screen_of.get(&e) {
+                node.left = Val::Px(s.x + 4.0);
+                node.top = Val::Px(s.y);
+                used.insert(e);
+                if *vis != Visibility::Visible {
+                    *vis = Visibility::Visible;
+                }
+            } else {
+                lbl.target = None;
+                if *vis != Visibility::Hidden {
+                    *vis = Visibility::Hidden;
+                }
             }
-            visible = true;
         }
-        let want = if visible { Visibility::Visible } else { Visibility::Hidden };
-        if *vis != want {
-            *vis = want;
+    }
+    // Pass B: free labels claim the nearest un-labeled candidate (stable assignment).
+    cand.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+    let mut next = cand.iter().filter(|(e, _)| !used.contains(e));
+    for (mut lbl, mut node, mut text, mut vis) in &mut labels {
+        if lbl.target.is_some() {
+            continue;
+        }
+        if let Some((e, _)) = next.next() {
+            if let Some(s) = screen_of.get(e) {
+                node.left = Val::Px(s.x + 4.0);
+                node.top = Val::Px(s.y);
+            }
+            if let Ok((_, _, g, _)) = creatures.get(*e) {
+                text.0 = crate::latin::latin_name(g);
+            }
+            lbl.target = Some(*e);
+            if *vis != Visibility::Visible {
+                *vis = Visibility::Visible;
+            }
         }
     }
 }
@@ -3620,7 +3649,7 @@ fn update_world_stats(
 
 fn spawn_stats_ui(mut commands: Commands) {
     commands.spawn((
-        Text::new("J legend  -  H hide HUD  -  left-click a creature or plant to inspect"),
+        Text::new("H legend  -  J hide HUD  -  N names  -  left-click a creature or plant to inspect"),
         TextFont { font_size: 13.0, ..default() },
         TextColor(Color::WHITE),
         Node {
