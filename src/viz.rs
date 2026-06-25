@@ -592,9 +592,6 @@ const CREATURE_MATURE_TICKS: f32 = 220.0; // grow to full size by this age (tick
 // whole body per frame by age factor (parts are children, scale with it); never touches genome `size`
 // or combat. Recomputes genome target scale x born->1.0 age lerp -> composes with restyle_creatures
 // (sets full scale on genome change); this just shrinks juveniles.
-const GAIT_FREQ: f32 = 0.9; // walk-bob steps per unit distance walked (divided by size: small = quicker steps)
-const GAIT_AMP: f32 = 0.16; // bob height as a fraction of body half-height (subtle step, not a hop)
-
 fn size_creatures(mut q: Query<(&DietState, &Genome, &Locomotion, &mut Transform), With<Creature>>) {
     for (diet, g, loco, mut tf) in &mut q {
         let mature_ticks = CREATURE_MATURE_TICKS * g.maturity_scale(); // big bodies grow in slower (match breeding age)
@@ -611,12 +608,7 @@ fn size_creatures(mut q: Query<(&DietState, &Genome, &Locomotion, &mut Transform
             if d != Vec3::ZERO {
                 let m = g.morph.unwrap_or_else(|| crate::morph::Morphometrics::of(&g.body));
                 let half = (m.bbox_max.y - m.bbox_min.y) * 0.5;
-                // WALK GAIT: bob up/down as the creature WALKS (phase = distance walked, so it steps while
-                // moving + holds when still). Small step gait so a grounded mover reads as walking, not gliding.
-                // freq scales with size (small body = quick steps). Render-only.
-                let step_freq = GAIT_FREQ / (0.3 + g.size);
-                let bob = (loco.path * step_freq).sin() * GAIT_AMP * scale * half;
-                tf.translation = crate::sphere::surface_pos(d, scale * half * 0.9 + bob); // 0.9: slight sink -> feet planted
+                tf.translation = crate::sphere::surface_pos(d, scale * half * 0.9); // 0.9: slight sink -> feet planted
             }
         }
     }
