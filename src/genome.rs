@@ -312,6 +312,14 @@ impl Genome {
         self.sensors.len()
     }
 
+    // Linear body-size factor from the size gene: tiny "mouse" -> huge "dinosaur". SINGLE source of truth for
+    // size. Drives render scale (viz::body_scale) AND the flight physics: mass ~ scale^3, wing area ~ scale^2,
+    // so wing loading ~ scale -> big bodies can't fly (sim::wing_loading folds this in). ~13x linear span here
+    // (size 0..1 -> 0.3..3.9) -> ~2400x mass range. Combat/defense also scale off it (size pays rent).
+    pub fn size_scale(&self) -> f32 {
+        0.3 + 3.6 * self.size
+    }
+
     // Rebuild net + plast as fresh random weights sized to CURRENT sensors (+ existing hidden count). Used
     // by scenario harness after overriding `sensors` so net shape matches before optional reflex prior.
     // (Bare scalar-only override keeps base net, so only called when sensors change.)

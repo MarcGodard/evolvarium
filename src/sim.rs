@@ -2593,7 +2593,7 @@ pub fn live_step(
         // body geometry (cached at spawn; cheap fallback). wing_load gates flight (cube-square): heavy body +
         // small wings can't fly. Computed here once, reused for locomotion + envelope + drown below.
         let morph = genome.morph.unwrap_or_else(|| crate::morph::Morphometrics::of(&genome.body));
-        let wing_load = wing_loading(&morph);
+        let wing_load = wing_loading(&morph) * genome.size_scale(); // size folds in: bigger body -> higher loading
         let flier = is_flier(genome.flight, wing_load); // bird: flight gene AND wings; picks fruit from canopy
         let _r = max_range.max(NEAR_QUERY);
         // scan a neighborhood of food-grid (lon/lat) cells around this creature. SPAN cells each way covers
@@ -3694,7 +3694,7 @@ mod tests {
         for c in v["creatures"].as_array().unwrap() {
             let g: crate::genome::Genome = serde_json::from_value(c.clone()).unwrap();
             let m = crate::morph::Morphometrics::of(&g.body);
-            let wl = m.mass / m.wing_area.max(1e-3);
+            let wl = (m.mass / m.wing_area.max(1e-3)) * g.size_scale();
             all.push(wl);
             masses.push(m.mass);
             if g.flight >= FLIGHT_KNEE { fliers.push(wl); }

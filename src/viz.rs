@@ -547,9 +547,9 @@ impl BodyMeshCache {
 // Overall world-scale of a generative body. Body-graph units (~2-3 tall) -> ~1.5 world units, modulated by
 // the size gene so big-genome creatures read bigger. Juvenile growth multiplies this (size_creatures).
 fn body_scale(g: &Genome) -> f32 {
-    BODY_RENDER * (0.7 + 0.6 * g.size)
+    BODY_RENDER * g.size_scale() // mouse..dino (genome::size_scale is the single size lever)
 }
-const BODY_RENDER: f32 = 0.5; // graph-units -> world-units normalization (tune by capture)
+const BODY_RENDER: f32 = 0.34; // graph-units -> world-units normalization (mid-size ~ matches old 0.5*(0.7+0.6*0.4))
 
 // Shared eye mesh (emissive eye spheres are the one part NOT in the generative body graph).
 #[derive(Resource)]
