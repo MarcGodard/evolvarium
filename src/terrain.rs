@@ -5,6 +5,10 @@ use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
 pub const HEIGHT_MAX: f32 = 12.0; // peak terrain elev above sea sphere (world units). sphere::ELEV_MAX aliases this
+// Render-only ocean-floor drop: shallow shelf (elevation ~0 at coast) would otherwise sit a hair below the
+// translucent ocean shell (~PLANET_R+0.16) -> z-fight shimmer seen through the water in orbit. Drop the whole
+// ocean floor by this so the shelf clears the shell with margin. Sim bathymetry (sphere::elevation) untouched.
+const OCEAN_RENDER_DROP: f32 = 0.8;
 
 // UV sphere displaced by terrain elevation, vertex-colored by biome (oceans blue, land green/sand/rock,
 // polar ice). `res` = latitude bands. longitude uses 2*res.
@@ -25,7 +29,11 @@ pub fn build_globe_colored(res: usize, color: impl Fn(Vec3) -> [f32; 3]) -> Mesh
         for i in 0..=cols {
             let lon = -std::f32::consts::PI + std::f32::consts::TAU * i as f32 / cols as f32;
             let d = sphere::lonlat_to_pos(lon, lat, 0.0).normalize();
-            let pos = d * (sphere::PLANET_R + sphere::elevation(d));
+            let mut elev = sphere::elevation(d);
+            if elev < 0.0 {
+                elev -= OCEAN_RENDER_DROP; // sink ocean floor clear of the shell (render only)
+            }
+            let pos = d * (sphere::PLANET_R + elev);
             positions.push([pos.x, pos.y, pos.z]);
             normals.push([d.x, d.y, d.z]); // radial normal, not geometric. smooth shading, ignores elev slope
             let c = color(d);
