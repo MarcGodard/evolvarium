@@ -257,7 +257,7 @@ fn ambient_mix(
     // Submerged: kill ALL land beds, run the muffled underwater bed instead -> sound is wholly different below.
     if let Some(d) = ground {
         if underwater.0 {
-            t_sub = 0.55;
+            t_sub = 0.12; // submerged is QUIET: faint muffled hum, not a wall of sound (surf belongs on land near water)
         } else {
             let rain = crate::sphere::rain_at(d, gen.tick);
             // surf: sample a few offsets -> fraction ocean nearby (hear the coast, not just standing in water).
