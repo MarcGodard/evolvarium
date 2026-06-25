@@ -75,10 +75,11 @@ fn main() {
     // Render mode + no explicit --load: auto-load showcase seed if present so `cargo run` opens into
     // full breeding world (loaded continuous skips warm-up). --no-load forces fresh warm-up start.
     // Headless never auto-loads.
-    // diverse co-evolved showcase: complex morph bodies (mean ~5.3 graph nodes) + 45 fliers + 55 swimmers + land,
-    // genome-only so the world reseeds fresh + grows to carrying cap as you watch. Default opens WITH birds.
-    // evolved-morph.json (curated 96, no fliers) kept as a --load alternative.
-    const DEFAULT_SEED: &str = "evolved-showcase.json";
+    // Legged diversity showcase: 401 LEGGED survivors (land/aquatic/highland/flying) from the niche x climate
+    // diversity run + a 15-gen planet co-evolution under the strong land-traction pressure, so bodies grew real
+    // legs (not gliding blobs) + sit planted. Genome-only -> reseeds fresh + grows to carrying cap as you watch.
+    // evolved-showcase.json / evolved-morph.json / evolved-diversity.json kept as --load alternatives.
+    const DEFAULT_SEED: &str = "evolved-legged-seed.json";
     if !headless && load.is_none() && !flag(&args, "--no-load") && std::path::Path::new(DEFAULT_SEED).exists() {
         load = Some(DEFAULT_SEED.to_string());
     }
