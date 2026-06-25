@@ -1507,6 +1507,7 @@ pub fn spawn_world_render(
     // shared eye mesh; the body itself is a generative per-genome mesh built by viz (morph.rs)
     commands.insert_resource(crate::viz::CreatureParts {
         eye: meshes.add(Sphere::new(0.5).mesh().ico(1).unwrap()),
+        wing: meshes.add(crate::viz::wing_mesh()),
     });
     // per-form plant mesh library: one silhouette per plant::form (viz::add_plant_visuals picks by genome).
     // Round forms = icospheres; tall/leafy = procedural frond clumps; lily pad = flat disc.

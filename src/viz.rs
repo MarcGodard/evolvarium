@@ -115,7 +115,7 @@ impl Plugin for VizPlugin {
                     add_creature_visuals,
                     toggle_sensors,
                     draw_sensors,
-                    (add_plant_visuals, size_plants, add_grass_visuals, add_seaweed_visuals, size_creatures),
+                    (add_plant_visuals, size_plants, add_grass_visuals, add_seaweed_visuals, size_creatures, flap_wings),
                     (day_night_lighting, update_sun_glow, time_of_day, walk_day_drift, toggle_shadows, walk_ambient, update_daycycle, track_underwater, update_sky, toggle_underwater_tint, animate_ocean, update_globe_climate, update_aurora_curtains, rotate_sky_stars, position_sky_planets, fade_sky_stars, ocean_opacity),
                     (rain_visuals, lightning_visuals),
                     (fire_visuals, fire_sheet_visuals, smoke_visuals),
@@ -555,6 +555,7 @@ const BODY_RENDER: f32 = 0.34; // graph-units -> world-units normalization (mid-
 #[derive(Resource)]
 pub struct CreatureParts {
     pub eye: Handle<Mesh>,
+    pub wing: Handle<Mesh>, // shared flapping-wing mesh (fliers only)
 }
 
 // Skin color + body-plan scale from genome (M4). Shared by add_creature_visuals + restyle_creatures ->
@@ -611,6 +612,7 @@ fn add_creature_visuals(
         let (body_mesh, was_built) = cache.get_or_build(g, &mut meshes);
         commands.entity(e).insert((Mesh3d(body_mesh), MeshMaterial3d(materials.add(color))));
         spawn_eyes(&mut commands, e, g, &parts.eye, &mut materials);
+        spawn_wings(&mut commands, e, g, &parts.wing, &mut materials); // fliers only (gene + wing loading)
         if was_built {
             built += 1;
             if built >= MAX_BODY_BUILDS_PER_FRAME {
@@ -649,6 +651,91 @@ fn spawn_eyes(commands: &mut Commands, parent: Entity, g: &Genome, eye_mesh: &Ha
             .spawn((Mesh3d(eye_mesh.clone()), MeshMaterial3d(eye_mat.clone()), Transform { translation: Vec3::new(ex, ey, ez), scale: Vec3::splat(eye_d), ..default() }))
             .id();
         commands.entity(parent).add_child(eye);
+    }
+}
+
+// Flapping wing on a flier (child of the creature). side = +1 right / -1 left (X mirrored). freq = beat rate.
+#[derive(Component)]
+pub struct Wing {
+    pub side: f32,
+    pub freq: f32,
+}
+
+// Swept tapered wing in body-local space: root chord at x=0, tip at x=1, flat in the XZ plane (thin in Y),
+// leading edge forward (+Z). Scaled per-creature (span x 1 x chord) by spawn_wings; double-sided material.
+pub fn wing_mesh() -> Mesh {
+    use bevy::asset::RenderAssetUsages;
+    use bevy::mesh::PrimitiveTopology;
+    // root_lead, root_trail, tip_lead, tip_trail
+    let pos = vec![[0.0, 0.0, 0.45], [0.0, 0.0, -0.55], [1.0, 0.0, -0.10], [1.0, 0.0, -0.40]];
+    let nor = vec![[0.0, 1.0, 0.0]; 4];
+    // leading edge brighter, trailing-tip darker -> reads as a feathered wing, not a flat card
+    let col = vec![[0.92, 0.93, 0.97, 1.0], [0.78, 0.79, 0.86, 1.0], [0.86, 0.87, 0.93, 1.0], [0.70, 0.71, 0.80, 1.0]];
+    let idx = vec![0u32, 1, 3, 0, 3, 2];
+    let mut m = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    m.insert_attribute(Mesh::ATTRIBUTE_POSITION, pos);
+    m.insert_attribute(Mesh::ATTRIBUTE_NORMAL, nor);
+    m.insert_attribute(Mesh::ATTRIBUTE_COLOR, col);
+    m.insert_indices(bevy::mesh::Indices::U32(idx));
+    m
+}
+
+// Dress a FLIER with a mirrored pair of wings, sized by its EVOLVED wing area (morphology) + placed at the body
+// sides. Only real fliers (gene + wing loading) get them, so wings == actually flies. Children -> inherit the
+// creature's body_scale + juvenile grow-in. NOT spawned for non-fliers (wingless/heavy bodies stay bare).
+fn spawn_wings(commands: &mut Commands, parent: Entity, g: &Genome, wing_mesh: &Handle<Mesh>, materials: &mut Assets<StandardMaterial>) {
+    let m = g.morph.unwrap_or_else(|| crate::morph::Morphometrics::of(&g.body)); // robust if cache not populated
+    let wl = crate::sim::wing_loading(&m) * g.size_scale();
+    if !crate::sim::is_flier(g.flight, wl) {
+        return;
+    }
+    let center_y = (m.bbox_min.y + m.bbox_max.y) * 0.5; // body mesh shifts verts down by this
+    let freq = (0.18 / (0.25 + g.size)).clamp(0.05, 0.5); // small body = fast flutter, big = slow beat
+    // wing tint = the bird's own body color, lightened -> reads as part of the creature + stands out from sky
+    let body = creature_look(g).0.to_srgba();
+    let wcol = Color::srgb((body.red + 0.28).min(1.0), (body.green + 0.28).min(1.0), (body.blue + 0.28).min(1.0));
+    let mat = double_sided_mat(materials, wcol, Some(0.75));
+    // ONE rendered wing per EVOLVED horizontal plate (the lift surfaces). So wing COUNT + size are genetic: a
+    // body that evolved two wing-plate pairs flies on 4 wings, etc. Each sits at its plate, extends outboard.
+    let pheno = crate::morph::develop(&g.body);
+    let mut spawned = 0u32;
+    for part in &pheno.parts {
+        if part.shape != crate::morph::ShapeKind::Plate {
+            continue;
+        }
+        let normal = (part.tf.rotation * Vec3::Z).normalize_or_zero();
+        if normal.y.abs() <= 0.6 {
+            continue; // vertical/sagittal plate = swim fin, not a wing
+        }
+        let pos = part.tf.translation;
+        let side = if pos.x >= 0.0 { 1.0 } else { -1.0 };
+        let span = (0.8 + 1.3 * (part.radius * 2.0 + part.length)).clamp(0.8, 3.0); // this plate's own size
+        let chord = span * 0.8;
+        let w = commands
+            .spawn((
+                Mesh3d(wing_mesh.clone()),
+                MeshMaterial3d(mat.clone()),
+                Transform {
+                    translation: Vec3::new(pos.x, pos.y - center_y, pos.z),
+                    scale: Vec3::new(side * span, 1.0, chord), // negate X on the left side (mirror the swept mesh)
+                    ..default()
+                },
+                Wing { side, freq },
+                bevy::camera::visibility::NoFrustumCulling, // flat mesh -> zero-thickness Aabb would frustum-cull it
+            ))
+            .id();
+        commands.entity(parent).add_child(w);
+        spawned += 1;
+    }
+    let _ = spawned; // count = number of evolved wing plates (>=2 for a flier; can be 4+)
+}
+
+// Beat wings about the shoulder (forward/Z axis): both up + down together, slight downstroke bias. Visual only.
+fn flap_wings(gen: Res<GenState>, mut q: Query<(&Wing, &mut Transform)>) {
+    let t = gen.tick as f32;
+    for (wing, mut tf) in &mut q {
+        let a = 0.55 * (t * wing.freq).sin() + 0.12; // beat + small dihedral lift
+        tf.rotation = Quat::from_rotation_z(wing.side * a); // mirror so both wings rise together
     }
 }
 
