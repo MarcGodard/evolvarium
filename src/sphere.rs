@@ -343,8 +343,8 @@ pub fn biome_color_with_moisture(d: Vec3, m: f32) -> [f32; 3] {
     if is_ocean(d) {
         let depth = ((SEA_LEVEL - elevation01(d)) / SEA_LEVEL).clamp(0.0, 1.0);
         let mut c = lerp3([0.13, 0.40, 0.60], [0.02, 0.09, 0.28], depth);
-        // Sea ice: cold polar ocean freezes to pale pack ice, thickening toward pole. Translucent ocean
-        // shell tints over this, so pale seabed reads as icy pale-blue polar water.
+        // Sea ice: cold polar ocean freezes to pale pack ice, thickening toward pole. This colors the SEABED
+        // (seen when swimming); the opaque ocean surface bakes its own matching depth+ice gradient in main.rs.
         if temp < 0.30 {
             c = lerp3(c, [0.86, 0.90, 0.94], (0.30 - temp) / 0.30);
         }

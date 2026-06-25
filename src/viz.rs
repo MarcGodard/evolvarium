@@ -2739,9 +2739,9 @@ fn toggle_underwater_tint(
 
 // Breathe slow swell on ocean shell (subtle radial scale wobble = living tide). Cosmetic.
 fn animate_ocean(gen: Res<GenState>, mut q: Query<&mut Transform, With<Ocean>>) {
-    // Swell stays STRICTLY above sea level (min scale 1.002 -> shell ~0.16u above PLANET_R). Old [0.996,1.004]
-    // dipped the shell below PLANET_R half the cycle -> transparent shell went coplanar with sea-level coastal
-    // terrain -> z-fight flicker (water<->terrain) along shorelines. Floor above 1.0 keeps the shell on top.
+    // Swell stays STRICTLY above sea level (min scale 1.002 -> sea ~0.16u above PLANET_R) so the opaque ocean
+    // never dips coplanar with sea-level coastal terrain (z-fight) nor sinks below the coastline. Old
+    // [0.996,1.004] dipped it below PLANET_R half the cycle. Floor above 1.0 keeps the sea on top.
     let s = 1.004 + 0.002 * (gen.tick as f32 * 0.03).sin();
     for mut tf in &mut q {
         tf.scale = Vec3::splat(s);

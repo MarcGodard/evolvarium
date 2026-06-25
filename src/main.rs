@@ -349,34 +349,39 @@ fn setup_scene(
         Transform::IDENTITY,
         viz::Planet, // shadow caster in both orbit + walk (night-side / terminator shadow)
     ));
-    // ocean shell: translucent blue sphere at sea level (land pokes above, basins flood below). Glossy
-    // (low roughness + high reflectance) for sun glint. viz::animate_ocean breathes slow swell.
-    // sea surface = waterline reference at PLANET_R: land (elevation >= 0) pokes above, ocean floor
-    // (elevation < 0, signed bathymetry) sinks below -> shell meets globe exactly at coast.
+    // ocean: SINGLE OPAQUE sphere at sea level (land pokes above, basins flood below). One layer -> no
+    // transparent-over-seabed sorting -> no shimmer (old translucent shell over the blue seabed double-layered
+    // the water + flickered as the camera moved). Glossy (low roughness + high reflectance) for sun glint;
+    // viz::animate_ocean breathes a slow swell. The depth gradient that used to live on the (now occluded)
+    // seabed is baked onto THIS surface instead, so the ocean still reads shallow-cyan -> deep-navy.
     let sea_r = sphere::PLANET_R;
-    // Sea surface w/ baked per-vertex ice: cold polar ocean freezes to OPAQUE white pack ice, warmer seas
-    // stay translucent blue. base_color = WHITE so each vertex color carries BOTH hue + alpha (ice opaque,
-    // open water see-through). Latitude-driven (base_temperature), baked once at spawn -> no per-frame cost.
+    // Per-vertex color baked once (no per-frame cost): ocean DEPTH gradient (matches sphere::biome_color ocean
+    // branch so coast hue is continuous) + polar pack-ice white. Opaque now -> alpha unused (kept 1.0).
     let mut sea_mesh = Sphere::new(sea_r).mesh().ico(6).unwrap();
     if let Some(bevy::mesh::VertexAttributeValues::Float32x3(pos)) =
         sea_mesh.attribute(Mesh::ATTRIBUTE_POSITION)
     {
-        let water = Color::srgba(0.07, 0.26, 0.44, 0.62).to_linear().to_f32_array();
-        let ice = Color::srgba(0.90, 0.93, 0.97, 1.0).to_linear().to_f32_array();
+        let shallow = Color::srgb(0.13, 0.40, 0.60).to_linear().to_f32_array();
+        let deep = Color::srgb(0.02, 0.09, 0.28).to_linear().to_f32_array();
+        let ice = Color::srgb(0.86, 0.90, 0.94).to_linear().to_f32_array();
         let cols: Vec<[f32; 4]> = pos
             .iter()
             .map(|p| {
                 let d = Vec3::from_array(*p).normalize_or_zero();
-                // freeze ramps below temp 0.30 (sea holds heat -> onset warmer than land ice),
-                // solid pack ice by ~0.12. smoothstep -> soft floe edge, not hard ring.
-                let f = ((0.30 - sphere::base_temperature(d)) / 0.18).clamp(0.0, 1.0);
-                let f = f * f * (3.0 - 2.0 * f);
-                [
-                    water[0] + (ice[0] - water[0]) * f,
-                    water[1] + (ice[1] - water[1]) * f,
-                    water[2] + (ice[2] - water[2]) * f,
-                    water[3] + (ice[3] - water[3]) * f,
-                ]
+                // depth 0 at coast .. 1 at abyssal center (elevation01 below SEA_LEVEL). Over land it clamps
+                // to 0 (shallowest) but land pokes above -> those verts are hidden anyway.
+                let depth = ((sphere::SEA_LEVEL - sphere::elevation01(d)) / sphere::SEA_LEVEL).clamp(0.0, 1.0);
+                let mut c = [
+                    shallow[0] + (deep[0] - shallow[0]) * depth,
+                    shallow[1] + (deep[1] - shallow[1]) * depth,
+                    shallow[2] + (deep[2] - shallow[2]) * depth,
+                ];
+                // pack ice: cold polar sea freezes (ramps below temp 0.30, matches biome_color ocean ice)
+                let fi = ((0.30 - sphere::base_temperature(d)) / 0.30).clamp(0.0, 1.0);
+                for k in 0..3 {
+                    c[k] += (ice[k] - c[k]) * fi;
+                }
+                [c[0], c[1], c[2], 1.0]
             })
             .collect();
         sea_mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, cols);
@@ -384,8 +389,8 @@ fn setup_scene(
     commands.spawn((
         Mesh3d(meshes.add(sea_mesh)),
         MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::WHITE, // vertex colors carry water blue / ice white (+ alpha)
-            alpha_mode: AlphaMode::Blend,
+            base_color: Color::WHITE, // vertex colors carry the depth-graded water + ice
+            alpha_mode: AlphaMode::Opaque, // single opaque layer -> cannot shimmer
             perceptual_roughness: 0.04, // glossy -> sharp sun specular glint
             reflectance: 0.6,
             ..default()
