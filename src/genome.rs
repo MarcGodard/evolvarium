@@ -150,6 +150,21 @@ pub struct Genome {
     // populated by ensure_net_shape at every spawn so live_step reads it without re-developing per tick.
     #[serde(skip)]
     pub morph: Option<crate::morph::Morphometrics>,
+
+    // Brain encoding (opt-in, --cppn founders). Direct = net/plast ARE the genome (default, all old saves).
+    // Cppn = net/plast PAINTED from `cppn` over the body-geometry substrate at spawn (develop_brain). Set at
+    // founding, inherited (a learned direct net can't be inverted into a CPPN, so no mid-lineage flip).
+    #[serde(default)]
+    pub encoding: BrainEncoding,
+    #[serde(default)]
+    pub cppn: Option<crate::cppn::Cppn>,
+}
+
+#[derive(Clone, Copy, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub enum BrainEncoding {
+    #[default]
+    Direct,
+    Cppn,
 }
 
 // serde defaults for traits absent in old saves
@@ -336,7 +351,16 @@ impl Genome {
             hear_freq: rng.f32(),     // span listening bands (low rumble..high squeak) -> acoustic niches
             body: crate::morph::BodyGraph::random(rng), // generative body-graph (mesh + derived stats)
             morph: None, // populated at spawn (ensure_net_shape)
+            encoding: BrainEncoding::Direct, // make_cppn() switches founders when --cppn
+            cppn: None,
         }
+    }
+
+    // Switch a fresh founder to CPPN encoding (--cppn). Keeps the random_net's hidden shape; develop_brain at
+    // spawn (ensure_net_shape) PAINTS net/plast from this cppn over the body substrate.
+    pub fn make_cppn(&mut self, rng: &mut Rng) {
+        self.encoding = BrainEncoding::Cppn;
+        self.cppn = Some(crate::cppn::Cppn::random(rng));
     }
 
     pub fn n_sensors(&self) -> usize {
@@ -384,6 +408,88 @@ impl Genome {
         pad_plast_ho(&mut self.plast, OUTPUTS);
         self.ensure_cosmetic(); // backfill body-plan genes on saves predating them -> loaded pop looks varied at once
         self.morph = Some(crate::morph::Morphometrics::of(&self.body)); // cache derived stats for live_step
+        // CPPN brains: REPAINT net/plast from the cppn over the (now-cached) body substrate. After the pad/migrate
+        // above so a loaded CPPN seed + any sensor/body change regenerates body-aware weights, not random pads.
+        if self.encoding == BrainEncoding::Cppn {
+            self.develop_brain();
+        }
+    }
+
+    // Neuron substrate coords (body-local, normalized ~[-1,1]) for the CPPN. Order MUST match the brain's I/O:
+    // inputs = per-sensor sigs (SIG_PER_SENSOR each, on a ring by sensor angle) then GLOBAL_INPUTS (interoceptive
+    // back row); outputs = the 8 fixed motors at body anchors (head/COM/dorsal) + MEM_CELLS near COM. Returns
+    // exactly (n_inputs, n_hidden, OUTPUTS) coords. Body geometry (head/bbox) shifts these as morphology mutates.
+    fn brain_substrate(&self, n_hidden: usize) -> (Vec<Vec3>, Vec<Vec3>, Vec<Vec3>) {
+        let m = self.morph.unwrap_or_else(|| crate::morph::Morphometrics::of(&self.body));
+        let com = (m.bbox_min + m.bbox_max) * 0.5;
+        let half = ((m.bbox_max - m.bbox_min) * 0.5).max(Vec3::splat(1e-3));
+        let norm = |p: Vec3| ((p - com) / half).clamp(Vec3::splat(-1.0), Vec3::splat(1.0));
+        let head = norm(m.head); // front anchor (mouth/eyes/voice)
+
+        // INPUTS
+        let mut ins = Vec::with_capacity(n_inputs(self.n_sensors()));
+        for s in &self.sensors {
+            // sensor direction on the body horizontal plane (forward = +Z, angle offsets in XZ). Two sigs ->
+            // distinct y so the CPPN can tell inv-dist from food-type.
+            let dir = Vec3::new(s.angle.sin() * 0.85, head.y, s.angle.cos() * 0.85);
+            ins.push(dir + Vec3::new(0.0, 0.06, 0.0)); // sig0 inv-dist
+            ins.push(dir + Vec3::new(0.0, -0.06, 0.0)); // sig1 food-type
+        }
+        // globals: interoceptive, no body location -> a fixed back-bottom row, spread on x so each is distinct.
+        for k in 0..GLOBAL_INPUTS {
+            let x = if GLOBAL_INPUTS > 1 { (k as f32 / (GLOBAL_INPUTS - 1) as f32) * 2.0 - 1.0 } else { 0.0 };
+            ins.push(Vec3::new(x, -0.85, -0.9));
+        }
+
+        // HIDDEN: a line through the body mid-plane.
+        let hids = (0..n_hidden)
+            .map(|j| {
+                let x = if n_hidden > 1 { (j as f32 / (n_hidden - 1) as f32) * 2.0 - 1.0 } else { 0.0 };
+                Vec3::new(x, 0.0, 0.0)
+            })
+            .collect();
+
+        // OUTPUTS (must match out[] order): thrust,turn,attack,defend,eat,sprint,climb,voice, mem*MEM_CELLS.
+        let mut outs = vec![
+            Vec3::new(0.0, 0.05, 0.5),  // thrust: forward drive
+            Vec3::new(0.35, 0.0, 0.0),  // turn: lateral steer
+            head,                        // attack: at the mouth
+            Vec3::new(0.0, 0.0, 0.0),   // defend: core
+            head + Vec3::new(0.0, -0.1, 0.0), // eat: mouth (just below attack)
+            Vec3::new(0.0, -0.05, 0.5), // sprint: forward drive (lower)
+            Vec3::new(0.0, 0.7, 0.0),   // climb: dorsal/up = vertical control
+            head + Vec3::new(0.1, 0.1, 0.0), // voice: head
+        ];
+        for i in 0..MEM_CELLS {
+            outs.push(Vec3::new(-0.3, -0.2, -0.3 + 0.12 * i as f32)); // memory: interior, distinct
+        }
+        (ins, hids, outs)
+    }
+
+    // PAINT net.ih/net.ho from the cppn over the substrate (CPPN brains only). Same SHAPE as a direct net
+    // (n_in x n_hidden, n_hidden x OUTPUTS) -> forward()/learn() identical. plast = flat default v1.
+    pub fn develop_brain(&mut self) {
+        let Some(cppn) = self.cppn.clone() else { return };
+        let n_in = n_inputs(self.n_sensors());
+        let n_hidden = self.net.ih.len().clamp(MIN_HIDDEN, MAX_HIDDEN); // preserve the evolved hidden count
+        let (ins, hids, outs) = self.brain_substrate(n_hidden);
+        let bias_c = Vec3::new(0.0, 0.0, -1.6); // fixed bias-source coord
+        let mut ih = vec![vec![0.0f32; n_in + 1]; n_hidden];
+        for (j, hc) in hids.iter().enumerate() {
+            for (i, ic) in ins.iter().enumerate() {
+                ih[j][i] = cppn.query(*ic, *hc);
+            }
+            ih[j][n_in] = cppn.query(bias_c, *hc); // hidden bias
+        }
+        let mut ho = vec![vec![0.0f32; n_hidden + 1]; OUTPUTS];
+        for (k, oc) in outs.iter().enumerate() {
+            for (j, hc) in hids.iter().enumerate() {
+                ho[k][j] = cppn.query(*hc, *oc);
+            }
+            ho[k][n_hidden] = cppn.query(bias_c, *oc); // output bias
+        }
+        self.net = Net { ih, ho };
+        self.plast = Net { ih: vec![vec![0.2; n_in + 1]; n_hidden], ho: vec![vec![0.2; n_hidden + 1]; OUTPUTS] };
     }
 
     // Old saves lack body-plan render genes (elongate/tail/fin) -> all-zero loads as identical capsules, so a
@@ -458,24 +564,37 @@ impl Genome {
         for i in 0..NUTRIENTS {
             c.uptake[i] = pick(rng, a.uptake[i], b.uptake[i]);
         }
+        // CPPN brains: recombine the weight-painters cell-aligned (c took a's encoding+cppn via clone). Mixed
+        // encoding -> keep a's (structure already from a). net repainted at spawn.
+        if a.encoding == BrainEncoding::Cppn {
+            if let (Some(ca), Some(cb)) = (&a.cppn, &b.cppn) {
+                c.cppn = Some(crate::cppn::Cppn::crossover(ca, cb, rng));
+            }
+        }
         c
     }
 
     pub fn mutate(&mut self, rng: &mut Rng, rate: f32, std: f32) {
-        // weights clamped -5..5
-        for row in self.net.ih.iter_mut().chain(self.net.ho.iter_mut()) {
-            for x in row.iter_mut() {
-                if rng.f32() < rate {
-                    *x = (*x + rng.normal() * std).clamp(-5.0, 5.0);
+        // Direct: drift net/plast weights (the heritable brain). CPPN: net/plast are PAINTED from `cppn` at
+        // spawn, so drift the cppn instead (below) and leave net/plast (repainted in ensure_net_shape).
+        if self.encoding == BrainEncoding::Direct {
+            // weights clamped -5..5
+            for row in self.net.ih.iter_mut().chain(self.net.ho.iter_mut()) {
+                for x in row.iter_mut() {
+                    if rng.f32() < rate {
+                        *x = (*x + rng.normal() * std).clamp(-5.0, 5.0);
+                    }
                 }
             }
-        }
-        for row in self.plast.ih.iter_mut().chain(self.plast.ho.iter_mut()) {
-            for p in row.iter_mut() {
-                if rng.f32() < rate {
-                    *p = (*p + rng.normal() * 0.15).clamp(0.0, 1.0);
+            for row in self.plast.ih.iter_mut().chain(self.plast.ho.iter_mut()) {
+                for p in row.iter_mut() {
+                    if rng.f32() < rate {
+                        *p = (*p + rng.normal() * 0.15).clamp(0.0, 1.0);
+                    }
                 }
             }
+        } else if let Some(c) = &mut self.cppn {
+            c.mutate(rng, rate, std.max(0.1)); // evolve the weight-painter; net repainted at spawn
         }
         // sensor placement: angle wraps pi, range clamps RANGE_MIN..MAX
         for s in &mut self.sensors {
@@ -830,6 +949,69 @@ mod tests {
         for i in 0..MEM_CELLS {
             assert!(out[MEM_OUT_START + i] < 0.1, "migrated memory cell emits ~0, got {}", out[MEM_OUT_START + i]);
         }
+    }
+
+    #[test]
+    fn cppn_brain_develops_correct_shape_and_runs() {
+        let mut rng = Rng::seed(5);
+        let mut g = Genome::random(&mut rng);
+        g.make_cppn(&mut rng);
+        g.ensure_net_shape(); // caches morph + paints net from the CPPN
+        let want = n_inputs(g.n_sensors());
+        assert_eq!(g.net.ho.len(), OUTPUTS, "painted ho has OUTPUTS rows");
+        for row in &g.net.ih {
+            assert_eq!(row.len(), want + 1, "painted ih rows are n_inputs + bias");
+        }
+        for row in &g.net.ho {
+            assert_eq!(row.len(), g.net.ih.len() + 1, "painted ho rows are n_hidden + bias");
+        }
+        // forward + learn must run on a painted net exactly like a direct one
+        let input = vec![0.2f32; want];
+        let (h, out) = forward(&g.net, &input);
+        assert!(out.iter().all(|o| o.is_finite()), "painted brain output finite");
+        learn(&mut g.net, &g.plast, &input, &h, &out, 1.0, 0.04);
+    }
+
+    #[test]
+    fn cppn_develop_is_deterministic() {
+        let mut rng = Rng::seed(8);
+        let mut g = Genome::random(&mut rng);
+        g.make_cppn(&mut rng);
+        g.ensure_net_shape();
+        let net_a = g.net.clone();
+        g.develop_brain(); // same cppn + same body -> identical net
+        assert_eq!(net_a.ih, g.net.ih, "repaint is deterministic (ih)");
+        assert_eq!(net_a.ho, g.net.ho, "repaint is deterministic (ho)");
+    }
+
+    #[test]
+    fn cppn_paints_new_sensor_column_not_random_pad() {
+        // The P3 coupling win: add a sensor and the CPPN PAINTS the new input weights (body-aware), it does
+        // not random-pad them. Verify the new sensor's columns come from the cppn (match a manual develop).
+        let mut rng = Rng::seed(17);
+        let mut g = Genome::random(&mut rng);
+        g.make_cppn(&mut rng);
+        g.ensure_net_shape();
+        let before = g.n_sensors();
+        g.add_sensor(&mut rng); // grows net.ih input cols (random pad) -> then repaint should overwrite
+        g.ensure_net_shape(); // repaints from cppn at the new width
+        assert_eq!(g.n_sensors(), before + 1, "sensor added");
+        // a fresh develop from the same state must reproduce the painted weights (i.e. they ARE cppn-painted)
+        let painted = g.net.ih.clone();
+        g.develop_brain();
+        assert_eq!(painted, g.net.ih, "new sensor columns are cppn-painted (deterministic), not random pad");
+    }
+
+    #[test]
+    fn direct_genome_unaffected_by_cppn_path() {
+        // A Direct genome through ensure_net_shape must be byte-identical to the legacy path (no repaint).
+        let mut rng = Rng::seed(4);
+        let mut g = Genome::random(&mut rng);
+        assert_eq!(g.encoding, BrainEncoding::Direct, "founders default Direct");
+        let net_before = g.net.clone();
+        g.ensure_net_shape(); // shape already matches -> ih/ho weights unchanged for Direct
+        assert_eq!(net_before.ih, g.net.ih, "Direct ih unchanged through ensure_net_shape");
+        assert_eq!(net_before.ho, g.net.ho, "Direct ho unchanged through ensure_net_shape");
     }
 
     #[test]

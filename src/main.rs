@@ -14,6 +14,7 @@ mod audio;
 mod camera;
 mod components;
 mod config;
+mod cppn;
 mod genome;
 mod gym;
 mod morph;
@@ -227,6 +228,8 @@ fn main() {
         until_sustain: flag(&args, "--until-sustain"),
         // --metrics=PATH: write niche balance result JSON at run end (the balance harness scores config tweaks from it)
         metrics: val(&args, "--metrics=").map(String::from),
+        // --cppn: seed founders with CPPN/HyperNEAT brain encoding (opt-in; default planet stays Direct).
+        cppn: flag(&args, "--cppn"),
     });
     app.init_resource::<niche::NicheBanks>();
     app.init_resource::<niche::NicheTracker>();
@@ -266,6 +269,7 @@ fn main() {
             plant_lib: None,
             until_sustain: false,
             metrics: None,
+            cppn: false,
         });
         app.insert_resource(scenario::ScenarioCfg { scenario: scn, out: out_path });
         app.init_resource::<scenario::ScenarioStats>();

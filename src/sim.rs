@@ -40,6 +40,7 @@ pub struct GenState {
     pub plant_lib: Option<String>, // tuned plant seed-bank path. Present -> seed planet biome-matched FROM it. None = --no-plant-lib (archetype seeding).
     pub until_sustain: bool,   // --until-sustain: headless run stops when all niches self-sustain (no rescue for NICHE_SUSTAIN_WINDOW), not at --gens. Saves best snapshot.
     pub metrics: Option<String>, // --metrics=PATH: on headless run end, write niche balance result JSON (harness reads it to score config tweaks)
+    pub cppn: bool,            // --cppn: founders use CPPN/HyperNEAT brain encoding (net painted from a body-substrate CPPN). Evolve+save a new CPPN population.
 }
 
 impl GenState {
@@ -1378,7 +1379,15 @@ pub fn spawn_world_headless(
     }
     let genomes: Vec<Genome> = match &snap {
         Some(s) if !s.creatures.is_empty() => s.creatures.clone(),
-        _ => (0..POP).map(|_| Genome::random(&mut rng)).collect(),
+        _ => (0..POP)
+            .map(|_| {
+                let mut g = Genome::random(&mut rng);
+                if gen.cppn {
+                    g.make_cppn(&mut rng); // --cppn: founders use the painted CPPN brain encoding
+                }
+                g
+            })
+            .collect(),
     };
     // loading a saved population into continuous mode skips warm-up (genomes already competent) -> drop
     // straight into a living world. Desync energy + age so they don't act in lockstep.
@@ -1648,7 +1657,15 @@ pub fn spawn_world_render(
     }
     let genomes: Vec<Genome> = match &snap {
         Some(s) if !s.creatures.is_empty() => s.creatures.clone(),
-        _ => (0..POP).map(|_| Genome::random(&mut rng)).collect(),
+        _ => (0..POP)
+            .map(|_| {
+                let mut g = Genome::random(&mut rng);
+                if gen.cppn {
+                    g.make_cppn(&mut rng); // --cppn: founders use the painted CPPN brain encoding
+                }
+                g
+            })
+            .collect(),
     };
     // loading a saved population into continuous mode skips warm-up (genomes already competent) -> drop straight
     // into a living world. Desync energy + age so they don't act in lockstep.

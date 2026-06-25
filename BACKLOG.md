@@ -446,11 +446,22 @@ items from M0-M6 stay in the specs (status notes inline there); only the still-O
       size, thermal). Verified --capture: 10 clades from the bird seed, sensible nesting. NO sim changes
       (determinism + shared worktree safe). FOLLOW-UP: trait-distribution-over-time charts (the other half of
       M7 data) still open; pairs with the god-panel UI item below (shared charting surface).
-- [ ] **Recurrent / memory brains** (M7+, ARCHITECTURE -> confirm first): add recurrent connections or a
-      memory unit so creatures carry state across ticks (path memory, hysteresis). Changes the NN eval +
-      invalidates saved brains -> gate + migrate + regenerate seeds. See "Not automated here".
-- [ ] **CPPN / HyperNEAT alternative encoding** (M7+, ARCHITECTURE -> confirm first): indirect genome->body/
-      brain encoding as an opt-in mode alongside the current direct encoding. Large; design with the human.
+- [x] **Recurrent / memory brains (2026-06-25)**: MEM_CELLS=3 memory registers. Net WRITES them as extra
+      outputs (out[8..8+MEM_CELLS]) + READS last tick's values back as extra globals via `Brain.memory`
+      (1-tick delay, same pattern as voice/prev_dist) -> path memory, hysteresis, keep pursuing hidden prey.
+      Bounded (sigmoid 0..1); MEM_CELLS=0 -> pure feedforward ("gate behind a setting", spec 04). Migrates
+      gracefully (read-back inputs pad 0, memory outputs biased -4 = off via OUTPUT_MIGRATE_BIAS const fn) ->
+      showcase loads unchanged, pop holds ~1000-1175. forward()/learn() unchanged (loop generically).
+- [x] **CPPN / HyperNEAT indirect encoding (2026-06-25)**: opt-in `BrainEncoding::Cppn` (--cppn founders;
+      default planet stays 100% Direct, untouched). A small fixed-topology CPPN (`src/cppn.rs`: 7 coord inputs
+      -> 2x10 mixed-activation hidden -> 1 weight) PAINTS net.ih/net.ho at spawn (`develop_brain`) from a
+      FULL body-geometry substrate: input neurons on a sensor-angle ring, output motors at body anchors
+      (head/COM/dorsal from `Morphometrics`), so a mutated body/sensor inherits CPPN-painted (not random-pad)
+      control = the morphology-coupling fix (P3). forward()/learn() run UNCHANGED on the painted net; lifetime
+      Hebbian fine-tunes, GA evolves the cppn (mutate/crossover cell-aligned). Encoding set at founding +
+      inherited (no mid-lineage flip; can't invert a learned net into a cppn). Verified: --cppn pop evolves
+      5 gens (fitness 0.5->3.8), saves/loads/renders. Deferred: per-weight CPPN plasticity (flat 0.2 v1);
+      per-limb motor transfer (gym-only, planet brain is kinematic). NEXT: evolve + save a tuned CPPN seed.
 - [ ] **GPU for brains/fields** (M7+ perf, opt-in): offload brain forward()/learn() or field sampling to the
       GPU. Only worth it at much higher pop than today (live_step is already parallel + fast at 1100); revisit
       with a profile that shows CPU brains dominating at ~10k+. See PARALLELIZATION.md perf notes.

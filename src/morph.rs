@@ -214,6 +214,7 @@ pub struct Morphometrics {
     pub ground_contacts: u32, // leg tips near the lowest point (stance)
     pub bbox_min: Vec3,
     pub bbox_max: Vec3,
+    pub head: Vec3, // head/front center (eye_anchor), body-local. CPPN brain-substrate front anchor (genome.rs)
 }
 
 impl Morphometrics {
@@ -283,6 +284,7 @@ impl Morphometrics {
             ground_contacts,
             bbox_min: min,
             bbox_max: max,
+            head: eye_anchor(p).center, // front/head anchor for the CPPN brain substrate
         }
     }
 }
