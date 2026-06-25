@@ -543,7 +543,9 @@ fn size_sirius(mode: Res<CameraMode>, cam: Query<&crate::camera::OrreryCam>, mut
 //  - close: clamped to the body's TRUE size, so flying in makes it GROW on screen (real geometry) -> you can
 //    actually zoom into Evolvarium until it fills the view, instead of it staying a fixed speck.
 fn body_render_radius(size: f32, cam_dist: f32) -> f32 {
-    let angular_floor = cam_dist * 0.0026 * size.clamp(0.25, 8.0).sqrt();
+    // lower clamp = 0.1 (Eros's true size): don't inflate asteroids up to planet-dot scale. Was 0.25 ->
+    // Eros (0.1) pinned up, read as a half-planet parked next to Earth. sqrt still keeps it a visible dot.
+    let angular_floor = cam_dist * 0.0026 * size.clamp(0.1, 8.0).sqrt();
     angular_floor.max(size)
 }
 
