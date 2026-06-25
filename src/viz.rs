@@ -2663,8 +2663,9 @@ fn update_sky(
         let vtick = (gen.tick as i64 + offset.0).max(0) as u32; // full tick: keep seasons
         let d = crate::sphere::daylight_at(dir, vtick);
         if underwater.0 {
-            // submerged: murky blue-green horizon, darker than open sky + dims with daylight
-            Vec3::new(0.02, 0.12, 0.20) * (0.35 + 0.65 * d)
+            // submerged: blue-green water backdrop, dims with daylight. Lifted from (0.02,0.12,0.20) so the
+            // water column reads as clearer water, not a gloomy murk.
+            Vec3::new(0.05, 0.22, 0.32) * (0.45 + 0.55 * d)
         } else {
             // Richer multi-stop day palette keyed by local daylight d (0 night .. 1 noon): deep indigo night ->
             // violet pre-dawn -> warm orange dawn/dusk -> soft periwinkle low sun -> deep saturated zenith blue.
@@ -2717,7 +2718,9 @@ fn spawn_underwater_tint(mut commands: Commands) {
             height: Val::Percent(100.0),
             ..default()
         },
-        BackgroundColor(Color::srgba(0.06, 0.30, 0.52, 0.34)),
+        // Light wash, NOT a veil: alpha 0.18 (was 0.34, which buried fish/seabed in blue). Enough to say
+        // "submerged" while keeping the scene readable.
+        BackgroundColor(Color::srgba(0.10, 0.34, 0.55, 0.18)),
         GlobalZIndex(-1),
         Visibility::Hidden,
         UnderwaterTint,
