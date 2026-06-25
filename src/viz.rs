@@ -109,11 +109,12 @@ impl Plugin for VizPlugin {
             .init_resource::<Strikes>()
             .init_resource::<Phylogeny>()
             .init_resource::<ShowPhylo>()
+            .init_resource::<ShowLabels>()
             .insert_resource(ShowShadows(true)) // shadows on by default (O toggles)
             .init_resource::<Identified>()
             .init_resource::<TreePositions>()
             .init_resource::<BodyMeshCache>()
-            .add_systems(Startup, (log_viz_help, spawn_stats_ui, spawn_world_stats_ui, spawn_legend_ui, spawn_daycycle_ui, spawn_underwater_tint, spawn_clouds, set_initial_speed, spawn_minimap, spawn_phylo_ui, load_star_catalog, spawn_identity_ui))
+            .add_systems(Startup, (log_viz_help, spawn_stats_ui, spawn_world_stats_ui, spawn_legend_ui, spawn_daycycle_ui, spawn_underwater_tint, spawn_clouds, set_initial_speed, spawn_minimap, spawn_phylo_ui, load_star_catalog, spawn_identity_ui, spawn_nameplates))
             .add_systems(
                 Update,
                 (
@@ -138,7 +139,8 @@ impl Plugin for VizPlugin {
                     (minimap_sync_cam, minimap_visibility, minimap_marker, toggle_hud, hud_visibility, planet_sky_visibility, atmosphere_visibility, update_atmosphere, minimap_input, minimap_rebuild, minimap_dynamic),
                     (phylogeny_classify, toggle_phylo, update_phylo_panel),
                 ),
-            );
+            )
+            .add_systems(Update, (toggle_labels, update_creature_labels));
     }
 }
 
@@ -3169,6 +3171,7 @@ CONTROLS
   B  seed creatures    P  populate whole planet
   L  lightning fire    K  cull    J  this legend
   M  cycle minimap field    Y  phylogeny (species tree)
+  N  creature names (Latin, nearest in view)
   ORRERY (TAB to it): T traces, G grid, Z zodiac,
          B labels, L constellations; scroll to zoom
   O  save full world -> savestate.json (reload: --load=savestate.json)
@@ -3356,6 +3359,104 @@ fn toggle_phylo(keys: Res<ButtonInput<KeyCode>>, mut show: ResMut<ShowPhylo>, mu
         }
         for mut v in &mut q {
             *v = if show.0 { Visibility::Inherited } else { Visibility::Hidden };
+        }
+    }
+}
+
+// --- Creature name labels (N toggle): floating Latin-binomial nameplates over the NEAREST creatures, so the
+// player can identify + find a kind ("that hovering thing is a Volans = a flier"). A bounded POOL of text
+// nodes is reassigned each frame to the closest creatures (no per-creature spawn churn). Render-only.
+const NAMEPLATES: usize = 24; // max labels shown at once (nearest creatures to the camera)
+const LABEL_RADIUS: f32 = 55.0; // only label creatures within this of the camera (keeps it readable + cheap)
+
+#[derive(Resource, Default)]
+pub struct ShowLabels(pub bool);
+
+#[derive(Component)]
+struct CreatureLabel;
+
+fn spawn_nameplates(mut commands: Commands) {
+    for _ in 0..NAMEPLATES {
+        commands.spawn((
+            CreatureLabel,
+            Text::new(""),
+            TextFont { font_size: 14.0, ..default() },
+            TextColor(Color::srgb(1.0, 1.0, 0.9)), // near-white on a dark pill -> reads over grass + sky
+            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.55)), // contrast pill so the name is legible anywhere
+            Node {
+                position_type: PositionType::Absolute,
+                padding: UiRect::axes(Val::Px(3.0), Val::Px(1.0)),
+                ..default()
+            },
+            Visibility::Hidden,
+        ));
+    }
+}
+
+// N toggles creature name labels.
+fn toggle_labels(keys: Res<ButtonInput<KeyCode>>, mut show: ResMut<ShowLabels>) {
+    if keys.just_pressed(KeyCode::KeyN) {
+        show.0 = !show.0;
+    }
+}
+
+// Assign the pool to the nearest living creatures, projecting each to screen for its nameplate. Off in orrery.
+fn update_creature_labels(
+    show: Res<ShowLabels>,
+    mode: Res<crate::camera::CameraMode>,
+    cam: Query<(&Camera, &GlobalTransform), With<crate::camera::OrbitCam>>,
+    creatures: Query<(&Transform, &Genome, &Alive), With<Creature>>,
+    mut labels: Query<(&mut Node, &mut Text, &mut Visibility), With<CreatureLabel>>,
+) {
+    let active = show.0 && *mode != crate::camera::CameraMode::Orrery;
+    let cam_ok = cam.single().ok();
+    if !active || cam_ok.is_none() {
+        for (_, _, mut vis) in &mut labels {
+            if *vis != Visibility::Hidden {
+                *vis = Visibility::Hidden;
+            }
+        }
+        return;
+    }
+    let (camera, cam_tf) = cam_ok.unwrap();
+    let eye = cam_tf.translation();
+    let vp = camera.logical_viewport_size().unwrap_or(Vec2::new(1920.0, 1080.0));
+    // nearest living creatures within radius THAT project ON-SCREEN (skip ones at the camera's feet / behind /
+    // off-frame so the pool isn't wasted on invisible creatures). Store the screen pos to place the label.
+    let mut near: Vec<(f32, Vec2, &Genome)> = Vec::new();
+    for (tf, g, alive) in &creatures {
+        if !alive.0 {
+            continue;
+        }
+        let world = tf.translation;
+        let d2 = world.distance_squared(eye);
+        if d2 >= LABEL_RADIUS * LABEL_RADIUS {
+            continue;
+        }
+        let up = world.normalize_or_zero(); // surface normal (planet at origin) -> lift label above the body
+        if let Ok(s) = camera.world_to_viewport(cam_tf, world + up * 1.4) {
+            if s.x >= 0.0 && s.x <= vp.x && s.y >= 0.0 && s.y <= vp.y {
+                near.push((d2, s, g));
+            }
+        }
+    }
+    near.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    near.truncate(NAMEPLATES);
+    let mut it = near.iter();
+    for (mut node, mut text, mut vis) in &mut labels {
+        let mut visible = false;
+        if let Some((_, screen, g)) = it.next() {
+            node.left = Val::Px(screen.x + 4.0);
+            node.top = Val::Px(screen.y);
+            let name = crate::latin::latin_name(g);
+            if text.0 != name {
+                text.0 = name;
+            }
+            visible = true;
+        }
+        let want = if visible { Visibility::Visible } else { Visibility::Hidden };
+        if *vis != want {
+            *vis = want;
         }
     }
 }
@@ -3664,7 +3765,8 @@ fn update_stats(
             else { "amphibious" };
         let clime = if g.temp_pref > 0.6 { "warm" } else if g.temp_pref < 0.4 { "cold" } else { "temperate" };
         text.0 = format!(
-            "CREATURE  {}\nenergy   {:.1}  f{:.0}/s{:.0}/fat{:.0}\nadiposity {:.2}\nfitness  {:.1}\nsensors  {}\nbite     {:.2}\nheight   {:.2}\nsize     {:.2}\nswim     {:.2} ({})\nflight   {:.2}\nsocial   {:.2}\ntemp     {:.2} ({})\nlongevity {:.2}\nmetab    {:.2}\nparental {:.2}\nrigidity {:.2}\nlight    {:.2} ({})\nfatigue  {:.2}\ngut>top n{} (master {:.2})\nbreadth  {}\nload(G)  {:.2}\nage      {}",
+            "{}  ({})\nenergy   {:.1}  f{:.0}/s{:.0}/fat{:.0}\nadiposity {:.2}\nfitness  {:.1}\nsensors  {}\nbite     {:.2}\nheight   {:.2}\nsize     {:.2}\nswim     {:.2} ({})\nflight   {:.2}\nsocial   {:.2}\ntemp     {:.2} ({})\nlongevity {:.2}\nmetab    {:.2}\nparental {:.2}\nrigidity {:.2}\nlight    {:.2} ({})\nfatigue  {:.2}\ngut>top n{} (master {:.2})\nbreadth  {}\nload(G)  {:.2}\nage      {}",
+            crate::latin::latin_name(g),
             if alive.0 { "alive" } else { "DEAD" },
             energy.total(),
             energy.fast,

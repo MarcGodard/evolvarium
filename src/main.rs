@@ -17,6 +17,7 @@ mod config;
 mod cppn;
 mod genome;
 mod gym;
+mod latin;
 mod morph;
 mod niche;
 mod orrery;
