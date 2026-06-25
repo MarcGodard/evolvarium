@@ -643,7 +643,8 @@ pub fn scenario_step(
         creature_trait_drift.insert(k.clone(), [*sm, vm]);
     }
     cbest.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-    let best_creatures: Vec<Genome> = cbest.into_iter().take(12).map(|(_, g)| g).collect();
+    // harvest up to 50 top survivors (was 12): diversity runs want 30+ varieties per niche merged into the seed.
+    let best_creatures: Vec<Genome> = cbest.into_iter().take(50).map(|(_, g)| g).collect();
     let creature_survival = if stats.cstarted > 0 { creature_survived as f32 / stats.cstarted as f32 } else { 0.0 };
 
     let result = ScenarioResult {
