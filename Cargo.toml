@@ -7,7 +7,8 @@ description = "Artificial-life sim: GA grows blob bodies + brain shape, brains l
 [dependencies]
 # Pin Bevy. Ecosystem crates gate the version (see 11-crate-stack.md) so do NOT float.
 # M0 needs only the engine. bevy_rand / bevy_egui / spatial hash arrive in later milestones.
-bevy = "0.18"
+# "wav" feature: procedural audio (src/audio.rs) synthesizes in-memory WAV; default bevy audio enables only ogg.
+bevy = { version = "0.18", features = ["wav"] }
 
 # Save/load survivor population (serde + JSON). Lets a good run stop + resume (BACKLOG P2).
 serde = { version = "1", features = ["derive"] }

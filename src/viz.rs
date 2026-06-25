@@ -39,6 +39,11 @@ pub struct ShowShadows(pub bool);
 #[derive(Resource, Default)]
 pub struct Underwater(pub bool);
 
+// Lightning strike ground positions THIS frame (filled by lightning_visuals at strike onset). Drained by the
+// audio layer for thunder. Empty when no bolt fires.
+#[derive(Resource, Default)]
+pub struct Strikes(pub Vec<Vec3>);
+
 // Ocean shell entity. animate_ocean breathes slow swell on it.
 #[derive(Component)]
 pub struct Ocean;
@@ -101,6 +106,7 @@ impl Plugin for VizPlugin {
             .init_resource::<ShowLegend>()
             .init_resource::<SunOffset>()
             .init_resource::<Underwater>()
+            .init_resource::<Strikes>()
             .init_resource::<Phylogeny>()
             .init_resource::<ShowPhylo>()
             .insert_resource(ShowShadows(true)) // shadows on by default (O toggles)
@@ -1866,8 +1872,9 @@ fn rain_visuals(gen: Res<GenState>, mut gizmos: Gizmos) {
 // tied to the rain field (same cells where sim lightning can ignite fire), independent of the sim's own
 // ignition roll. Per strike: jagged cloud->ground channel + a fork + a ground starburst flash, bright at the
 // onset tick, fading across FLASH_TICKS, then dark for the rest of the cell's PERIOD.
-fn lightning_visuals(gen: Res<GenState>, mut gizmos: Gizmos) {
+fn lightning_visuals(gen: Res<GenState>, mut gizmos: Gizmos, mut strikes: ResMut<Strikes>) {
     use std::f32::consts::{FRAC_PI_2, PI, TAU};
+    strikes.0.clear(); // rebuilt each frame; thunder audio reads onset positions
     const STORM_RAIN: f32 = 0.55; // only heavy downpours thunder (> LIGHTNING_RAIN 0.4)
     const WARM_TEMP: f32 = 0.65; // warm storms only (mirror rain_visuals snow line; cold storms rarely thunder)
     const PERIOD: u32 = 80; // ticks per cell strike window
@@ -1898,6 +1905,9 @@ fn lightning_visuals(gen: Res<GenState>, mut gizmos: Gizmos) {
             let seed = cell ^ window.wrapping_mul(0x85EB);
             let (east, north) = crate::sphere::tangent_frame(d);
             let foot = crate::sphere::surface_pos(d, 0.0);
+            if age == 0 {
+                strikes.0.push(foot); // strike onset -> thunder trigger (audio layer)
+            }
             let top = d * top_r;
             let fade = 1.0 - age as f32 / FLASH_TICKS as f32; // 1 at onset -> 0 at end
             let a = (0.55 + 0.45 * fade).min(1.0);

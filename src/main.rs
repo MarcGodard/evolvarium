@@ -10,6 +10,7 @@
 //   cargo run -- --load=run.json             -> resume from a saved population
 // Bevy ECS systems take many args + complex query tuples. Silence clippy noise.
 #![allow(clippy::too_many_arguments, clippy::type_complexity)]
+mod audio;
 mod camera;
 mod components;
 mod config;
@@ -297,6 +298,7 @@ fn main() {
             .insert_resource(Time::<Fixed>::from_hz((1.0 / sim::DT) as f64))
             .add_plugins(camera::OrbitCameraPlugin)
             .add_plugins(viz::VizPlugin)
+            .add_plugins(audio::GameAudioPlugin) // procedural world audio (render-only, never headless)
             .add_plugins(orrery_view::OrreryViewPlugin)
             .add_systems(Startup, (setup_scene, sim::spawn_world_render))
             .add_systems(
