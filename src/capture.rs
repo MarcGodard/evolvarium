@@ -165,7 +165,15 @@ fn force_cam(
     let eye = crate::sphere::surface_pos(home, 10.0 * f) + side * 22.0 * f;
     let target = crate::sphere::surface_pos(home, 2.0 * f);
     if let Ok(mut t) = q.single_mut() {
-        *t = Transform::from_translation(eye).looking_at(target, home);
+        // --cap-pitch was silently ignored here: this branch built a fixed eye/target and ran every frame in
+        // PostUpdate, overwriting the pitch setup_capture_view had set on WalkCam. So the zenith sky and any
+        // look-up framing were uninspectable. Applied as a DELTA from the default so the existing default
+        // framing is byte-identical and only an explicit --cap-pitch moves the camera.
+        const DEFAULT_PITCH: f32 = -0.35; // must match the --cap-pitch default in main.rs
+        let fwd = (target - eye).normalize_or_zero();
+        let right = fwd.cross(home).normalize_or_zero();
+        let tilted = Quat::from_axis_angle(right, cfg.pitch - DEFAULT_PITCH) * fwd;
+        *t = Transform::from_translation(eye).looking_to(tilted, home);
     }
 }
 
@@ -226,9 +234,12 @@ fn setup_capture_view(
             cfg.off
         } else {
             match cfg.when {
+                // Offsets are from local NOON, so evening must be POSITIVE. Dusk was -day*5/32, i.e. 1.4h
+                // BEFORE noon, which rendered as late morning and made every "dusk" capture in this repo a
+                // morning one. day/8 = 3h, so morning is 09:00 and dusk 16:30. day*7/32 overshot past sunset into full night.
                 CapWhen::Morning => -day / 8,
                 CapWhen::Noon => 0,
-                CapWhen::Dusk => -day * 5 / 32,
+                CapWhen::Dusk => day * 3 / 16,
                 CapWhen::Night => day / 2,
             }
         };
