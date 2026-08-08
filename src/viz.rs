@@ -12,7 +12,24 @@ use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
-// Double-sided, no-cull material: thin/open meshes (wings, fronds, hollow cones, blossoms) show both faces.
+// No-cull but NOT double-sided: both faces draw, and the normal is NOT flipped on back faces. Use for
+// closed or volume-ish shapes (cones, canopies) whose outward normal is the only correct one. Picking
+// double_sided_mat for these is what made conifers render near-black: the flipped normal points into the
+// shape, catches no sun, and the whole tree goes ambient-only. Same trap the grass hit.
+// Genuinely thin two-sided surfaces (fronds, blossoms, wings) still want double_sided_mat, where flipping IS
+// right because a leaf seen from behind should be lit from behind.
+fn no_cull_mat(mats: &mut Assets<StandardMaterial>, color: Color, rough: Option<f32>) -> Handle<StandardMaterial> {
+    mats.add(StandardMaterial {
+        base_color: color,
+        perceptual_roughness: rough.unwrap_or(0.5),
+        double_sided: false,
+        cull_mode: None,
+        ..default()
+    })
+}
+
+// Double-sided, no-cull material: thin/open meshes (wings, fronds, blossoms) show both faces AND flip the
+// normal on the back, which is correct for a single-layer sheet.
 // `rough` = perceptual_roughness (None -> StandardMaterial default 0.5).
 fn double_sided_mat(mats: &mut Assets<StandardMaterial>, color: Color, rough: Option<f32>) -> Handle<StandardMaterial> {
     mats.add(StandardMaterial {
@@ -838,7 +855,7 @@ fn add_plant_visuals(
                 // see-through to trunk/sky); spine cone fills core. Evergreen needle-green: brighter
                 // blue-green reads as foliage not black blob; roughness 0.6 near foliage default (0.5) so
                 // sun catches soft sheen like broadleaf. Old 0.9 matte + dark base: noon sun never lit it.
-                let m = double_sided_mat(&mut materials, Color::srgb(0.16, 0.52, 0.30), Some(0.6));
+                let m = no_cull_mat(&mut materials, Color::srgb(0.16, 0.52, 0.30), Some(0.6));
                 (tm.conifer.clone(), m, -0.6)
             };
             let child = commands

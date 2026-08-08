@@ -1654,13 +1654,10 @@ pub fn spawn_world_render(
     commands.insert_resource(crate::viz::TreeMeshes {
         trunk: meshes.add(Cylinder::new(0.14, 1.4)), // short stub; canopy skirt drapes over most of it
         // fuller broadleaf crown: cluster of overlapping blobs (centered ~origin; placed in crown)
-        broadleaf: meshes.add(crate::viz::blob_cluster_mesh(&[
-            (Vec3::new(0.0, 0.0, 0.0), 1.0, 0.75),
-            (Vec3::new(0.7, 0.3, 0.3), 0.8, 0.95),
-            (Vec3::new(-0.6, 0.2, -0.4), 0.8, 0.9),
-            (Vec3::new(0.2, 0.6, -0.5), 0.7, 1.0),
-            (Vec3::new(-0.3, -0.15, 0.55), 0.7, 0.85),
-        ])),
+        // irregular multi-lobe crown with per-vertex shading (darker inside/underside) so it reads as
+        // foliage depth rather than a smooth ball. Same origin-centered radius-1 convention as the old
+        // blob cluster, so the spawn path needs no change.
+        broadleaf: meshes.add(crate::viz_flora::tree_canopy_mesh(6, 1.0, 2)),
         conifer: meshes.add(crate::viz::conifer_mesh()), // stacked-cone Christmas-tree silhouette
         vine: meshes.add(crate::viz::vine_mesh(0.16)),    // helix vine hugging the trunk (radius ~ trunk)
     });
