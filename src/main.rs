@@ -561,6 +561,23 @@ fn setup_scene(
         bevy::light::NotShadowCaster,
         viz::SkyStars,
     ));
+    // Sky dome. Radius puts it BEHIND the star shell (sky_r), because stars blend additively and must draw
+    // in front of it; still inside the 12k far clip. Centered on the walker each frame, not on the planet, so
+    // the gradient sits on the viewer's own horizon. Walk-only: orbit keeps the near-black ClearColor.
+    commands.spawn((
+        Mesh3d(meshes.add(viz_sky::sky_dome_mesh(24, 48, sphere::PLANET_R * 140.0))),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::WHITE, // vertex colours carry the whole sky
+            unlit: true,
+            cull_mode: None,
+            ..default()
+        })),
+        Transform::IDENTITY,
+        Visibility::Hidden,
+        bevy::light::NotShadowCaster,
+        bevy::light::NotShadowReceiver,
+        viz::SkyDome,
+    ));
     // Milky Way: faint additive band along the real galactic plane, on a slightly farther shell. Tagged
     // SkyStars too -> wheels with the day + fades at midday like the stars.
     commands.spawn((

@@ -123,7 +123,7 @@ impl Plugin for VizPlugin {
                     toggle_sensors,
                     draw_sensors,
                     (add_plant_visuals, size_plants, add_grass_visuals, add_seaweed_visuals, size_creatures, flap_wings),
-                    (day_night_lighting, update_sun_glow, time_of_day, walk_day_drift, toggle_shadows, walk_ambient, update_daycycle, track_underwater, update_sky, toggle_underwater_tint, animate_ocean, update_globe_climate, update_aurora_curtains, rotate_sky_stars, position_sky_planets, fade_sky_stars, ocean_opacity),
+                    (day_night_lighting, update_sun_glow, time_of_day, walk_day_drift, toggle_shadows, walk_ambient, update_daycycle, track_underwater, update_sky, toggle_underwater_tint, animate_ocean, update_globe_climate, update_sky_dome, update_aurora_curtains, rotate_sky_stars, position_sky_planets, fade_sky_stars, ocean_opacity),
                     (rain_visuals, lightning_visuals),
                     (fire_visuals, fire_sheet_visuals, smoke_visuals),
                     meteor_visuals,
@@ -1770,9 +1770,13 @@ fn walk_ambient(
     let Ok(w) = walkers.single() else { return };
     let vtick = (gen.tick as i64 + offset.0).max(0) as u32; // full tick: keep seasons (see day_night_lighting)
     let day = crate::sphere::daylight_at(w.dir.normalize_or_zero(), vtick); // 0 night .. 1 noon overhead
-    // low fill so strong directional sun (100k lux) keeps shadows + 3D shading; lit surfaces stay bright.
-    // High fill washed shadows flat.
-    let b = 45.0 + 230.0 * day; // moonlit ~45 night, soft day fill ~275 (shadows survive)
+    // Sky fill as a FRACTION of the sun, not a hand-set number. 275 lux against a 64k lux sun was 0.43%
+    // fill, ~25x under the real clear-sky figure of 10-20%, which is why shadows crushed to near-black. The
+    // sky dome is literally this light source, so keeping the two coupled means a dimmer sun dims its own
+    // fill instead of drifting apart. Still well under the sun, so shadows stay readable as shadows.
+    const SKY_FILL_FRAC: f32 = 0.13;
+    const NIGHT_FILL: f32 = 45.0; // moonlit floor: never fully black, or a night walk is unplayable
+    let b = NIGHT_FILL + SKY_FILL_FRAC * SUN_ILLUM * day;
     for mut a in &mut ambient {
         a.brightness = b;
     }
@@ -3898,5 +3902,47 @@ mod tests {
                 }
             }
         }
+    }
+}
+
+/// Sky dome: gradient + horizon haze around the walker. Orbit uses ClearColor instead.
+#[derive(Component)]
+pub struct SkyDome;
+
+// Keep the dome on the walker and repainted for the current sun. Two things it must get right:
+// the dome's local +Y has to be the walker's SURFACE NORMAL (not world up), or the horizon sits at the wrong
+// place on a sphere; and the sun has to be expressed in that same local frame so the glow lands where the
+// sun actually is. Repaint is throttled: the gradient changes on the sun's timescale, not the frame's.
+const SKY_DOME_REPAINT_TICKS: u32 = 30;
+fn update_sky_dome(
+    gen: Res<GenState>,
+    offset: Res<SunOffset>,
+    mode: Res<crate::camera::CameraMode>,
+    underwater: Res<Underwater>,
+    walkers: Query<&crate::camera::WalkCam>,
+    mut dome: Query<(&mut Transform, &mut Visibility, &Mesh3d), With<SkyDome>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut next: Local<u32>,
+) {
+    let Ok((mut tf, mut vis, mesh3d)) = dome.single_mut() else { return };
+    let walk = *mode == crate::camera::CameraMode::Walk;
+    // hidden underwater too: the water tint owns that look, a sky gradient through it reads wrong
+    if !walk || underwater.0 {
+        *vis = Visibility::Hidden;
+        return;
+    }
+    *vis = Visibility::Visible;
+    let Ok(w) = walkers.single() else { return };
+    let up = w.dir.normalize_or_zero();
+    tf.translation = crate::sphere::surface_pos(up, w.eye_alt);
+    tf.rotation = Quat::from_rotation_arc(Vec3::Y, up);
+    if gen.tick < *next {
+        return;
+    }
+    *next = gen.tick + SKY_DOME_REPAINT_TICKS;
+    let vtick = (gen.tick as i64 + offset.0).max(0) as u32;
+    let sun = crate::sphere::sun_dir(vtick).normalize_or_zero();
+    if let Some(mesh) = meshes.get_mut(&mesh3d.0) {
+        crate::viz_sky::paint_sky_dome(mesh, tf.rotation.inverse() * sun);
     }
 }

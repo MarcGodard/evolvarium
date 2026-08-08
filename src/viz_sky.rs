@@ -235,3 +235,87 @@ mod tests {
         assert!(graze[0] > graze[2], "grazing puff should be warm: {graze:?}");
     }
 }
+
+// ---------- sky dome ----------
+
+use bevy::mesh::{Indices, PrimitiveTopology};
+use bevy::prelude::Mesh;
+
+/// Inward-facing UV sphere for the sky. Colours are per-VERTEX rather than a baked ramp because a 1D
+/// gradient cannot carry sun-direction warmth: the glow has to sit where the sun actually is, which needs an
+/// angle per vertex. `update_sky_dome` rewrites ATTRIBUTE_COLOR as the sun moves.
+/// Local +Y is zenith; the dome is oriented to the walker's surface normal, not world up.
+pub fn sky_dome_mesh(rings: usize, sectors: usize, radius: f32) -> Mesh {
+    let (rings, sectors) = (rings.max(3), sectors.max(3));
+    let mut positions = Vec::with_capacity((rings + 1) * (sectors + 1));
+    let mut normals = Vec::with_capacity((rings + 1) * (sectors + 1));
+    let mut colors = Vec::with_capacity((rings + 1) * (sectors + 1));
+    for j in 0..=rings {
+        // full sphere, not a hemisphere: below-horizon verts get the ground-haze end of the ramp so the
+        // terrain never meets an unpainted edge at the silhouette
+        let phi = std::f32::consts::PI * j as f32 / rings as f32; // 0 = zenith
+        for i in 0..=sectors {
+            let th = std::f32::consts::TAU * i as f32 / sectors as f32;
+            let d = bevy::math::Vec3::new(phi.sin() * th.cos(), phi.cos(), phi.sin() * th.sin());
+            positions.push([d.x * radius, d.y * radius, d.z * radius]);
+            normals.push([-d.x, -d.y, -d.z]); // inward: the viewer is inside
+            colors.push([0.5, 0.6, 0.9, 1.0]);
+        }
+    }
+    let stride = (sectors + 1) as u32;
+    let mut indices = Vec::with_capacity(rings * sectors * 6);
+    for j in 0..rings as u32 {
+        for i in 0..sectors as u32 {
+            let (a, b) = (j * stride + i, j * stride + i + 1);
+            let (c, d) = (a + stride, b + stride);
+            indices.extend_from_slice(&[a, b, c, b, d, c]); // wound for inside viewing
+        }
+    }
+    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
+    mesh.insert_indices(Indices::U32(indices));
+    mesh
+}
+
+/// Repaint dome vertices for a sun at `sun_local` (unit, in the dome's local frame where +Y is zenith).
+/// Cheap enough to run on a throttle: a 24x48 dome is ~1200 verts.
+pub fn paint_sky_dome(mesh: &mut Mesh, sun_local: bevy::math::Vec3) {
+    let Some(bevy::mesh::VertexAttributeValues::Float32x3(pos)) = mesh.attribute(Mesh::ATTRIBUTE_POSITION) else {
+        return;
+    };
+    let sun_elev = sun_local.y.clamp(-1.0, 1.0).asin();
+    let colors: Vec<[f32; 4]> = pos
+        .iter()
+        .map(|p| {
+            let d = bevy::math::Vec3::new(p[0], p[1], p[2]).normalize_or_zero();
+            let elev = d.y.clamp(-1.0, 1.0).asin();
+            let delta = d.dot(sun_local).clamp(-1.0, 1.0).acos();
+            let c = sky_color_at(elev, sun_elev, delta);
+            [c[0], c[1], c[2], 1.0]
+        })
+        .collect();
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
+}
+
+#[cfg(test)]
+mod dome_tests {
+    use super::*;
+
+    #[test]
+    fn zenith_is_bluer_than_horizon_at_midday() {
+        // The dome only ever shows its near-horizon band in a normal walk view, which reads pale and grey.
+        // That is correct sky, not a washed-out bug, and this pins the distinction: zenith [0.16,0.38,0.86],
+        // horizon [0.67,0.78,0.90]. Checked numerically because --cap-pitch does not actually change the
+        // capture vantage, so the zenith cannot be inspected by screenshot.
+        let sun_elev = 1.2_f32; // high sun
+        let z = sky_color_at(std::f32::consts::FRAC_PI_2, sun_elev, 1.0);
+        let h = sky_color_at(0.05, sun_elev, 1.5);
+        // blue dominance = b - r. Real sky: strong at zenith, weak (pale) at horizon.
+        let zb = z[2] - z[0];
+        let hb = h[2] - h[0];
+        assert!(zb > hb, "zenith must be bluer than horizon: {zb} vs {hb}");
+        assert!(zb > 0.15, "zenith too desaturated to read as sky: blue-red = {zb}");
+    }
+}
