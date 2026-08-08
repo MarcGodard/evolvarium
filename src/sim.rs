@@ -140,9 +140,27 @@ pub struct FieldGrids<'w> {
 // Incomplete on purpose right now: plant growth still runs the old unconserved path and creature bodies are
 // not element-backed until Phase 2, so the reported drift is expected to be nonzero and is exactly the
 // measurement this function exists to surface.
-pub fn living_matter(pq: &Query<(&PlantGenome, &PlantState), (Without<Rot>, Without<Grass>)>) -> crate::chem::Elements {
-    let mass: f64 = pq.iter().map(|(_, st)| st.mass as f64).sum();
-    crate::chem::PLANT_COMP * mass
+// Element content of flora biomass, the matter held outside the Biosphere reservoirs. Takes the mass sum
+// rather than a query so both the logger and the sealer can call it with their own query shapes.
+// Callers MUST include detritus/carrion, not just living plants: death moves mass from a plant to a detritus
+// ENTITY, so excluding those reads a matter-neutral transfer as a leak.
+pub fn flora_matter(mass_kg: f64) -> crate::chem::Elements {
+    crate::chem::PLANT_COMP * mass_kg
+}
+
+// Freeze the ledger's reference total once the world exists. Initial seeding legitimately creates the
+// starting biomass, so measuring drift from BEFORE it would report the world's own birth as a leak.
+pub fn seal_matter_ledger(
+    mut bio: ResMut<crate::chem::Biosphere>,
+    pf: Query<&PlantState, (Without<Grass>, Without<Seaweed>, Without<Creature>)>,
+    mut done: Local<bool>,
+) {
+    if *done {
+        return;
+    }
+    *done = true;
+    let mass: f64 = pf.iter().map(|st| st.mass as f64).sum();
+    bio.initial_total = bio.total() + flora_matter(mass);
 }
 
 // Mass stripped per fruit tree this tick. live_step records, plant_step applies. Trees persist + regrow;
@@ -1997,6 +2015,31 @@ struct PlantBatch {
     births: Vec<(u32, PlantGenome, Vec3)>,
     tree_births: Vec<(u32, Vec3, bool, PlantGenome)>,
     bank: Vec<(u32, PlantGenome, Vec3, u32)>, // this tick's NEW dormant seeds (idx, genome, pos, wait)
+    // --- conserved-matter intents (Biosphere is shared, so the parallel decide can only REQUEST) ---
+    // Growth is a request, not a fact: the decide computes how much a plant WANTS, the serial apply asks the
+    // Biosphere what the local element budget can fund, and apply_growth_grants writes the granted mass. Same
+    // deferred pattern as TreeBites (live_step records, plant_step applies).
+    growth_wants: Vec<(u32, Entity, Vec3, f32)>, // idx, plant, pos, desired kg this tick
+    litter: Vec<(u32, Vec3, f32)>,               // dead tissue -> soil ORGANIC (not plant-available yet)
+    combust: Vec<(u32, Vec3, f32)>,              // burned tissue -> C and most N to air, P to ash
+    consumed: Vec<(u32, Vec3, f32)>,             // grazed tissue -> respired + excreted (Phase 1 stand-in)
+    nfix: Vec<(u32, Vec3, f32)>,                 // idx, pos, kg N pulled from air by rhizobia
+}
+
+// Mass the Biosphere agreed to fund this tick, per plant. Written by plant_step's serial apply, consumed by
+// apply_growth_grants. Kept as a resource rather than a component so a plant that got nothing costs nothing.
+#[derive(Resource, Default)]
+pub struct GrowthGrants(pub HashMap<Entity, f32>);
+
+// Add the granted mass. Split from plant_step because growth must be funded by a shared reservoir under
+// serial access, while the mass itself lives on a component the parallel decide already borrowed.
+// Runs immediately after plant_step; grants are consumed (drained) so nothing is applied twice.
+pub fn apply_growth_grants(mut grants: ResMut<GrowthGrants>, mut q: Query<&mut PlantState>) {
+    for (e, g) in grants.0.drain() {
+        if let Ok(mut st) = q.get_mut(e) {
+            st.mass += g;
+        }
+    }
 }
 
 // plants: grow, reproduce (disperse mutated offspring), reseed if the web nearly collapses (spec 13).
@@ -2010,6 +2053,8 @@ pub fn plant_step(
     fire: Res<Fire>,
     wear: Res<Wear>,
     mut tree_bites: ResMut<TreeBites>,
+    mut bio: ResMut<crate::chem::Biosphere>,
+    mut grants: ResMut<GrowthGrants>,
     mut bank: ResMut<SeedBank>,
     // scenario tuning harness: present ONLY under --scenario. Its presence disables reseed floor (isolated cohort
     // not flooded) + counts births/deaths-by-cause. Absent in normal/headless runs (free).
@@ -2049,6 +2094,7 @@ pub fn plant_step(
     let tick = gen.tick;
     // read-only snapshots for the parallel decide (soil/tree_bites not mutated until the serial apply below)
     let soil_r: &Soil = &soil;
+    let bio_r: &crate::chem::Biosphere = &bio;
     let gw_r: &GroundWater = &gw;
     let climate_r: &Climate = &climate;
     let fire_r: &Fire = &fire;
@@ -2071,8 +2117,7 @@ pub fn plant_step(
             // wildfire burn-up: biomass -> ash (trees ~3x). Burned ground regrows richer. Serotiny: fire-adapted
             // plant releases a seed AS it burns (post-fire recruitment onto fresh ash).
             if fire_r.get(ppos) > FIRE_KILL {
-                let biomass = if tree.is_some() { 3.0 } else { 1.0 };
-                out.soil_adds.push((idx, ppos, FIRE_BURN_ASH * st.mass * biomass));
+                out.combust.push((idx, ppos, st.mass));
                 if tree.is_none() && prng.f32() < g.fire_seed {
                     let child = mate_or_self(pool_r, e, ppos, g, false, &mut prng);
                     out.births.push((idx, child, disperse_pos(&mut prng, ppos, g.spread, FOOD_Y)));
@@ -2082,18 +2127,21 @@ pub fn plant_step(
             }
             // hard freeze: polar ice core -> any plant/tree dies outright (absolute kill, temp_pref-independent).
             if crate::sphere::base_temperature(pdir) < FREEZE_TEMP {
+                out.litter.push((idx, ppos, st.mass)); // frozen tissue still returns to the soil
                 out.despawns.push((idx, e, tree.is_none(), Some("frozen")));
                 return;
             }
             let light = crate::sphere::daylight_at(pdir, tick);
-            let fert = soil_r.get(ppos);
             let water = gw_r.get(ppos);
             let trample = 1.0 - WEAR_GROWTH_PENALTY * wear_r.get(ppos); // trampled ground grows less (shared with tree below)
-            let boost = (1.0 + FERT_GROWTH * (fert / FERT_CAP).min(1.0)) * (1.0 + WET_GROWTH * water) * trample;
+            // No fertility multiplier any more: nutrient scarcity acts by LIMITING THE DRAW (Liebig, in the
+            // serial apply), not by scaling a rate. A plant on poor ground now wants the same and gets less.
+            let boost = (1.0 + WET_GROWTH * water) * trample;
             let lf = 0.35 + 0.65 * (1.0 - (light - g.light_pref).abs());
             if let Some(tree) = tree {
                 // trees land-only: a tree in water drowns fast (no kelp/mangrove forests).
                 if crate::sphere::is_ocean(pdir) && prng.f32() < DROWN_TREE {
+                    out.litter.push((idx, ppos, st.mass));
                     out.despawns.push((idx, e, false, Some("drown")));
                     return;
                 }
@@ -2101,7 +2149,9 @@ pub fn plant_step(
                 let grazed = bites_r.0.contains_key(&e);
                 if grazed {
                     st.mass = (st.mass - bites_r.0[&e]).max(0.0);
+                    out.consumed.push((idx, ppos, bites_r.0[&e]));
                     if st.mass < TREE_MIN_MASS {
+                        out.litter.push((idx, ppos, st.mass));
                         out.despawns.push((idx, e, false, Some("eaten")));
                         return;
                     }
@@ -2109,6 +2159,7 @@ pub fn plant_step(
                 // tree climate niche: moisture-immune (deep roots) but feels temperature. Far off thermal band -> dies.
                 let tmiss = (crate::sphere::base_temperature(pdir) - g.temp_pref).abs();
                 if prng.f32() < TREE_TEMP_KILL * (tmiss - TREE_TEMP_TOL).max(0.0) {
+                    out.litter.push((idx, ppos, st.mass));
                     out.despawns.push((idx, e, false, Some("temp")));
                     return;
                 }
@@ -2118,15 +2169,21 @@ pub fn plant_step(
                 let clim = crate::sphere::moisture(pdir) * (1.0 - CLIMATE_VEG) + climate_r.get(ppos) * CLIMATE_VEG;
                 let m = (clim + 0.2 * season + WET_GAIN * water).clamp(0.0, 1.0);
                 let moist_q = (1.0 - (m - TREE_WET_OPT).abs() / TREE_WET_TOL).clamp(0.0, 1.0);
-                let fert_q = (fert / FERT_CAP).min(1.0);
-                let soil_q = moist_q * (0.4 + 0.6 * fert_q);
-                let grow_mult = (1.0 + FERT_GROWTH * fert_q) * (TREE_WET_FLOOR + (1.0 - TREE_WET_FLOOR) * moist_q) * trample;
+                // Soil quality is moisture-only now. Nutrient scarcity used to be double-counted here (a
+                // growth multiplier AND a size cap); under conservation it acts once, by limiting the draw.
+                let soil_q = moist_q;
+                let grow_mult = (TREE_WET_FLOOR + (1.0 - TREE_WET_FLOOR) * moist_q) * trample;
                 let full_size = g.maturity * (1.0 + TREE_SOIL_SIZE * soil_q);
-                st.mass = (st.mass + g.growth_rate() * grow_mult * lf * temp_grow * TREE_GROWTH_SCALE * DT).min(full_size);
+                let want = (g.growth_rate() * grow_mult * lf * temp_grow * TREE_GROWTH_SCALE * DT)
+                    .min((full_size - st.mass).max(0.0)) // never request past the tree's final size
+                    .min(crate::chem::npp_ceiling_tree_per_tick() as f32);
+                out.growth_wants.push((idx, e, ppos, want.max(0.0)));
                 st.age += 1;
                 let r2 = TREE_DENSITY_R * TREE_DENSITY_R;
                 let local = tpos_r.iter().filter(|p| p.distance_squared(ppos) < r2).count();
-                let fert_boost = 0.3 + 2.2 * fert_q;
+                // reproduction odds track how much the local element budget can still fund: a tree on
+                // exhausted ground sets little seed. Reads the same mineral pool the draw competes for.
+                let fert_boost = 0.3 + 2.2 * bio_r.cell_fertility01(grid_cell(ppos));
                 let mature = st.mass >= g.maturity;
                 if mature && tree.edible && prng.f32() < P_FRUIT_DROP * (0.5 + g.nutrient) {
                     let fpos = disperse_pos(&mut prng, ppos, 3.0, FOOD_Y); // within crown footprint
@@ -2143,7 +2200,10 @@ pub fn plant_step(
                         let child = mate_or_self(pool_r, e, ppos, g, true, &mut prng);
                         out.tree_births.push((idx, pos, tree.edible, child));
                     }
+                    let spent = st.mass * (1.0 - PLANT_REPRO_FRAC);
                     st.mass *= PLANT_REPRO_FRAC; // budding a seed costs parent mass either way
+                    // provisioning tissue that did not become seed: banked as litter, not destroyed
+                    out.litter.push((idx, ppos, spent));
                 }
                 return;
             }
@@ -2151,8 +2211,9 @@ pub fn plant_step(
             // grazing from live_step: eaten below PLANT_MIN_MASS = consumed -> gone; high-regrow bush survives.
             if let Some(&bite) = bites_r.0.get(&e) {
                 st.mass = (st.mass - bite).max(0.0);
+                out.consumed.push((idx, ppos, bite.min(st.mass + bite)));
                 if st.mass < PLANT_MIN_MASS {
-                    out.soil_adds.push((idx, ppos, DEATH_FERT * 0.3));
+                    out.litter.push((idx, ppos, st.mass)); // the uneaten remainder rots where it stood
                     out.despawns.push((idx, e, true, Some("eaten")));
                     return;
                 }
@@ -2189,8 +2250,9 @@ pub fn plant_step(
                 // allelopathic litter: chemical-warfare plant leaves extra-toxic detritus suppressing competitors.
                 let mut litter = g.clone();
                 litter.toxicity = litter.toxicity.max(g.allelopathy);
+                // detritus is an ENTITY carrying st.mass, so death is already matter-neutral: the mass moves
+                // from plant to detritus and the ledger counts both. No fertility invented here.
                 out.detritus.push((idx, litter, st.mass, ppos));
-                out.soil_adds.push((idx, ppos, DEATH_FERT * 0.3));
                 out.despawns.push((idx, e, true, Some(cause)));
                 return;
             }
@@ -2199,9 +2261,12 @@ pub fn plant_step(
             let lf = (0.35 + 0.65 * (1.0 - (light_uw - g.light_pref).abs()) + CLIMB_LIGHT * g.climb).min(1.0);
             // nitrogen-fixer (legume): root nodules enrich local soil each tick.
             if g.nitrogen_fix > 0.0 {
-                out.soil_adds.push((idx, ppos, NFIX_RATE * g.nitrogen_fix * DT));
+                let kg = crate::chem::NFIX_PER_M2_DAY * crate::chem::PLANT_FOOTPRINT_M2 * crate::chem::bio_days_per_tick();
+                out.nfix.push((idx, ppos, (kg * g.nitrogen_fix as f64) as f32));
             }
-            st.mass += g.growth_rate() * boost * hab * lf * temp_grow * DT;
+            // request growth; the element budget decides what is actually funded (see growth_wants)
+            let want = (g.growth_rate() * boost * hab * lf * temp_grow * DT).min(crate::chem::npp_ceiling_per_tick() as f32);
+            out.growth_wants.push((idx, e, ppos, want.max(0.0)));
             st.age += 1;
             let mature = st.mass >= g.maturity;
             // fruiting non-tree (berry bush, nightshade) drops fallen fruit -> fast-energy + ferment chain.
@@ -2227,7 +2292,10 @@ pub fn plant_step(
                 let pos = disperse_pos(&mut prng, ppos, CLONAL_RADIUS, FOOD_Y);
                 if !(g.wet > 0.85 && !crate::sphere::is_ocean(pos.normalize_or_zero())) {
                     out.births.push((idx, g.clone(), pos)); // identical ramet: fidelity over variation
+                    let spent = st.mass * (1.0 - PLANT_REPRO_FRAC);
                     st.mass *= PLANT_REPRO_FRAC; // budding a ramet costs parent
+                    // provisioning tissue that did not become seed: banked as litter, not destroyed
+                    out.litter.push((idx, ppos, spent));
                 }
             }
             // cling (epizoochory): burr/sticky seed snagged by passing animal -> even inedible plants disperse.
@@ -2254,7 +2322,10 @@ pub fn plant_step(
                         out.births.push((idx, child, pos));
                     }
                 }
+                let spent = st.mass * (1.0 - PLANT_REPRO_FRAC);
                 st.mass *= PLANT_REPRO_FRAC;
+                // provisioning tissue that did not become seed: banked as litter, not destroyed
+                out.litter.push((idx, ppos, spent));
             }
         },
     );
@@ -2267,6 +2338,11 @@ pub fn plant_step(
     let mut births: Vec<(u32, PlantGenome, Vec3)> = Vec::new();
     let mut tree_births: Vec<(u32, Vec3, bool, PlantGenome)> = Vec::new();
     let mut new_bank: Vec<(u32, PlantGenome, Vec3, u32)> = Vec::new();
+    let mut growth_wants: Vec<(u32, Entity, Vec3, f32)> = Vec::new();
+    let mut litter: Vec<(u32, Vec3, f32)> = Vec::new();
+    let mut combust: Vec<(u32, Vec3, f32)> = Vec::new();
+    let mut consumed: Vec<(u32, Vec3, f32)> = Vec::new();
+    let mut nfix: Vec<(u32, Vec3, f32)> = Vec::new();
     for b in batch.iter_mut() {
         despawns.append(&mut b.despawns);
         soil_adds.append(&mut b.soil_adds);
@@ -2275,9 +2351,42 @@ pub fn plant_step(
         births.append(&mut b.births);
         tree_births.append(&mut b.tree_births);
         new_bank.append(&mut b.bank);
+        growth_wants.append(&mut b.growth_wants);
+        litter.append(&mut b.litter);
+        combust.append(&mut b.combust);
+        consumed.append(&mut b.consumed);
+        nfix.append(&mut b.nfix);
     }
     despawns.sort_by_key(|d| d.0);
     soil_adds.sort_by_key(|d| d.0);
+    // Every reservoir touch is sorted by parent index before it lands: f64 addition is not associative, so
+    // unsorted merge order would make the ledger drift differ run-to-run and break determinism.
+    growth_wants.sort_by_key(|d| d.0);
+    litter.sort_by_key(|d| d.0);
+    combust.sort_by_key(|d| d.0);
+    consumed.sort_by_key(|d| d.0);
+    nfix.sort_by_key(|d| d.0);
+    let comp = crate::chem::PLANT_COMP;
+    for (_, pos, mass) in &litter {
+        bio.deposit_litter(grid_cell(*pos), *mass as f64, comp);
+    }
+    for (_, pos, mass) in &combust {
+        bio.combust(grid_cell(*pos), *mass as f64, comp);
+    }
+    for (_, pos, mass) in &consumed {
+        bio.consume_and_excrete(grid_cell(*pos), *mass as f64, comp);
+    }
+    for (_, pos, kg) in &nfix {
+        bio.fix_nitrogen(grid_cell(*pos), *kg as f64);
+    }
+    // fund growth: Liebig decides per cell, so plants competing for the same patch are served in index order
+    // and the last ones get whatever is left. That IS the competition, not a tie-break artifact.
+    for (_, e, pos, want) in &growth_wants {
+        let got = bio.draw_for_growth(grid_cell(*pos), comp, *want as f64);
+        if got > 0.0 {
+            grants.0.insert(*e, got as f32);
+        }
+    }
     detritus.sort_by_key(|d| d.0);
     fruit_drops.sort_by_key(|d| d.0);
     births.sort_by_key(|d| d.0);
@@ -2321,9 +2430,15 @@ pub fn plant_step(
     });
     // dead plants -> fermenting detritus (poor food, ferments to a little toxic FAST energy, then gone).
     for (_, g, mass, pos) in detritus {
+        // the detritus entity is capped at CARRION_MASS, so a big plant's death used to DISCARD everything
+        // above that. The excess goes straight to soil organic matter instead of vanishing.
+        let kept = mass.min(CARRION_MASS);
+        if mass > kept {
+            bio.deposit_litter(grid_cell(pos), (mass - kept) as f64, crate::chem::PLANT_COMP);
+        }
         commands.spawn((
             Food,
-            PlantState { mass: mass.min(CARRION_MASS), age: 0 },
+            PlantState { mass: kept, age: 0 },
             PlantGenome { nutrient: DETRITUS_NUTRIENT, defense: 0.0, quality: 0.0, ..g },
             Rot { age: 0 },
             Ferment { toxic: FERMENT_TOX_DETRITUS },
@@ -2356,7 +2471,14 @@ pub fn plant_step(
             break;
         }
         let est = 0.6 + 0.8 * g.seed_weight; // heavy seed -> bigger hardier seedling (head start)
-        spawn_plant(&mut commands, g, rng.range(0.5, 1.3) * PLANT_START_MASS * est, pos);
+        // a seedling is matter: draw it from the soil where it germinates. On exhausted ground the draw comes
+        // back short and the seedling fails to establish, which is a real recruitment bottleneck, not a cap.
+        let want = (rng.range(0.5, 1.3) * PLANT_START_MASS * est) as f64;
+        let funded = bio.draw_for_growth(grid_cell(pos), crate::chem::PLANT_COMP, want);
+        if funded <= 0.0 {
+            continue;
+        }
+        spawn_plant(&mut commands, g, funded as f32, pos);
         pop += 1;
     }
     for (g, pos) in germinated {
@@ -2381,7 +2503,11 @@ pub fn plant_step(
         if tree_count + spawned_trees >= tcap {
             break; // tcap (decide gated on start-of-tick count; precise cap re-enforced here, deterministic since sorted)
         }
-        spawn_tree(&mut commands, PLANT_START_MASS, pos, edible, g);
+        let funded = bio.draw_for_growth(grid_cell(pos), crate::chem::PLANT_COMP, PLANT_START_MASS as f64);
+        if funded <= 0.0 {
+            continue;
+        }
+        spawn_tree(&mut commands, funded as f32, pos, edible, g);
         spawned_trees += 1;
     }
     tree_bites.0.clear(); // consumed this tick
@@ -2494,14 +2620,20 @@ pub fn predation_step(
 pub fn rot_step(
     mut commands: Commands,
     mut soil: ResMut<Soil>,
+    mut bio: ResMut<crate::chem::Biosphere>,
     mut q: Query<(Entity, &mut Rot, &mut PlantState, &PlantGenome, &Transform)>,
 ) {
     let _g = crate::profile::scope("rot");
     for (e, mut rot, mut st, g, tf) in &mut q {
         rot.age += 1;
-        st.mass = (st.mass - CARRION_MASS / ROT_GONE as f32).max(0.0); // decompose: less to scavenge
+        // the mass lost each tick is not destroyed: it becomes soil ORGANIC matter, which microbes then
+        // mineralize on their own clock (biogeochem_step). This is the return leg of the whole loop.
+        let lost = (CARRION_MASS / ROT_GONE as f32).min(st.mass);
+        bio.deposit_litter(grid_cell(tf.translation), lost as f64, crate::chem::PLANT_COMP);
+        st.mass = (st.mass - lost).max(0.0); // decompose: less to scavenge
         if rot.age >= ROT_GONE {
-            soil.add(tf.translation, DECOMP_FERT * g.nutrient); // return nutrients
+            bio.deposit_litter(grid_cell(tf.translation), st.mass as f64, crate::chem::PLANT_COMP); // remainder
+            soil.add(tf.translation, DECOMP_FERT * g.nutrient); // legacy fertility grid (Phase 2 removes it)
             commands.entity(e).despawn(); // fully decomposed
         }
     }
@@ -2570,6 +2702,7 @@ pub fn live_step(
     >,
     mut commands: Commands,
     mut tree_bites: ResMut<TreeBites>,
+    mut bio: ResMut<crate::chem::Biosphere>,
     mut soil: ResMut<Soil>,
     mut wear: ResMut<Wear>,
     fire: Res<Fire>,
@@ -3465,6 +3598,11 @@ pub fn live_step(
     let mut whole_eaten: HashSet<Entity> = HashSet::new();
     for (_, e) in &food_despawns {
         if whole_eaten.insert(*e) {
+            // route the mass BEFORE despawning, keyed off the same dedup set: two creatures can claim one food
+            // in the same tick, and accounting it twice would destroy matter that only existed once.
+            if let Some((_, pos, _, mass, ..)) = foods.iter().find(|f| f.0 == *e) {
+                bio.consume_and_excrete(grid_cell(*pos), *mass as f64, crate::chem::PLANT_COMP);
+            }
             commands.entity(*e).despawn();
         }
     }
@@ -3487,7 +3625,11 @@ pub fn live_step(
     }
     // endozoochory-dispersed plants (coarse PLANT_CAP gate already applied in decide via start-of-tick foods.len())
     for (_, g, pos) in plant_births {
-        spawn_plant(&mut commands, g, PLANT_START_MASS, pos);
+        // gut-dispersed seedling: funded like any other, so dispersal into barren ground fails to establish
+        let funded = bio.draw_for_growth(grid_cell(pos), crate::chem::PLANT_COMP, PLANT_START_MASS as f64);
+        if funded > 0.0 {
+            spawn_plant(&mut commands, g, funded as f32, pos);
+        }
     }
     // creature births: running pop + per-niche caps re-enforced in sorted order (serial gated each birth in the old
     // loop; here once, deterministically). pop base nets this tick's deaths so the global cap reflects post-death
@@ -3739,9 +3881,9 @@ pub fn generation_step(
     let avg_wet: f32 = pq.iter().map(|(g, _)| g.wet).sum::<f32>() / plant_n as f32;
     if gen.diet {
         let avg_rig: f32 = scored.iter().map(|(_, g)| g.rigidity).sum::<f32>() / n as f32;
-        info!("gen {:>3} | nutri {:>6.2} | sens {:.1} r{:.0} | rig {:.2} | bite {:.2} vs def {:.2} | light {:.2} sz {:.2} sw {:.2} so {:.2} brain {:.1} | plant-nut {:.2} qual {:.2} wet {:.2} | roam {:.2} elev {:.1} | plants {} soil {:.2} gw {:.2} clim {:.2}[{:.2}-{:.2}] desert {:.0}% fire {:.3} wear {:.3} | trees {} h{:.2} b{:.2} | CHEM {}", gen.generation, avg, avg_sensors, avg_range, avg_rig, avg_bite, avg_def, avg_light, avg_size, avg_swim, avg_social, avg_hidden, avg_nut, avg_qual, avg_wet, avg_roam, avg_elev, plant_n, fields.soil.avg(), fields.gw.avg(), fields.climate.avg(), fields.climate.range().0, fields.climate.range().1, fields.climate.land_arid_frac(0.25) * 100.0, fields.fire.avg(), fields.wear.avg(), tree_n, avg_tree_h, avg_tree_b, fields.bio.report(living_matter(&pq)));
+        info!("gen {:>3} | nutri {:>6.2} | sens {:.1} r{:.0} | rig {:.2} | bite {:.2} vs def {:.2} | light {:.2} sz {:.2} sw {:.2} so {:.2} brain {:.1} | plant-nut {:.2} qual {:.2} wet {:.2} | roam {:.2} elev {:.1} | plants {} soil {:.2} gw {:.2} clim {:.2}[{:.2}-{:.2}] desert {:.0}% fire {:.3} wear {:.3} | trees {} h{:.2} b{:.2} | CHEM {}", gen.generation, avg, avg_sensors, avg_range, avg_rig, avg_bite, avg_def, avg_light, avg_size, avg_swim, avg_social, avg_hidden, avg_nut, avg_qual, avg_wet, avg_roam, avg_elev, plant_n, fields.soil.avg(), fields.gw.avg(), fields.climate.avg(), fields.climate.range().0, fields.climate.range().1, fields.climate.land_arid_frac(0.25) * 100.0, fields.fire.avg(), fields.wear.avg(), tree_n, avg_tree_h, avg_tree_b, fields.bio.report(flora_matter(pf.iter().map(|(_, st, ..)| st.mass as f64).sum())));
     } else {
-        info!("gen {:>3} | food {:>6.2} | sens {:.1} r{:.0} | bite {:.2} vs def {:.2} | plant-nut {:.2} qual {:.2} wet {:.2} | roam {:.2} elev {:.1} | plants {} soil {:.2} gw {:.2} | CHEM {}", gen.generation, avg, avg_sensors, avg_range, avg_bite, avg_def, avg_nut, avg_qual, avg_wet, avg_roam, avg_elev, plant_n, fields.soil.avg(), fields.gw.avg(), fields.bio.report(living_matter(&pq)));
+        info!("gen {:>3} | food {:>6.2} | sens {:.1} r{:.0} | bite {:.2} vs def {:.2} | plant-nut {:.2} qual {:.2} wet {:.2} | roam {:.2} elev {:.1} | plants {} soil {:.2} gw {:.2} | CHEM {}", gen.generation, avg, avg_sensors, avg_range, avg_bite, avg_def, avg_nut, avg_qual, avg_wet, avg_roam, avg_elev, plant_n, fields.soil.avg(), fields.gw.avg(), fields.bio.report(flora_matter(pf.iter().map(|(_, st, ..)| st.mass as f64).sum())));
     }
 
     // elite pool (clone+mutate, asexual)

@@ -233,6 +233,29 @@ pub const BURY_FRAC_PER_DAY: f64 = 1.0e-6;
 /// Fraction of buried sediment returned by uplift and volcanism per real day. Slower than burial, so
 /// sediment is a real net sink on ecological timescales while still not a permanent trap.
 pub const UPLIFT_FRAC_PER_DAY: f64 = 2.0e-7;
+/// Share of a burned plant's nitrogen that volatilizes to the atmosphere rather than staying as ash. Real
+/// wildfire loses most site N this way, so fire is a nitrogen EXPORT: burned ground gains P and loses N.
+pub const COMBUST_N_VOLATILE: f64 = 0.8;
+/// Nominal ground a single plant draws from, m^2. Sets the per-plant NPP ceiling so growth speed stays
+/// physically bounded instead of being limited only by the cell budget. 10 m^2 matches the world's observed
+/// flora density (~4000 plants over ~40,000 m^2 of land), and the resulting ceiling of ~0.017 kg/tick lands
+/// within a percent of the growth rate the sim already used, which is the check that the two agree.
+pub const PLANT_FOOTPRINT_M2: f64 = 10.0;
+
+/// Ground a tree's canopy and root plate draw from, m^2. Larger than a herb's, which is most of why a tree
+/// out-grows the plants under it.
+pub const TREE_FOOTPRINT_M2: f64 = 60.0;
+
+/// Per-tick ceiling on one plant's mass gain, kg, from real net primary production. Liebig then decides how
+/// much of this the local element budget can actually fund.
+pub fn npp_ceiling_per_tick() -> f64 {
+    NPP_PER_M2_DAY * PLANT_FOOTPRINT_M2 * bio_days_per_tick()
+}
+
+/// As `npp_ceiling_per_tick` for a tree's larger footprint.
+pub fn npp_ceiling_tree_per_tick() -> f64 {
+    NPP_PER_M2_DAY * TREE_FOOTPRINT_M2 * bio_days_per_tick()
+}
 
 // --- the world's reservoirs ---
 
@@ -383,6 +406,49 @@ impl Biosphere {
         self.air.c += moved.c; // respiration
         cell.mineral.n += moved.n;
         cell.mineral.p += moved.p;
+    }
+
+    /// How much plant growth this cell's mineral pool can still fund, normalized 0..1 against a full cell.
+    /// Read-only, so the parallel decide can use it to gate things like seed set without touching the pool.
+    pub fn cell_fertility01(&self, idx: usize) -> f32 {
+        let a = cell_area();
+        let full = Elements::new(f64::INFINITY, SOIL_MIN_N_PER_M2 * a, SOIL_MIN_P_PER_M2 * a);
+        let cap = full.max_biomass(PLANT_COMP);
+        if cap <= 0.0 {
+            return 0.0;
+        }
+        let here = Elements::new(f64::INFINITY, self.soil[idx].mineral.n, self.soil[idx].mineral.p);
+        (here.max_biomass(PLANT_COMP) / cap).clamp(0.0, 1.0) as f32
+    }
+
+    /// Combustion. Real fire volatilizes carbon and most nitrogen straight to the air and leaves phosphorus
+    /// behind in the ash, which is exactly why burned ground regrows richer in P but not in N: a fire is a
+    /// nitrogen EXPORT event for the site. Replaces FIRE_ASH/FIRE_BURN_ASH inventing fertility.
+    pub fn combust(&mut self, idx: usize, mass: f64, comp: Elements) {
+        if mass <= 0.0 {
+            return;
+        }
+        let burned = comp * mass;
+        self.air.c += burned.c;
+        self.air.n += burned.n * COMBUST_N_VOLATILE;
+        let cell = &mut self.soil[idx];
+        cell.mineral.n += burned.n * (1.0 - COMBUST_N_VOLATILE);
+        cell.mineral.p += burned.p; // P has no gaseous phase, so it cannot burn off: it all stays as ash
+    }
+
+    /// Herbivory in Phase 1: eaten tissue is respired and excreted on the spot rather than banked in a body,
+    /// because creature bodies are not element-backed until Phase 2. Conserves exactly; what it lacks is the
+    /// standing stock a living animal represents, which is small next to plant biomass. Phase 2 replaces this
+    /// with a real body pool and makes excretion a separate, costed step.
+    pub fn consume_and_excrete(&mut self, idx: usize, mass: f64, comp: Elements) {
+        if mass <= 0.0 {
+            return;
+        }
+        let eaten = comp * mass;
+        self.air.c += eaten.c; // respiration
+        let cell = &mut self.soil[idx];
+        cell.mineral.n += eaten.n; // urea and dung, already plant-available
+        cell.mineral.p += eaten.p;
     }
 
     /// Biological nitrogen fixation: rhizobia pulling inert atmospheric N2 into plant-available soil N.

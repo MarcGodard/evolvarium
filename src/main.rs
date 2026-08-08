@@ -197,7 +197,8 @@ fn main() {
     app.insert_resource(bevy::light::DirectionalLightShadowMap { size: 4096 });
     app.insert_resource(rng::Rng::seed(seed));
     app.insert_resource(sim::Soil::new()); // soil-fertility grid (M5 nutrient loop)
-    app.insert_resource(chem::Biosphere::new()); // conserved C/N/P reservoirs (soil mineral/organic, air, buried, rock)
+    app.insert_resource(chem::Biosphere::new());
+    app.init_resource::<sim::GrowthGrants>(); // mass the element budget funded this tick, per plant // conserved C/N/P reservoirs (soil mineral/organic, air, buried, rock)
     app.insert_resource(sim::GroundWater::new()); // rain-fed ground-water grid
     app.insert_resource(sim::Climate::new()); // slow climate-memory grid (geological desert/rainforest drift)
     app.insert_resource(sim::Fire::new()); // lightning-ignited wildfire grid
@@ -282,9 +283,9 @@ fn main() {
             .add_systems(Startup, scenario::spawn_scenario_world);
         // creatures present (creature_cohort OR grazers) => include creature systems (forage + predation).
         if has_creatures {
-            app.add_systems(Update, (sim::live_step, sim::predation_step, sim::plant_step, sim::rot_step, scenario::scenario_step).chain());
+            app.add_systems(Update, (sim::live_step, sim::predation_step, sim::plant_step, sim::apply_growth_grants, sim::rot_step, scenario::scenario_step).chain());
         } else {
-            app.add_systems(Update, (sim::plant_step, sim::rot_step, scenario::scenario_step).chain());
+            app.add_systems(Update, (sim::plant_step, sim::apply_growth_grants, sim::rot_step, scenario::scenario_step).chain());
         }
         app.run();
         return;
@@ -298,7 +299,7 @@ fn main() {
             .add_systems(Startup, sim::spawn_world_headless)
             .add_systems(
                 Update,
-                (snapshot::snapshot_capture, sim::weather_step, sim::biogeochem_step, sim::fire_step, sim::live_step, sim::predation_step, sim::grass_step, sim::seaweed_step, sim::plant_step, sim::rot_step, niche::niche_step, sim::generation_step, profile_report).chain(),
+                (snapshot::snapshot_capture, sim::seal_matter_ledger, sim::weather_step, sim::biogeochem_step, sim::fire_step, sim::live_step, sim::predation_step, sim::grass_step, sim::seaweed_step, sim::plant_step, sim::apply_growth_grants, sim::rot_step, niche::niche_step, sim::generation_step, profile_report).chain(),
             );
     } else {
         // Real-time visuals: step in FixedUpdate at sim rate so sim-time = wall-time.
@@ -311,7 +312,7 @@ fn main() {
             .add_systems(Startup, (setup_scene, sim::spawn_world_render))
             .add_systems(
                 FixedUpdate,
-                (sim::weather_step, sim::biogeochem_step, sim::fire_step, sim::live_step, sim::predation_step, sim::grass_step, sim::seaweed_step, sim::plant_step, sim::rot_step, niche::niche_step, sim::generation_step).chain(),
+                (sim::seal_matter_ledger, sim::weather_step, sim::biogeochem_step, sim::fire_step, sim::live_step, sim::predation_step, sim::grass_step, sim::seaweed_step, sim::plant_step, sim::apply_growth_grants, sim::rot_step, niche::niche_step, sim::generation_step).chain(),
             );
         if let Some(field) = cap_mmfield {
             app.insert_resource(viz::MinimapInitField(field)); // open minimap on a chosen overlay for the shot
