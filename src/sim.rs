@@ -1659,12 +1659,16 @@ pub fn spawn_world_render(
         });
     }
     commands.insert_resource(crate::viz::TreeMeshes {
-        trunk: meshes.add(Cylinder::new(0.14, 1.4)), // short stub; canopy skirt drapes over most of it
+        // tapered trunk: real trunks are wider at the base, and a straight cylinder reads as a dowel. Bevy's
+        // ConicalFrustum gives the taper without a custom mesh.
+        trunk: meshes.add(ConicalFrustum { radius_top: 0.10, radius_bottom: 0.21, height: 1.4 }),
         // fuller broadleaf crown: cluster of overlapping blobs (centered ~origin; placed in crown)
         // irregular multi-lobe crown with per-vertex shading (darker inside/underside) so it reads as
         // foliage depth rather than a smooth ball. Same origin-centered radius-1 convention as the old
         // blob cluster, so the spawn path needs no change.
-        broadleaf: meshes.add(crate::viz_flora::tree_canopy_mesh(6, 1.0, 2)),
+        broadleaf: (0..4)
+            .map(|i| meshes.add(crate::viz_flora::tree_canopy_mesh(5 + i % 3, 1.0, 2 + i as u32 * 977)))
+            .collect(),
         conifer: meshes.add(crate::viz::conifer_mesh()), // stacked-cone Christmas-tree silhouette
         vine: meshes.add(crate::viz::vine_mesh(0.16)),    // helix vine hugging the trunk (radius ~ trunk)
     });

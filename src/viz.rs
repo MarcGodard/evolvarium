@@ -822,7 +822,10 @@ fn flap_wings(gen: Res<GenState>, mut q: Query<(&Wing, &mut Transform)>) {
 #[derive(Resource)]
 pub struct TreeMeshes {
     pub trunk: Handle<Mesh>,
-    pub broadleaf: Handle<Mesh>, // round canopy for fruit trees
+    // several crowns, not one: a single shared canopy mesh made every broadleaf in a forest identical, which
+    // reads as cloned scenery. Picked per tree by entity hash, so it is stable for that tree's lifetime and
+    // costs nothing per frame.
+    pub broadleaf: Vec<Handle<Mesh>>,
     pub conifer: Handle<Mesh>,   // cone canopy for evergreens
     pub vine: Handle<Mesh>,      // helix vine spiraling up trunk (only some trees)
 }
@@ -841,15 +844,23 @@ fn add_plant_visuals(
         // tree = brown trunk (this entity) + canopy child. Fruit trees get round broadleaf crown
         // (greener + hint of genome leaf hue), evergreens a dark cone. Trees ignore `form`.
         if let (Some(t), Some(tm)) = (tree, &trees) {
+            // per-tree jitter from the entity index: stable, no stored state, no extra component
+            let h = {
+                let mut x = e.index().index().wrapping_mul(0x9E37_79B9);
+                x ^= x >> 15;
+                x
+            };
+            // bark varies tree to tree; a forest of identical brown poles reads as instanced props
+            let bk = (h >> 8) as f32 / u32::MAX as f32 * 256.0 % 1.0;
             commands.entity(e).insert((
                 Mesh3d(tm.trunk.clone()),
-                MeshMaterial3d(materials.add(Color::srgb(0.40, 0.26, 0.13))),
+                MeshMaterial3d(materials.add(Color::srgb(0.34 + 0.12 * bk, 0.22 + 0.08 * bk, 0.11 + 0.06 * bk))),
             ));
             // broadleaf crown centered (sits high in canopy); stacked-cone conifer base at y=0 rests on
             // trunk top (lower attach). Trunk centered (half-height 1.0); canopies attach to envelop most
             // of trunk, leaving short bare-trunk stub -> a tree, not a hat on a pole.
             let (canopy, cmat, cy) = if t.edible {
-                (tm.broadleaf.clone(), materials.add(plant_color(g)), 1.0)
+                (tm.broadleaf[(h as usize) % tm.broadleaf.len()].clone(), materials.add(plant_color(g)), 1.0)
             } else {
                 // conifer cones are open shells: double-sided so hollow shows dark-green inner face (no
                 // see-through to trunk/sky); spine cone fills core. Evergreen needle-green: brighter
