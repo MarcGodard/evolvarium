@@ -1998,6 +1998,15 @@ fn cloud_alt() -> f32 {
     crate::sphere::PLANET_R + crate::sphere::ELEV_MAX + 10.0
 }
 
+// How far past the GROUND terminator a cloud keeps seeing the sun: sin of the angle subtended by the planet
+// at cloud altitude, sqrt(1 - (R/r)^2). ~0.55 here, a big offset because the cloud deck is ~20% of a radius
+// up. This is the whole reason sunset clouds glow gold while the ground below them is already dark; without
+// it dusk clouds render as dark blobs against a bright sky.
+fn cloud_sun_horizon() -> f32 {
+    let r = cloud_alt();
+    (1.0 - (crate::sphere::PLANET_R / r).powi(2)).max(0.0).sqrt()
+}
+
 // One fluffy cumulus puff = several overlapping sphere lobes merged into a single mesh (wider than tall).
 // Shared by every CloudPuff (one mesh, many draws). Lit StandardMaterial -> the lobes self-shade -> the
 // cloud reads as a 3D billow, not a flat lozenge. tf.scale flattens the whole cluster into a cloud.
@@ -2016,6 +2025,17 @@ fn cloud_puff_mesh() -> Mesh {
     ] {
         let _ = m.merge(&lobe(r, o));
     }
+    // Bake the optical-depth profile (dark+blue+opaque base -> pale wispy crown) into vertex colours. Static,
+    // so it rides the shared mesh; StandardMaterial multiplies it into base_color, which carries the per-frame
+    // sun tint. Without this the puff is one flat albedo and reads as a balloon however it's lit.
+    let ys: Vec<f32> = match m.attribute(Mesh::ATTRIBUTE_POSITION) {
+        Some(bevy::mesh::VertexAttributeValues::Float32x3(p)) => p.iter().map(|v| v[1]).collect(),
+        _ => return m,
+    };
+    let (lo, hi) = ys.iter().fold((f32::MAX, f32::MIN), |(l, h), &y| (l.min(y), h.max(y)));
+    let span = (hi - lo).max(1e-3);
+    let cols: Vec<[f32; 4]> = ys.iter().map(|&y| crate::viz_sky::cloud_depth_tint((y - lo) / span)).collect();
+    m.insert_attribute(Mesh::ATTRIBUTE_COLOR, cols);
     m
 }
 
@@ -2034,7 +2054,7 @@ fn spawn_clouds(
     let mesh = meshes.add(cloud_puff_mesh());
     let alt = cloud_alt();
     // Dense grid + per-puff jitter -> cloudy regions read as clusters of varied puffs, not a lattice.
-    let (rows, cols) = (22, 44);
+    let (rows, cols) = (34, 68);
     let (dlat, dlon) = (PI * 0.92 / rows as f32, TAU / cols as f32);
     for j in 0..rows {
         for i in 0..cols {
@@ -2048,6 +2068,11 @@ fn spawn_clouds(
                 base_color: Color::srgba(0.95, 0.96, 1.0, 0.0),
                 perceptual_roughness: 1.0, // matte: no specular glint on cloud lobes
                 alpha_mode: AlphaMode::Blend,
+                // Unlit on purpose. A cloud is BRIGHT at dusk because it forward-scatters a low sun, and a
+                // Lambert term does the opposite: grazing light on a flattened puff -> N.L ~0 -> dark blob
+                // against a bright sky. cloud_sun_tint models the scattering, the mesh's baked vertex colours
+                // model the vertical optical depth, so all shading is ours and none of it is the light's.
+                unlit: true,
                 ..default()
             });
             commands.spawn((
@@ -2111,29 +2136,31 @@ fn update_clouds(
         tf.translation = dir * (alt + puff.hbias);
         tf.rotation = Quat::from_rotation_arc(Vec3::Y, dir);
         if let Some(m) = mats.get_mut(&mm.0) {
-            // Daylight-aware albedo (multiplies the white sun light): bright white at high sun, GOLDEN where
-            // the sun grazes the cloud (sunrise/sunset), grey underside when thick. Faint emissive floor keeps
-            // night-side clouds as dim moonlit ghosts instead of going pure black.
-            let lit = dir.dot(sun); // -1 anti-sun .. 1 sub-solar
-            // warmth peaks at the terminator on the LIT side only (grazing dawn/dusk gold). GOTCHA: keying off
-            // lit.max(0) painted the WHOLE anti-sun hemisphere full-warm -> from orbit every night cloud read as
-            // a brown disc. Gate warm to lit>0; the night side fades cool+dim instead.
-            let warm = if lit > 0.0 { (1.0 - lit / 0.45).clamp(0.0, 1.0) } else { 0.0 };
-            let night = (-lit / 0.30).clamp(0.0, 1.0); // 0 at terminator .. 1 deep night
+            // Daylight-aware albedo (multiplies the white sun light AND the mesh's baked depth profile).
+            // cloud_sun_tint carries the forward-scatter terminator and the grazing dawn/dusk gold; the
+            // night fade below is separate because it is about visibility from orbit, not about scattering.
+            // Shifted by the cloud's OWN horizon, so 0 means "sun setting as seen from up here", not "sun
+            // setting as seen from the ground". Everything downstream keys off the shifted value.
+            let lit = dir.dot(sun) + cloud_sun_horizon();
+            let night = (-lit / 0.30).clamp(0.0, 1.0); // 0 at cloud terminator .. 1 deep night
             let shade = 1.0 - 0.30 * cov; // thick cloud = greyer
-            let mut albedo = Vec3::new(0.97, 0.98, 1.0).lerp(Vec3::new(1.0, 0.72, 0.5), warm * 0.8) * shade;
+            let t = crate::viz_sky::cloud_sun_tint(lit);
+            let mut albedo = Vec3::new(t[0], t[1], t[2]) * shade;
             // night side: fade to a dim cool grey (moonlit), not golden -> no brown blobs from orbit.
             albedo = albedo.lerp(Vec3::new(0.13, 0.14, 0.18), night);
             // night clouds also go more transparent so they recede against the dark planet from orbit.
-            let alpha = (0.5 * puff.grow).min(0.55) * (1.0 - 0.45 * night);
+            // Near-opaque at full growth. Real cumulus IS optically thick, and half-transparent lobes made
+            // every intersection ring visible -> a puff read as a stack of circles, not one billow. The mesh's
+            // baked vertex alpha still thins the crown, so the silhouette keeps a wispy edge.
+            let alpha = (1.05 * puff.grow).min(0.97) * (1.0 - 0.45 * night);
             m.base_color = Color::srgba(albedo.x, albedo.y, albedo.z, alpha);
-            // Soft grey scatter floor so the SHADED side (anti-sun lobes, limb clouds seen from orbit) reads as
-            // a cloud, not a dark floating rock. Small vs full sun on the lit side, so day clouds stay bright.
-            m.emissive = LinearRgba::rgb(0.09, 0.095, 0.11) * puff.grow;
         }
         // Start small wisp, grow to full puff; per-puff size + squash -> clouds lumpy not uniform. Smaller
         // base than the single-sphere era: the cluster mesh already spans ~2x a unit sphere.
-        let s = (1.3 + 10.0 * puff.grow) * puff.scale_var;
+        // Sized against the PLANET, not just the walk view: the cluster mesh spans ~2 units, so the old 10.0
+        // put a single puff ~29 units across on an R=80 world (~40 deg of arc) and from orbit the deck hung
+        // far past the limb. Coverage is made up with a denser grid in spawn_clouds instead.
+        let s = (1.0 + 6.0 * puff.grow) * puff.scale_var;
         tf.scale = Vec3::new(s, s * puff.flat, s); // squash along local up (set by tf.rotation) = flat cloud
     }
 }
@@ -2995,7 +3022,6 @@ fn update_aurora_curtains(
     const CURTAIN_H: f32 = 16.0; // curtain height (mesh unit-tall; this scales it)
     const FOLD_AMP: f32 = 0.10; // mag-latitude wave amplitude (radians) -> serpentine draperies
     for (c, mm, mut tf) in &mut q {
-        let night = 1.0 - crate::sphere::daylight_at(c.pole, vtick);
         let f = c.freq;
         // organic flicker: incommensurate sines + substorm burst
         let flick = (0.45
@@ -3015,6 +3041,10 @@ fn update_aurora_curtains(
         let v = pole.cross(u);
         let circ = u * ang.cos() + v * ang.sin();
         let dirp = (pole * lat.sin() + circ * lat.cos()).normalize();
+        // Gate on the CURTAIN's own sky, not the magnetic pole's: keying off the pole switched the whole oval
+        // on together, so curtains on the sunlit half of the ring hung as green shafts over daylit ground.
+        // Daylight drowns real aurora.
+        let night = 1.0 - crate::sphere::daylight_at(dirp, vtick);
         let n = dirp; // radial up (curtain rises along this = local Y)
         let tang = pole.cross(dirp).normalize(); // around-oval tangent (curtain width = local X)
         let bin = tang.cross(n); // local Z, RIGHT-HANDED (X x Y = Z) so quaternion is real rotation, not mirror
@@ -3900,8 +3930,20 @@ fn draw_sensors(
 
 #[cfg(test)]
 mod tests {
-    use super::noon_offset;
+    use super::{cloud_sun_horizon, noon_offset};
     use bevy::prelude::Vec3;
+
+    // The cloud deck keeps seeing the sun past the GROUND terminator, which is why sunset clouds glow while
+    // the ground under them is dark. Guards the offset against a cloud_alt change silently zeroing it.
+    #[test]
+    fn cloud_deck_stays_lit_past_the_ground_terminator() {
+        let h = cloud_sun_horizon();
+        assert!(h > 0.3 && h < 0.9, "offset should be substantial on an R=80 world, got {h}");
+        // a puff straight above the ground terminator (dot 0) is still in full sun
+        assert!(h > 0.0, "ground terminator must sit on the lit side for the deck");
+        // and one far enough past it is not
+        assert!(-0.95 + h < 0.0, "deep night side must still go dark");
+    }
 
     // noon_offset must put the sun on the walk point's meridian = the BRIGHTEST moment of that day. (With
     // real seasons the noon sun can be low at high latitude in winter, so it is no longer ~overhead; the

@@ -10,9 +10,7 @@
 //! ANGLES: radians. elevation 0 = horizon, PI/2 = zenith, negative = below horizon.
 #![allow(dead_code)]
 use bevy::asset::RenderAssetUsages;
-use bevy::image::Image;
-use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
-use std::f32::consts::{FRAC_PI_2, PI};
+use std::f32::consts::FRAC_PI_2;
 
 fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
     let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
@@ -92,48 +90,30 @@ pub fn sky_color_at(elevation_angle: f32, sun_elevation: f32, sun_angle_delta: f
     [c[0].clamp(0.0, 1.0), c[1].clamp(0.0, 1.0), c[2].clamp(0.0, 1.0)]
 }
 
-/// Baked vertical sky strip for a sky-dome mesh: `size` rows tall, 4 px wide (gradient is vertical only;
-/// 4 px keeps rows tiny while staying wider than a 1-px edge case in any sampler).
-///
-/// UV CONTRACT: matches a Bevy UV-sphere directly. v=0 (top row) = zenith, v=0.5 = horizon, v=1 = nadir. A
-/// hemisphere dome must remap its v into 0..0.5.
-///
-/// Sun-relative terms are deliberately NOT baked (sun frozen at ~35 deg, halo suppressed by sampling 180 deg
-/// away): time of day belongs on the material's base_color tint or on a per-frame rebuild, not in the strip.
-pub fn sky_gradient_texture(size: usize) -> Image {
-    const W: usize = 4;
-    let h = size.max(4);
-    let mut data = vec![0u8; W * h * 4];
-    for y in 0..h {
-        let v = (y as f32 + 0.5) / h as f32;
-        let e = (0.5 - v) * PI; // v=0 -> +PI/2 zenith, v=0.5 -> 0 horizon, v=1 -> -PI/2 nadir
-        let c = sky_color_at(e, 0.61, PI);
-        for x in 0..W {
-            let i = (y * W + x) * 4;
-            data[i] = (c[0] * 255.0) as u8;
-            data[i + 1] = (c[1] * 255.0) as u8;
-            data[i + 2] = (c[2] * 255.0) as u8;
-            data[i + 3] = 255;
-        }
-    }
-    Image::new(
-        Extent3d { width: W as u32, height: h as u32, depth_or_array_layers: 1 },
-        TextureDimension::D2,
-        data,
-        TextureFormat::Rgba8UnormSrgb,
-        RenderAssetUsages::RENDER_WORLD,
-    )
-}
-
 /// Cloud puff color + opacity. `altitude01` = 0 at the puff base, 1 at its crown; `sun_dot` = dot(puff or
 /// lobe normal, sun dir), -1 anti-sun .. 1 sub-solar. Returns sRGB RGBA.
 ///
 /// Alpha is a PROFILE, not a final value: caller multiplies by growth/cover (see `viz::update_clouds`, which
 /// caps at ~0.55).
 pub fn cloud_puff_shading(altitude01: f32, sun_dot: f32) -> [f32; 4] {
-    let a01 = altitude01.clamp(0.0, 1.0);
-    let s = sun_dot.clamp(-1.0, 1.0);
+    let c = cloud_sun_tint(sun_dot);
+    let d = cloud_depth_tint(altitude01);
+    [
+        (c[0] * d[0]).clamp(0.0, 1.0),
+        (c[1] * d[1]).clamp(0.0, 1.0),
+        (c[2] * d[2]).clamp(0.0, 1.0),
+        d[3],
+    ]
+}
 
+/// Blue-grey, not neutral grey: a shaded cloud is lit by the sky dome, and neutral grey is exactly what
+/// makes a puff read as a dirty soap bubble.
+const CLOUD_SHADOW: [f32; 3] = [0.42, 0.47, 0.60];
+
+/// Whole-puff sun response. Split from the altitude profile so a renderer can drive this per frame while
+/// the profile bakes into static vertex colours (see `viz::update_clouds` / `viz::cloud_puff_mesh`).
+pub fn cloud_sun_tint(sun_dot: f32) -> [f32; 3] {
+    let s = sun_dot.clamp(-1.0, 1.0);
     // Terminator sits past the geometric one (-0.35, not 0): clouds forward-scatter light around into their
     // own shadow side, so a hard N.L cut reads as a lit rock, not a cloud.
     let lit = smoothstep(-0.35, 0.45, s);
@@ -142,31 +122,37 @@ pub fn cloud_puff_shading(altitude01: f32, sun_dot: f32) -> [f32; 4] {
 
     const SUN_WHITE: [f32; 3] = [1.0, 0.985, 0.955];
     const WARM: [f32; 3] = [1.0, 0.88, 0.72];
-    // Blue-grey, not neutral grey: a shaded cloud is lit by the sky dome, and neutral grey is exactly what
-    // made the old puffs read as dirty soap bubbles.
-    const SHADOW: [f32; 3] = [0.42, 0.47, 0.60];
 
-    let mut c = mix3(SHADOW, SUN_WHITE, lit);
+    let c = mix3(CLOUD_SHADOW, SUN_WHITE, lit);
     // 0.7 not 0.45: the blue-grey base is cold enough that a weaker warm mix leaves the grazing rim reading
     // neutral instead of golden.
-    c = mix3(c, WARM, graze * 0.7 * lit);
+    mix3(c, WARM, graze * 0.7 * lit)
+}
 
-    // Optical depth: the base sees light only after it crossed the whole cloud -> darker AND bluer. Crown
-    // keeps full value. Two terms because a plain multiply desaturates toward black instead of toward sky.
-    let depth = 1.0 - a01;
-    c = mix3(c, SHADOW, 0.35 * depth);
+/// Optical-depth profile down a puff, as an RGB MULTIPLIER plus an alpha. `altitude01` = 0 at the base, 1 at
+/// the crown. Multiplier form (rather than a mix toward shadow) is what lets it live in vertex colours; the
+/// blue-preserving ratio below keeps the base going bluer instead of merely darker.
+pub fn cloud_depth_tint(altitude01: f32) -> [f32; 4] {
+    let depth = 1.0 - altitude01.clamp(0.0, 1.0);
+    // 0.35 toward CLOUD_SHADOW expressed against a ~white lit cloud, times a flat 0.18 dim.
+    let mix = 0.35 * depth;
     let dim = 1.0 - 0.18 * depth;
-    let c = [c[0] * dim, c[1] * dim, c[2] * dim];
-
-    // Solid base, wispy crown: the silhouette edge is where a cloud stops looking like a balloon.
-    let alpha = 0.95 - 0.50 * a01;
-
-    [c[0].clamp(0.0, 1.0), c[1].clamp(0.0, 1.0), c[2].clamp(0.0, 1.0), alpha.clamp(0.0, 1.0)]
+    let ratio = [0.420, 0.477, 0.628]; // CLOUD_SHADOW / SUN_WHITE
+    // Solid base, slightly thinner crown. Narrow range on purpose: these lobes OVERLAP, and anything much
+    // below opaque makes every intersection ring visible, so the puff reads as a stack of circles.
+    let alpha = 1.0 - 0.22 * altitude01.clamp(0.0, 1.0);
+    [
+        (1.0 - mix + mix * ratio[0]) * dim,
+        (1.0 - mix + mix * ratio[1]) * dim,
+        (1.0 - mix + mix * ratio[2]) * dim,
+        alpha,
+    ]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::f32::consts::PI;
 
     #[test]
     fn horizon_is_paler_than_zenith_by_day() {
@@ -201,24 +187,6 @@ mod tests {
         let b = sky_color_at(-0.4, 0.8, PI);
         let sum = |c: [f32; 3]| c[0] + c[1] + c[2];
         assert!(sum(b) < sum(a), "under-horizon must fade: {b:?} vs {a:?}");
-    }
-
-    #[test]
-    fn gradient_texture_is_well_formed_and_darkens_downward() {
-        let img = sky_gradient_texture(128);
-        let sz = img.texture_descriptor.size;
-        assert_eq!((sz.width, sz.height), (4, 128));
-        assert_eq!(img.data.as_ref().map(|d| d.len()), Some(4 * 128 * 4));
-        let d = img.data.as_ref().unwrap();
-        let row = |y: usize| {
-            let i = y * 4 * 4;
-            (d[i] as u32, d[i + 1] as u32, d[i + 2] as u32)
-        };
-        let zen = row(0);
-        let hor = row(63); // v ~ 0.5
-        let nadir = row(127);
-        assert!(hor.0 > zen.0, "horizon row should be paler than zenith");
-        assert!(nadir.2 < hor.2, "below-horizon rows should darken");
     }
 
     #[test]
