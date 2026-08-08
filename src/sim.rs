@@ -3286,7 +3286,7 @@ pub fn live_step(
         // death-spiral (constant loneliness drain on a spread-out pop feeds back to extinction; this self-limits).
         if genome.social > 0.0 {
             let kinf = kin_fraction(entity, np, &signature(genome), &cre_snap);
-            let density = (pop_start as f32 / CREATURE_CAP as f32).min(1.0);
+            let density = (pop_start as f32 / SOCIAL_DENSITY_REF).min(1.0);
             energy.burn(SOCIAL_COST * genome.social * (1.0 - kinf) * density * dt);
         }
 
@@ -3934,8 +3934,11 @@ pub fn generation_step(
             let avg_qual: f32 = pq.iter().map(|(g, _)| g.quality).sum::<f32>() / plant_n as f32;
             let avg_wet: f32 = pq.iter().map(|(g, _)| g.wet).sum::<f32>() / plant_n as f32;
             info!(
-                "t {:>6} | pop {:>3} | energy {:.1} [f{:.1}/s{:.1}/F{:.1}] adp {:.2} | mast {:.2} brd {:.1} | life-fit {:.1} | age {:.0} | sens {:.1} | bite {:.2} | rig {:.2} | temp {:.2} lng {:.2} met {:.2} endo {:.2}[c{:.2}/{} t{:.2}/{} w{:.2}/{}] par {:.2} lat {:.2} | swim {:.2} alp {:.2} aq {} hi {} | def {:.2} nut {:.2} qual {:.2} wet {:.2} | plants {} | soil {:.2} | rain {:.2} fire {:.3} | wear {:.3} bare {} | CHEM {} | {}",
-                gen.tick, pop, e / n, fa / n, su / n, ft / n, adp / n, mast / n, brd / n, f / n, age / n, sens / n, bite / n, rig / n, temp / n, lng / n, met / n, endo / n,
+                "t {:>6} | pop {:>3} | kg {:.3} | energy {:.1} [f{:.1}/s{:.1}/F{:.1}] adp {:.2} | mast {:.2} brd {:.1} | life-fit {:.1} | age {:.0} | sens {:.1} | bite {:.2} | rig {:.2} | temp {:.2} lng {:.2} met {:.2} endo {:.2}[c{:.2}/{} t{:.2}/{} w{:.2}/{}] par {:.2} lat {:.2} | swim {:.2} alp {:.2} aq {} hi {} | def {:.2} nut {:.2} qual {:.2} wet {:.2} | plants {} | soil {:.2} | rain {:.2} fire {:.3} | wear {:.3} bare {} | CHEM {} | {}",
+                // MEAN BODY MASS in real kg, not the size GENE. The two diverged ~87x unnoticed because only
+                // the gene was ever logged, and every Kleiber/thermoregulation term keys off the kg.
+                gen.tick, pop, cont_fauna_kg / pop.max(1) as f64,
+                e / n, fa / n, su / n, ft / n, adp / n, mast / n, brd / n, f / n, age / n, sens / n, bite / n, rig / n, temp / n, lng / n, met / n, endo / n,
                 endo_c / nc.max(1) as f32, nc, endo_t / nt.max(1) as f32, nt, endo_w / nw.max(1) as f32, nw,
                 par / n, abslat / n, sw / n, alp / n, aq, hi, avg_def, avg_nut, avg_qual, avg_wet, plant_n, fields.soil.avg(), fields.weather.rain, fields.fire.avg(), fields.wear.avg(), fields.wear.cell.iter().filter(|&&w| w > WEAR_GRASS_CULL).count(),
                 fields.bio.report(

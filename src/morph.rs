@@ -952,3 +952,51 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod drift_probe {
+    // DIAGNOSTIC, not a gate: run with `cargo test drift -- --ignored --nocapture`.
+    //
+    // Mutation with NO selection at all. An unselected operator should leave trait means where it found
+    // them; anything that moves is the operator talking, not ecology. As of writing this reports mean body
+    // mass falling ~30% over 40 generations, driven by DEVELOPED part count dropping (6.25 -> 5.30) while
+    // graph node count RISES (3.48 -> 4.98). So structural mutation is adding nodes that never develop and
+    // detaching subtrees that used to, i.e. bodies quietly lose limbs on their own. Widening the taper/scale
+    // clamps was tried and is NOT the cause (mass moved 1.36 -> 1.43, trait means barely budged).
+    //
+    // Matters because every Kleiber and thermoregulation term keys off body kg, so a mass the operator
+    // invented is a metabolism the world never chose.
+    #[test]
+    #[ignore]
+    fn neutral_mutation_should_not_move_body_mass() {
+        let mut rng = crate::rng::Rng::seed(11);
+        let mut pop: Vec<crate::genome::Genome> = (0..60).map(|_| crate::genome::Genome::random(&mut rng)).collect();
+        for gen in 0..=40 {
+            if gen % 8 == 0 {
+                let n = pop.len() as f32;
+                let mass: f32 = pop.iter().map(|g| super::Morphometrics::of(&g.body).mass).sum::<f32>() / n;
+                let nodes: f32 = pop.iter().map(|g| g.body.nodes.len() as f32).sum::<f32>() / n;
+                let parts: f32 = pop.iter().map(|g| super::develop(&g.body).parts.len() as f32).sum::<f32>() / n;
+                let (mut len, mut rad, mut tap, mut cnt) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+                for g in pop.iter() {
+                    for nd in &g.body.nodes {
+                        len += nd.length;
+                        rad += nd.radius;
+                        tap += nd.taper;
+                        cnt += 1.0;
+                    }
+                }
+                println!(
+                    "gen {gen:>3}: mass {mass:.4} ({:.3} kg) | nodes {nodes:.2} parts {parts:.2} | len {:.3} rad {:.3} taper {:.3}",
+                    crate::chem::creature_mass_kg(mass),
+                    len / cnt,
+                    rad / cnt,
+                    tap / cnt
+                );
+            }
+            for g in pop.iter_mut() {
+                g.mutate(&mut rng, crate::config::MUT_RATE, crate::config::MUT_STD);
+            }
+        }
+    }
+}

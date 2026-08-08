@@ -38,14 +38,15 @@ pub const REPRO_COST: f32 = 16.0; // energy parent spends per child (parent stay
 pub const BIRTH_ENERGY: f32 = 28.0; // offspring start energy: buffer so newborns establish before starving (raised: newborn die-off was R<1 driver pinning pop at floor)
 pub const P_REPRO_CREATURE: f32 = 0.025; // per-tick repro chance while eligible (x density taper)
 pub const REPRO_MIN_AGE: u32 = 180; // min ticks of life before breeding (newborns establish first; paces waves)
-pub const CREATURE_CAP: usize = 2000; // global pop SAFETY ceiling (raised 1100->2000). Intent: food/ecology is the real limiter (settles ~1100-1500), cap only catches runaway. Headless-only benefit; windowed viz draws every creature so high density costs FPS.
+pub const CREATURE_CAP: usize = 5000; // global pop SAFETY ceiling. Conserved chemistry is meant to be the real limiter, so a pop sitting EXACTLY on this number means the cap binds and the measurement is meaningless (same rule as PLANT_CAP). Raised 2000->5000 after diurnal temperature made the world productive enough to pin. Windowed viz draws every creature so high density costs FPS.
+pub const SOCIAL_DENSITY_REF: f32 = 2000.0; // pop that counts as "crowded" for the loneliness drain. Split from CREATURE_CAP so raising a SAFETY ceiling can't silently retune sociality.
 // Per-niche carrying capacity (repro tapers on the breeder's OWN niche fill, not global pop) -> each habitat
 // fills independently so no single niche soaks the shared cap (was winner-take-all: one niche -> ~83% planet,
 // which one is seed-stochastic). Order = Niche::idx [aquatic,aerial,highland,cold,warm,land]. Aquatic biggest
 // (ocean ~half planet) but ~30% not 83%. Scaled ~7x from [45,15,16,18,22,36] for the ~1000-pop world; ratios
-// preserved so habitat balance holds. Scaled with CREATURE_CAP (x1.82, 1100->2000): sum (~1935) sits just
-// UNDER the 2000 global cap so both are SAFETY ceilings above the natural food-limited equilibrium (~1100-1500).
-pub const NICHE_CAP: [usize; 6] = [573, 191, 204, 229, 280, 458];
+// preserved across every rescale so habitat balance holds. Scaled with CREATURE_CAP (x2.5, 2000->5000): sum
+// (~4839) sits just UNDER the global cap, both SAFETY ceilings the element budget should stay below on its own.
+pub const NICHE_CAP: [usize; 6] = [1433, 478, 510, 573, 700, 1145];
 pub const WARMUP_GENS: u32 = 12; // generational warm-up before continuous birth/death kicks in
 pub const CONT_LOG_TICKS: u32 = 600; // continuous-mode stats log interval (fine enough to watch a crash unfold)
 
