@@ -2166,8 +2166,14 @@ pub fn plant_step(
                 // grazed this tick? apply recorded mass damage; over-eaten below TREE_MIN_MASS -> dies.
                 let grazed = bites_r.0.contains_key(&e);
                 if grazed {
-                    st.mass = (st.mass - bites_r.0[&e]).max(0.0);
-                    out.consumed.push((idx, ppos, bites_r.0[&e]));
+                    // report what was ACTUALLY removed, not what was bitten. bites_r sums every creature that
+                    // fed on this tree in the tick, so the total routinely exceeds the tree's remaining mass;
+                    // the subtraction clamps at zero but the excess was still being excreted into the soil as
+                    // phosphorus that never existed. Capture before subtracting: reading st.mass afterwards
+                    // gives the clamped value and reintroduces the same bug.
+                    let removed = bites_r.0[&e].min(st.mass);
+                    st.mass -= removed;
+                    out.consumed.push((idx, ppos, removed));
                     if st.mass < TREE_MIN_MASS {
                         out.litter.push((idx, ppos, st.mass));
                         out.despawns.push((idx, e, false, Some("eaten")));
@@ -2234,8 +2240,12 @@ pub fn plant_step(
             // --- regular plant ---
             // grazing from live_step: eaten below PLANT_MIN_MASS = consumed -> gone; high-regrow bush survives.
             if let Some(&bite) = bites_r.0.get(&e) {
-                st.mass = (st.mass - bite).max(0.0);
-                out.consumed.push((idx, ppos, bite.min(st.mass + bite)));
+                // same clamp trap as the tree branch above: st.mass here is already the POST-subtraction
+                // value, so `bite.min(st.mass + bite)` reconstructs the full bite rather than the part that
+                // existed. Take the minimum against the mass the plant actually had.
+                let removed = bite.min(st.mass);
+                st.mass -= removed;
+                out.consumed.push((idx, ppos, removed));
                 if st.mass < PLANT_MIN_MASS {
                     out.litter.push((idx, ppos, st.mass)); // the uneaten remainder rots where it stood
                     out.despawns.push((idx, e, true, Some("eaten")));
@@ -3867,13 +3877,14 @@ pub fn generation_step(
             let avg_qual: f32 = pq.iter().map(|(g, _)| g.quality).sum::<f32>() / plant_n as f32;
             let avg_wet: f32 = pq.iter().map(|(g, _)| g.wet).sum::<f32>() / plant_n as f32;
             info!(
-                "t {:>6} | pop {:>3} | energy {:.1} [f{:.1}/s{:.1}/F{:.1}] adp {:.2} | mast {:.2} brd {:.1} | life-fit {:.1} | age {:.0} | sens {:.1} | bite {:.2} | rig {:.2} | temp {:.2} lng {:.2} met {:.2} par {:.2} lat {:.2} | swim {:.2} alp {:.2} aq {} hi {} | def {:.2} nut {:.2} qual {:.2} wet {:.2} | plants {} | soil {:.2} | rain {:.2} fire {:.3} | wear {:.3} bare {} | CHEM {}",
+                "t {:>6} | pop {:>3} | energy {:.1} [f{:.1}/s{:.1}/F{:.1}] adp {:.2} | mast {:.2} brd {:.1} | life-fit {:.1} | age {:.0} | sens {:.1} | bite {:.2} | rig {:.2} | temp {:.2} lng {:.2} met {:.2} par {:.2} lat {:.2} | swim {:.2} alp {:.2} aq {} hi {} | def {:.2} nut {:.2} qual {:.2} wet {:.2} | plants {} | soil {:.2} | rain {:.2} fire {:.3} | wear {:.3} bare {} | CHEM {} | {}",
                 gen.tick, pop, e / n, fa / n, su / n, ft / n, adp / n, mast / n, brd / n, f / n, age / n, sens / n, bite / n, rig / n, temp / n, lng / n, met / n, par / n, abslat / n, sw / n, alp / n, aq, hi, avg_def, avg_nut, avg_qual, avg_wet, plant_n, fields.soil.avg(), fields.weather.rain, fields.fire.avg(), fields.wear.avg(), fields.wear.cell.iter().filter(|&&w| w > WEAR_GRASS_CULL).count(),
                 fields.bio.report(
                     pf.iter().fold(crate::chem::Elements::ZERO, |t, (g, st, ..)| t + tissue_comp(g) * st.mass as f64)
                         + crate::chem::ANIMAL_COMP * cont_fauna_kg,
                     cont_fauna_kg,
-                )
+                ),
+                fields.bio.p_breakdown()
             );
             // Track best healthy snapshot for --save. Score = pop, gated on well-fed (avg energy >= 30) so we never
             // bank a starving crowd. Captured only when saving (snapshot clone not free).

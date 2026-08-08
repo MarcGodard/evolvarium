@@ -417,6 +417,19 @@ impl Biosphere {
         Elements::new(rel(now.c, base.c), rel(now.n, base.n), rel(now.p, base.p))
     }
 
+    /// Per-reservoir phosphorus, kg. Diagnostic: every Biosphere op is a neutral transfer and unit-tested as
+    /// such, so a rising P total means either a caller adds entity mass without drawing, or one reservoir is
+    /// growing at another's expense in a way the transfers do not explain. Printing the split says WHICH,
+    /// which reasoning about the call graph twice failed to.
+    pub fn p_breakdown(&self) -> String {
+        let mineral: f64 = self.soil.iter().map(|c| c.mineral.p).sum();
+        let organic: f64 = self.soil.iter().map(|c| c.organic.p).sum();
+        format!(
+            "P rock {:.0} min {:.1} org {:.1} buried {:.1} fauna {:.3} rescue {:.1}",
+            self.rock.p, mineral, organic, self.buried.p, self.fauna_pool.p, self.rescue_minted.p
+        )
+    }
+
     /// One-line ledger for the balance logs: what the world holds, what binds it, and whether it leaks.
     /// `living` is biomass held outside the reservoirs (plants, creatures, carrion).
     pub fn report(&self, living: Elements, fauna_kg: f64) -> String {
