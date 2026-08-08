@@ -12,6 +12,7 @@
 #![allow(clippy::too_many_arguments, clippy::type_complexity)]
 mod audio;
 mod camera;
+mod chem;
 mod components;
 mod config;
 mod cppn;

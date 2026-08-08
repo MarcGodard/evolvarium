@@ -4,3 +4,6 @@ seed-new.json
 gait-best.json
 gymseed.json
 creature-seed.json
+# full-world co-evolution snapshots: 60MB+ each, regenerable via --save
+evolved-legged.json
+evolved-diversity-coevo.json

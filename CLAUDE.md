@@ -10,18 +10,26 @@ A 3D artificial-life sim on a small **planet** (Rust + Bevy 0.18). Tiny per-crea
 algorithm + lifetime learning evolve them against a living, co-evolving food web on a sphere with day/night,
 clouds, rain, wildfire, oceans, mountains, and cold-pole/warm-equator climate.
 
-## Current phase: VISUALS FIRST, balance later
+## Current phase: FUNDAMENTALS RETROFIT (chemistry + physics)
 
-We are in a **visuals-first** phase: polish how the world looks and feels (clouds, weather, lighting,
-terrain, creatures, effects) before tuning the simulation. Until this note is removed:
+Replacing the phenomenological model with conserved chemistry + real physical law. Plan:
+`~/.claude/plans/steady-wishing-swan.md`. Roadmap: fundamentals -> living ocean -> parasites.
 
-- **Do NOT gate visual work on population balance.** Skip the headless balance / carrying-capacity sanity
-  runs for render-only changes. Build + a `--gens=1` smoke (so it compiles + boots) is enough.
-- Population balancing and creature/genome improvements come in a **later phase**. Don't divert into balance
-  tuning mid-visual-task unless explicitly asked.
-- Still keep the tree green (`cargo build` + `cargo test`), still write honest commits.
-- This overrides the "verify population stays stable before committing" guidance below for as long as the
-  visuals phase is active.
+**Organizing principle: matter is closed, energy flows through.** A real biosphere conserves its C/N/P
+(geology only moves it between reservoirs on slow clocks) and does NOT conserve energy: it intercepts
+sunlight and radiates infrared. Encode that asymmetry; everything else follows.
+
+Until this note is removed:
+
+- **Balance runs are back ON.** The whole point is that equilibria now emerge from conservation instead of
+  tuned caps, so a change that moves the equilibrium needs a headless run showing it REACHES one and holds.
+  It need not match the old numbers, which this phase deliberately invalidates.
+- **Conservation is the phase gate.** Any change touching matter carries a unit test asserting the world's
+  element totals hold across ticks. A new path that creates or destroys matter is a bug, not a tuning knob.
+- **Prefer deleting a constant over adding one.** Each phase replaces invented constants with actual law
+  (Kleiber, Liebig, Archimedes, Stefan-Boltzmann). A new magic number needs a reason it isn't derivable.
+- Baseline for comparison: `--gens=5` on seeds 1/5/9, captured before the retrofit began.
+- The old visuals-first phase is over; render-only work no longer skips balance verification.
 
 ## Commit & push policy (this project)
 
