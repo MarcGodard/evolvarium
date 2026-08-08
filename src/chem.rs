@@ -149,10 +149,30 @@ pub const SOIL_MIN_P_PER_M2: f64 = 0.005;
 /// and burial to deep sediment is a real sink. That asymmetry is why P is the classic long-run limiter.
 pub const ROCK_P_PER_M2: f64 = 2.0;
 
-/// Composition of plant tissue. Constant for now; a stoichiometry gene (N-rich fast-growing leaf vs C-rich
-/// woody tissue) is the natural next lever once the closed loop is verified stable.
-pub fn plant_comp() -> Elements {
-    PLANT_COMP
+// --- biological tempo: the one place the time-lapse lives ---
+// The sim runs TWO clocks and they genuinely disagree, so the disagreement is confined here rather than
+// smeared across every rate constant.
+//   Astronomical clock: DAY_TICKS(2400) * DT(1/60) = 40 s of step time per calendar day, vs 86400 real.
+//   Biological clock: AGE_SCALE makes a creature live ~2400 ticks = 1 calendar day, vs ~1.5 years real.
+// Feeding literal Earth rates into that would grow nothing inside a lifetime and starve the food web. The
+// compression is FORCED, not sloppy: a realistic lifespan is ~1.2M ticks, about 69 min of wall clock per
+// creature, far too slow to watch evolution happen.
+//
+// Resolution: make real what can be real (stoichiometry, conservation, limiting laws, standing STOCKS) and
+// express every biotic RATE as a real per-day figure scaled by this single factor. Because all biotic rates
+// carry the SAME factor, their ratios to each other stay physically real, and the ratios are what generate
+// the emergent behavior: peat vs tropical turnover is the litterfall-to-decomposition ratio, not either
+// rate alone. Change this to retime the whole biosphere coherently; never retune one rate against another.
+//
+// At 2000: one tick advances biology ~0.83 real days, so a 2400-tick life spans ~5.5 real years (a plausible
+// small-mammal lifespan) and a cell's standing vegetation regrows in ~400 ticks (~330 real days, about the
+// real annual turnover of grassland). Both land in real ranges, which is the check that this factor is sane.
+pub const BIO_ACCEL: f64 = 2000.0;
+
+/// Real biological days advanced by one sim tick. All biotic rates are quoted per real day and multiplied
+/// by this, so a rate constant can be checked directly against a literature value.
+pub fn bio_days_per_tick() -> f64 {
+    BIO_ACCEL / crate::sphere::DAY_TICKS as f64
 }
 
 // --- decomposition: bacteria + fungi as a rate law, not entities ---
@@ -165,8 +185,10 @@ pub fn plant_comp() -> Elements {
 // organic matter accumulates (peat, tundra carbon lock-up); where warm and wet, turnover is near-instant so
 // soil reads nutrient-POOR despite lush growth, because the budget is all held in living biomass. That is
 // tropical soil, and it falls out of two rate terms.
-/// Base first-order decay of soil organic matter, per second at reference temperature and optimal moisture.
-pub const DECOMP_K: f64 = 2.0e-5;
+/// Base first-order decay of soil organic matter, per REAL DAY at reference temperature and optimal
+/// moisture. Real bulk soil organic matter turns over on a ~1-3 year scale (fast litter pools are ~0.02/day,
+/// stabilized humus ~1e-4/day); 0.002/day sits between them at a ~500-day bulk turnover.
+pub const DECOMP_K_PER_DAY: f64 = 0.002;
 /// Q10 = 2.0: respiration doubles per 10 K, the standard soil value.
 pub const DECOMP_Q10: f64 = 2.0;
 /// Reference temperature for Q10, in the sim's 0..1 temperature field (see `sphere::base_temperature`).
@@ -190,11 +212,27 @@ pub fn decomp_moisture_factor(moist01: f64) -> f64 {
     (f * 1.04).clamp(0.0, 1.0)
 }
 
-/// Fraction of an organic pool mineralized this step, given local temperature, moisture, and `dt` seconds.
+/// Fraction of an organic pool mineralized over `days` real days, given local temperature and moisture.
 /// Bounded below 1 so a cell can never mineralize more than it holds.
-pub fn decomp_fraction(temp01: f64, moist01: f64, dt: f64) -> f64 {
-    (DECOMP_K * decomp_temp_factor(temp01) * decomp_moisture_factor(moist01) * dt).clamp(0.0, 1.0)
+pub fn decomp_fraction(temp01: f64, moist01: f64, days: f64) -> f64 {
+    (DECOMP_K_PER_DAY * decomp_temp_factor(temp01) * decomp_moisture_factor(moist01) * days).clamp(0.0, 1.0)
 }
+
+// --- other biotic and geological rates, all quoted per REAL DAY so they are checkable ---
+/// Net primary production ceiling per m^2 per real day. Real temperate grassland is ~0.7 kg dry/m^2/yr.
+/// This is a CEILING on demand, not a guarantee: Liebig still decides what actually gets built.
+pub const NPP_PER_M2_DAY: f64 = 0.002;
+/// Biological N fixation by a full legume, kg N per m^2 per real day. Real rhizobial systems run
+/// ~200-300 kg N/ha/yr, which is ~6-8e-5 kg/m^2/day.
+pub const NFIX_PER_M2_DAY: f64 = 8.0e-5;
+/// Phosphorus released by rock weathering, kg P per m^2 per real day. Genuinely tiny: real continental
+/// weathering is on the order of 1e-7, which is exactly why P accumulates slowly and limits over long runs.
+pub const WEATHER_P_PER_M2_DAY: f64 = 2.0e-7;
+/// Fraction of a cell's organic pool buried to deep sediment per real day. Only meaningful underwater.
+pub const BURY_FRAC_PER_DAY: f64 = 1.0e-6;
+/// Fraction of buried sediment returned by uplift and volcanism per real day. Slower than burial, so
+/// sediment is a real net sink on ecological timescales while still not a permanent trap.
+pub const UPLIFT_FRAC_PER_DAY: f64 = 2.0e-7;
 
 // --- the world's reservoirs ---
 
@@ -226,6 +264,10 @@ pub struct Biosphere {
     pub buried: Elements,
     /// Unweathered crust. Only tap for phosphorus, since P cannot come from the air.
     pub rock: Elements,
+    /// Non-living total at world creation, kept so `drift_ppm` can report leakage as a live number rather
+    /// than only in tests. Once living biomass is element-backed, pass it to `drift_ppm` and this becomes
+    /// the single honest answer to "is the world still conserving".
+    pub initial_total: Elements,
 }
 
 /// Surface area of one soil cell, m^2. The grid tiles the sphere, so this is total area over cell count.
@@ -245,12 +287,46 @@ impl Biosphere {
             organic: Elements::new(org_c, org_c / SOIL_CN_RATIO, org_c / SOIL_CP_RATIO),
         };
         let total_area = a * n as f64;
-        Biosphere {
+        let mut b = Biosphere {
             soil: vec![cell; n],
             air: Elements::new(AIR_C_PER_M2 * total_area, AIR_N_PER_M2 * total_area, 0.0),
             buried: Elements::ZERO,
             rock: Elements::new(0.0, 0.0, ROCK_P_PER_M2 * total_area),
-        }
+            initial_total: Elements::ZERO,
+        };
+        b.initial_total = b.total();
+        b
+    }
+
+    /// Leakage since creation, parts per million per element, given the `living` biomass currently held
+    /// outside these reservoirs. Must stay at 0; anything else means a path is creating or destroying matter.
+    pub fn drift_ppm(&self, living: Elements) -> Elements {
+        let now = self.total() + living;
+        let base = self.initial_total;
+        let rel = |a: f64, b: f64| if b.abs() > 0.0 { (a - b) / b * 1.0e6 } else { 0.0 };
+        Elements::new(rel(now.c, base.c), rel(now.n, base.n), rel(now.p, base.p))
+    }
+
+    /// One-line ledger for the balance logs: what the world holds, what binds it, and whether it leaks.
+    /// `living` is biomass held outside the reservoirs (plants, creatures, carrion).
+    pub fn report(&self, living: Elements) -> String {
+        let a = cell_area();
+        let n_cells = self.soil.len() as f64;
+        let mineral: Elements = self.soil.iter().fold(Elements::ZERO, |t, c| t + c.mineral);
+        let organic: Elements = self.soil.iter().fold(Elements::ZERO, |t, c| t + c.organic);
+        // per-m^2 figures are the checkable ones: they compare directly against literature values
+        let org_c_m2 = organic.c / (n_cells * a);
+        let min_n_m2 = mineral.n / (n_cells * a);
+        let avail = Elements::new(self.air.c, mineral.n / n_cells, mineral.p / n_cells);
+        let drift = self.drift_ppm(living);
+        format!(
+            "orgC {org_c_m2:.2} minN {min_n_m2:.4} kg/m2 | lim {} | buried {:.1} | drift C{:+.3} N{:+.3} P{:+.3} ppm",
+            avail.limiting(PLANT_COMP).label(),
+            self.buried.total(),
+            drift.c,
+            drift.n,
+            drift.p
+        )
     }
 
     /// All non-living matter. Pair with living biomass for the full ledger.
@@ -441,11 +517,11 @@ mod tests {
 
     #[test]
     fn decomposition_stalls_when_frozen_or_bone_dry() {
-        let dt = 1.0;
-        let warm_moist = decomp_fraction(0.8, 0.6, dt);
-        let cold_moist = decomp_fraction(0.05, 0.6, dt);
-        let warm_dry = decomp_fraction(0.8, 0.0, dt);
-        let warm_drowned = decomp_fraction(0.8, 1.0, dt);
+        let days = 1.0;
+        let warm_moist = decomp_fraction(0.8, 0.6, days);
+        let cold_moist = decomp_fraction(0.05, 0.6, days);
+        let warm_dry = decomp_fraction(0.8, 0.0, days);
+        let warm_drowned = decomp_fraction(0.8, 1.0, days);
         assert!(cold_moist < warm_moist * 0.2, "cold soil must bank litter (tundra), got {cold_moist} vs {warm_moist}");
         assert_eq!(warm_dry, 0.0, "bone-dry soil has no microbial activity");
         assert_eq!(warm_drowned, 0.0, "waterlogged soil goes anaerobic and banks peat");
@@ -487,7 +563,7 @@ mod tests {
         assert_conserved(start, b.total(), "death");
 
         for _ in 0..500 {
-            b.decompose(7, 0.7, 0.6, 1.0);
+            b.decompose(7, 0.7, 0.6, 20.0);
         }
         assert_conserved(start, b.total(), "decay");
     }
@@ -581,7 +657,7 @@ mod tests {
             let start_org = b.soil[0].organic.c;
             for _ in 0..2000 {
                 b.deposit_litter(0, 0.01, PLANT_COMP);
-                b.decompose(0, temp, 0.6, 1.0);
+                b.decompose(0, temp, 0.6, 5.0);
             }
             b.soil[0].organic.c - start_org
         };

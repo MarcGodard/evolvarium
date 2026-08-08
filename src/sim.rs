@@ -93,6 +93,58 @@ impl Soil {
     }
 }
 
+// Biogeochemistry: microbial turnover of soil organic matter plus the slow geological cycle, swept over the
+// whole SOIL_RES grid. Conserving by construction, since every operation is a reservoir-to-reservoir
+// transfer in chem.rs; `matter_ledger` asserts it at runtime and a unit test pins it.
+// Ordered AFTER weather_step so groundwater already carries this tick's rain: decomposition is
+// moisture-gated, and rain is what wakes a dry cell's microbes up.
+// Cost is 1024 cells/tick of scalar math, well under any other step.
+pub fn biogeochem_step(mut bio: ResMut<crate::chem::Biosphere>, gw: Res<GroundWater>) {
+    let days = crate::chem::bio_days_per_tick();
+    let area = crate::chem::cell_area();
+    for c in 0..bio.soil.len() {
+        let d = cell_center(c).normalize_or_zero();
+        // GroundWater shares the SOIL_RES layout, so cell index maps straight across
+        let water = gw.cell[c];
+        let moist = (crate::sphere::moisture(d) + WET_GAIN * water).clamp(0.0, 1.0) as f64;
+        let temp = crate::sphere::base_temperature(d) as f64;
+        bio.decompose(c, temp, moist, days);
+        if crate::sphere::is_ocean(d) {
+            bio.bury(c, crate::chem::BURY_FRAC_PER_DAY * days); // sinking particulate leaves the active system
+        } else {
+            // weathering needs exposed rock AND water to act, so bare wet peaks release P fastest and a dry
+            // interior barely does. This is the only tap for phosphorus anywhere in the world.
+            let exposure = 0.2 + 0.8 * crate::sphere::rockiness(d) as f64;
+            bio.weather(c, crate::chem::WEATHER_P_PER_M2_DAY * days * area * exposure * (0.3 + 0.7 * moist));
+        }
+    }
+    bio.uplift(crate::chem::UPLIFT_FRAC_PER_DAY * days);
+}
+
+// The world's field grids as one system param. Exists because generation_step hit Bevy's 16-param ceiling:
+// bundling the read-only grids buys headroom and keeps the signature legible. Add new grids HERE rather than
+// as another bare Res, or the next addition breaks the same ceiling again.
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct FieldGrids<'w> {
+    pub soil: Res<'w, Soil>,
+    pub gw: Res<'w, GroundWater>,
+    pub climate: Res<'w, Climate>,
+    pub fire: Res<'w, Fire>,
+    pub wear: Res<'w, Wear>,
+    pub weather: Res<'w, Weather>,
+    pub bio: Res<'w, crate::chem::Biosphere>,
+}
+
+// Element content of the LIVING flora, the biomass held outside the Biosphere reservoirs. Pair with
+// `Biosphere::total()` for the world ledger: the sum of the two is what must stay constant.
+// Incomplete on purpose right now: plant growth still runs the old unconserved path and creature bodies are
+// not element-backed until Phase 2, so the reported drift is expected to be nonzero and is exactly the
+// measurement this function exists to surface.
+pub fn living_matter(pq: &Query<(&PlantGenome, &PlantState), (Without<Rot>, Without<Grass>)>) -> crate::chem::Elements {
+    let mass: f64 = pq.iter().map(|(_, st)| st.mass as f64).sum();
+    crate::chem::PLANT_COMP * mass
+}
+
 // Mass stripped per fruit tree this tick. live_step records, plant_step applies. Trees persist + regrow;
 // die only when grazed below TREE_MIN_MASS (over-eaten).
 #[derive(Resource, Default)]
@@ -3514,12 +3566,7 @@ pub fn generation_step(
     // full plant-class query for the world snapshot: living plants + trees + carrion + ferment + fruit, with
     // positions + markers. Grass/seaweed carpets excluded (regenerated on load). Without<Creature> -> disjoint from cq.
     pf: Query<(&PlantGenome, &PlantState, &Transform, Option<&Tree>, Option<&Rot>, Option<&Ferment>, Option<&Seed>), (Without<Grass>, Without<Seaweed>, Without<Creature>)>,
-    soil: Res<Soil>,
-    gw: Res<GroundWater>,
-    climate: Res<Climate>,
-    fire: Res<Fire>,
-    wear: Res<Wear>,
-    weather: Res<Weather>,
+    fields: FieldGrids,
     bank: Res<SeedBank>,
     mut exit: MessageWriter<AppExit>,
     niche: Res<crate::niche::NicheTracker>, // --until-sustain stop: all niches quiet for a full window
@@ -3595,7 +3642,7 @@ pub fn generation_step(
             let avg_wet: f32 = pq.iter().map(|(g, _)| g.wet).sum::<f32>() / plant_n as f32;
             info!(
                 "t {:>6} | pop {:>3} | energy {:.1} [f{:.1}/s{:.1}/F{:.1}] adp {:.2} | mast {:.2} brd {:.1} | life-fit {:.1} | age {:.0} | sens {:.1} | bite {:.2} | rig {:.2} | temp {:.2} lng {:.2} met {:.2} par {:.2} lat {:.2} | swim {:.2} alp {:.2} aq {} hi {} | def {:.2} nut {:.2} qual {:.2} wet {:.2} | plants {} | soil {:.2} | rain {:.2} fire {:.3} | wear {:.3} bare {}",
-                gen.tick, pop, e / n, fa / n, su / n, ft / n, adp / n, mast / n, brd / n, f / n, age / n, sens / n, bite / n, rig / n, temp / n, lng / n, met / n, par / n, abslat / n, sw / n, alp / n, aq, hi, avg_def, avg_nut, avg_qual, avg_wet, plant_n, soil.avg(), weather.rain, fire.avg(), wear.avg(), wear.cell.iter().filter(|&&w| w > WEAR_GRASS_CULL).count()
+                gen.tick, pop, e / n, fa / n, su / n, ft / n, adp / n, mast / n, brd / n, f / n, age / n, sens / n, bite / n, rig / n, temp / n, lng / n, met / n, par / n, abslat / n, sw / n, alp / n, aq, hi, avg_def, avg_nut, avg_qual, avg_wet, plant_n, fields.soil.avg(), fields.weather.rain, fields.fire.avg(), fields.wear.avg(), fields.wear.cell.iter().filter(|&&w| w > WEAR_GRASS_CULL).count()
             );
             // Track best healthy snapshot for --save. Score = pop, gated on well-fed (avg energy >= 30) so we never
             // bank a starving crowd. Captured only when saving (snapshot clone not free).
@@ -3604,7 +3651,7 @@ pub fn generation_step(
                 let score = if avg_e >= 30.0 { pop as f32 } else { 0.0 };
                 if score > 0.0 && best.as_ref().is_none_or(|(s, _)| score > *s) {
                     // capture the FULL world (positions + dynamic field grids incl. wear) at this healthy peak.
-                    let snap = collect_full_snapshot(&cq, &pf, &soil, &gw, &climate, &fire, &wear, &weather, &bank, gen.tick);
+                    let snap = collect_full_snapshot(&cq, &pf, &fields.soil, &fields.gw, &fields.climate, &fields.fire, &fields.wear, &fields.weather, &bank, gen.tick);
                     *best = Some((score, snap));
                 }
             }
@@ -3615,7 +3662,7 @@ pub fn generation_step(
                 let snap = best
                     .take()
                     .map(|(_, s)| s)
-                    .unwrap_or_else(|| collect_full_snapshot(&cq, &pf, &soil, &gw, &climate, &fire, &wear, &weather, &bank, gen.tick));
+                    .unwrap_or_else(|| collect_full_snapshot(&cq, &pf, &fields.soil, &fields.gw, &fields.climate, &fields.fire, &fields.wear, &fields.weather, &bank, gen.tick));
                 crate::persist::save_snapshot(path, &snap);
                 info!("saved full world: {} creatures + {} plants", snap.creatures.len(), snap.world.as_ref().map_or(0, |w| w.plants.len()));
             }
@@ -3692,9 +3739,9 @@ pub fn generation_step(
     let avg_wet: f32 = pq.iter().map(|(g, _)| g.wet).sum::<f32>() / plant_n as f32;
     if gen.diet {
         let avg_rig: f32 = scored.iter().map(|(_, g)| g.rigidity).sum::<f32>() / n as f32;
-        info!("gen {:>3} | nutri {:>6.2} | sens {:.1} r{:.0} | rig {:.2} | bite {:.2} vs def {:.2} | light {:.2} sz {:.2} sw {:.2} so {:.2} brain {:.1} | plant-nut {:.2} qual {:.2} wet {:.2} | roam {:.2} elev {:.1} | plants {} soil {:.2} gw {:.2} clim {:.2}[{:.2}-{:.2}] desert {:.0}% fire {:.3} wear {:.3} | trees {} h{:.2} b{:.2}", gen.generation, avg, avg_sensors, avg_range, avg_rig, avg_bite, avg_def, avg_light, avg_size, avg_swim, avg_social, avg_hidden, avg_nut, avg_qual, avg_wet, avg_roam, avg_elev, plant_n, soil.avg(), gw.avg(), climate.avg(), climate.range().0, climate.range().1, climate.land_arid_frac(0.25) * 100.0, fire.avg(), wear.avg(), tree_n, avg_tree_h, avg_tree_b);
+        info!("gen {:>3} | nutri {:>6.2} | sens {:.1} r{:.0} | rig {:.2} | bite {:.2} vs def {:.2} | light {:.2} sz {:.2} sw {:.2} so {:.2} brain {:.1} | plant-nut {:.2} qual {:.2} wet {:.2} | roam {:.2} elev {:.1} | plants {} soil {:.2} gw {:.2} clim {:.2}[{:.2}-{:.2}] desert {:.0}% fire {:.3} wear {:.3} | trees {} h{:.2} b{:.2} | CHEM {}", gen.generation, avg, avg_sensors, avg_range, avg_rig, avg_bite, avg_def, avg_light, avg_size, avg_swim, avg_social, avg_hidden, avg_nut, avg_qual, avg_wet, avg_roam, avg_elev, plant_n, fields.soil.avg(), fields.gw.avg(), fields.climate.avg(), fields.climate.range().0, fields.climate.range().1, fields.climate.land_arid_frac(0.25) * 100.0, fields.fire.avg(), fields.wear.avg(), tree_n, avg_tree_h, avg_tree_b, fields.bio.report(living_matter(&pq)));
     } else {
-        info!("gen {:>3} | food {:>6.2} | sens {:.1} r{:.0} | bite {:.2} vs def {:.2} | plant-nut {:.2} qual {:.2} wet {:.2} | roam {:.2} elev {:.1} | plants {} soil {:.2} gw {:.2}", gen.generation, avg, avg_sensors, avg_range, avg_bite, avg_def, avg_nut, avg_qual, avg_wet, avg_roam, avg_elev, plant_n, soil.avg(), gw.avg());
+        info!("gen {:>3} | food {:>6.2} | sens {:.1} r{:.0} | bite {:.2} vs def {:.2} | plant-nut {:.2} qual {:.2} wet {:.2} | roam {:.2} elev {:.1} | plants {} soil {:.2} gw {:.2} | CHEM {}", gen.generation, avg, avg_sensors, avg_range, avg_bite, avg_def, avg_nut, avg_qual, avg_wet, avg_roam, avg_elev, plant_n, fields.soil.avg(), fields.gw.avg(), fields.bio.report(living_matter(&pq)));
     }
 
     // elite pool (clone+mutate, asexual)
