@@ -268,14 +268,29 @@ pub fn npp_ceiling_per_tick() -> f64 {
     NPP_PER_M2_DAY * PLANT_FOOTPRINT_M2 * bio_days_per_tick()
 }
 
-/// Density of animal tissue, kg/m^3. Real flesh is close to water.
-pub const BODY_DENSITY: f64 = 1000.0;
+/// Kilograms of live tissue per unit of `Morphometrics.mass`. This is a CALIBRATION, not a density, and the
+/// distinction matters because getting it wrong produced the worst error in this retrofit.
+///
+/// `Morphometrics.mass` sums the volumes of a stylized part graph. Those parts are coarse primitives that
+/// overlap and enclose plenty of empty space, so the sum is a shape PROXY rather than tissue volume. Reading
+/// it as literal m^3 at flesh density (1000 kg/m^3) made the mean creature 1.74 m^3 -> ~1700 kg, a
+/// rhinoceros, and put 1100 of them on an 8-hectare worldlet: fauna outweighed flora 10-16x, an inverted
+/// trophic pyramid that is thermodynamically impossible rather than merely unbalanced.
+///
+/// Calibrated from the ecology instead, which is the only defensible anchor: animal standing stock must land
+/// inside TROPHIC_RATIO_MAX of plant standing stock. At the world's ~0.4 kg/m^2 flora and ~1900 total morph
+/// units at full population, that caps fauna near 3200 kg, giving ~1.5 kg per morph unit and a mean creature
+/// around 2.6 kg. Rabbit-sized, and 1100 of them on 8 hectares is a dense but real small-mammal population.
+///
+/// KNOWN TENSION, deliberately accepted: this leaves body GEOMETRY (~1.2 m across) disagreeing with body MASS
+/// (~2.6 kg). The fully self-consistent alternative is to shrink creature geometry ~5x and keep real flesh
+/// density, which makes volume, mass, and ecology all agree. That is a visual and gameplay change (collision
+/// radius, eat/attack reach, camera framing) and belongs in a visual pass, not here. Revisit it then.
+pub const BODY_MASS_PER_MORPH: f64 = 1.5;
 
-/// Convert a body's geometric volume (`Morphometrics.mass` = sum of part volumes, m^3 under the 1 unit =
-/// 1 metre scale) into kilograms. Creature bodies are not yet element-backed stocks; this is what lets the
-/// ledger MEASURE the fauna it does not yet govern.
+/// Live mass in kg of a body with the given `Morphometrics.mass` shape proxy.
 pub fn creature_mass_kg(morph_volume: f32) -> f64 {
-    morph_volume.max(0.0) as f64 * BODY_DENSITY
+    morph_volume.max(0.0) as f64 * BODY_MASS_PER_MORPH
 }
 
 /// Plausible band for animal standing stock as a fraction of plant standing stock. Each trophic step loses
@@ -799,6 +814,25 @@ mod tests {
                  NPP_PER_M2_DAY * PLANT_COMP.c / SOIL_ORG_C_PER_M2"
             );
         }
+    }
+
+    #[test]
+    fn body_mass_calibration_keeps_the_pyramid_upright() {
+        // Pins BODY_MASS_PER_MORPH to the ecology it was calibrated from, so a future edit cannot quietly
+        // reintroduce rhino-sized creatures. Figures are the sim's measured state: ~1.74 morph units per
+        // creature, ~1100 creatures at full population, ~0.4 kg/m^2 standing flora.
+        let mean_morph = 1.74f32;
+        let pop = 1100.0;
+        let flora_kg = 0.4 * cell_area() * (crate::config::SOIL_RES * crate::config::SOIL_RES) as f64;
+        let fauna_kg = creature_mass_kg(mean_morph) * pop;
+        let r = trophic_ratio(flora_kg, fauna_kg);
+        assert!(
+            r <= TROPHIC_RATIO_MAX,
+            "trophic ratio {r:.3} exceeds {TROPHIC_RATIO_MAX}: fauna is outweighing what the plants can fund"
+        );
+        // and a sane creature is small-mammal scale, not livestock
+        let mean_kg = creature_mass_kg(mean_morph);
+        assert!((0.5..=20.0).contains(&mean_kg), "mean creature {mean_kg:.1} kg is not small-mammal scale");
     }
 
     #[test]
