@@ -3,7 +3,7 @@
 use bevy::prelude::*;
 use std::collections::{HashMap, HashSet};
 
-use crate::components::{Alive, Brain, Creature, DietState, Energy, Ferment, Fitness, Food, Grass, Heading, Locomotion, Rot, Seaweed, Seed, Tree};
+use crate::components::{Alive, Brain, Carrion, Creature, DietState, Energy, Ferment, Fitness, Food, Grass, Heading, Locomotion, Rot, Seaweed, Seed, Tree};
 use crate::genome::{forward, learn, master_expression, Genome, CONE_HALF, GLOBAL_INPUTS, NFOOD, NUTRIENTS, SIG_PER_SENSOR};
 use crate::plant::{PlantGenome, PlantState, P_REPRO, PLANT_CAP, PLANT_MIN, WHOLE_PLANET_SEED_MULT};
 use crate::rng::Rng;
@@ -151,8 +151,8 @@ pub fn flora_matter(mass_kg: f64) -> crate::chem::Elements {
 // Composition of a food/detritus entity, keyed off its genome kind. Carrion is animal flesh and carries ~7x
 // the nitrogen of plant litter, so counting it as plant tissue books a phantom leak on every carcass and
 // under-returns nitrogen when it rots.
-pub fn tissue_comp(g: &PlantGenome) -> crate::chem::Elements {
-    if g.kind == CARRION_KIND {
+pub fn tissue_comp(is_carrion: bool) -> crate::chem::Elements {
+    if is_carrion {
         crate::chem::ANIMAL_COMP
     } else {
         crate::chem::PLANT_COMP
@@ -163,7 +163,7 @@ pub fn tissue_comp(g: &PlantGenome) -> crate::chem::Elements {
 // starting biomass, so measuring drift from BEFORE it would report the world's own birth as a leak.
 pub fn seal_matter_ledger(
     mut bio: ResMut<crate::chem::Biosphere>,
-    pf: Query<(&PlantState, &PlantGenome), (Without<Grass>, Without<Seaweed>, Without<Creature>)>,
+    pf: Query<(&PlantState, Option<&Carrion>), (Without<Grass>, Without<Seaweed>, Without<Creature>)>,
     cq: Query<&Genome, With<Creature>>,
     mut done: Local<bool>,
 ) {
@@ -173,12 +173,17 @@ pub fn seal_matter_ledger(
     *done = true;
     // MUST match the logger's accounting exactly (per-tissue composition + living fauna), or drift is
     // measured against a baseline built a different way and reports a leak that is really a units mismatch.
-    let flora = pf.iter().fold(crate::chem::Elements::ZERO, |t, (st, g)| t + tissue_comp(g) * st.mass as f64);
+    let flora = pf.iter().fold(crate::chem::Elements::ZERO, |t, (st, c)| t + tissue_comp(c.is_some()) * st.mass as f64);
     let fauna_kg: f64 = cq
         .iter()
         .map(|g| crate::chem::creature_mass_kg(g.morph.map(|m| m.mass).unwrap_or_else(|| crate::morph::Morphometrics::of(&g.body).mass)))
         .sum();
     bio.initial_total = bio.total() + flora + crate::chem::ANIMAL_COMP * fauna_kg;
+    info!(
+        "ledger sealed: total C{:.0} N{:.0} P{:.0} | flora P{:.1} fauna P{:.3} | {}",
+        bio.initial_total.c, bio.initial_total.n, bio.initial_total.p, flora.p, crate::chem::ANIMAL_COMP.p * fauna_kg,
+        bio.p_breakdown()
+    );
 }
 
 // Mass stripped per fruit tree this tick. live_step records, plant_step applies. Trees persist + regrow;
@@ -740,6 +745,8 @@ fn spawn_carrion(commands: &mut Commands, pos: Vec3, mass: f32, fat: f32) {
     let p = crate::sphere::surface_pos(pos, FOOD_Y); // carrion lies on surface at death spot
     commands.spawn((
         Food,
+        Carrion, // matter ledger charges this at ANIMAL_COMP; see components::Carrion
+
         PlantState { mass, age: 0 },
         PlantGenome {
             kind: CARRION_KIND,
@@ -2695,18 +2702,18 @@ pub fn rot_step(
     mut commands: Commands,
     mut soil: ResMut<Soil>,
     mut bio: ResMut<crate::chem::Biosphere>,
-    mut q: Query<(Entity, &mut Rot, &mut PlantState, &PlantGenome, &Transform)>,
+    mut q: Query<(Entity, &mut Rot, &mut PlantState, &PlantGenome, &Transform, Option<&Carrion>)>,
 ) {
     let _g = crate::profile::scope("rot");
-    for (e, mut rot, mut st, g, tf) in &mut q {
+    for (e, mut rot, mut st, g, tf, carrion) in &mut q {
         rot.age += 1;
         // the mass lost each tick is not destroyed: it becomes soil ORGANIC matter, which microbes then
         // mineralize on their own clock (biogeochem_step). This is the return leg of the whole loop.
         let lost = (CARRION_MASS / ROT_GONE as f32).min(st.mass);
-        bio.deposit_litter(grid_cell(tf.translation), lost as f64, tissue_comp(g));
+        bio.deposit_litter(grid_cell(tf.translation), lost as f64, tissue_comp(carrion.is_some()));
         st.mass = (st.mass - lost).max(0.0); // decompose: less to scavenge
         if rot.age >= ROT_GONE {
-            bio.deposit_litter(grid_cell(tf.translation), st.mass as f64, tissue_comp(g)); // remainder
+            bio.deposit_litter(grid_cell(tf.translation), st.mass as f64, tissue_comp(carrion.is_some())); // remainder
             soil.add(tf.translation, DECOMP_FERT * g.nutrient); // legacy fertility grid (Phase 2 removes it)
             commands.entity(e).despawn(); // fully decomposed
         }
@@ -2780,7 +2787,7 @@ pub fn live_step(
     mut soil: ResMut<Soil>,
     mut wear: ResMut<Wear>,
     fire: Res<Fire>,
-    fq: Query<(Entity, &Transform, &PlantState, &PlantGenome, Option<&Rot>, Option<&Tree>, Option<&Ferment>, Option<&Seed>), (With<Food>, Without<Creature>)>,
+    fq: Query<(Entity, &Transform, &PlantState, &PlantGenome, Option<&Rot>, Option<&Tree>, Option<&Ferment>, Option<&Seed>, Option<&Carrion>), (With<Food>, Without<Creature>)>,
 ) {
     let _g = crate::profile::scope("live");
     let dt = DT;
@@ -2796,10 +2803,10 @@ pub fn live_step(
     // snapshot: (entity, pos, genome, mass, rot_age, tree, ferment_toxic, seed). rot_age=Some+ferment=None ->
     // animal carrion (meat); rot_age=Some+ferment=Some -> fermenting plant matter (fruit/detritus);
     // tree=Some(edible) -> a tree; else a living plant.
-    let foods: Vec<(Entity, Vec3, PlantGenome, f32, Option<u32>, Option<bool>, Option<f32>, Option<PlantGenome>)> = fq
+    let foods: Vec<(Entity, Vec3, PlantGenome, f32, Option<u32>, Option<bool>, Option<f32>, Option<PlantGenome>, bool)> = fq
         .iter()
-        .map(|(e, t, st, pg, rot, tree, ferment, seed)| {
-            (e, t.translation, pg.clone(), st.mass, rot.map(|r| r.age), tree.map(|t| t.edible), ferment.map(|f| f.toxic), seed.map(|s| s.0.clone()))
+        .map(|(e, t, st, pg, rot, tree, ferment, seed, carrion)| {
+            (e, t.translation, pg.clone(), st.mass, rot.map(|r| r.age), tree.map(|t| t.edible), ferment.map(|f| f.toxic), seed.map(|s| s.0.clone()), carrion.is_some())
         })
         .collect();
     // creature snapshot for social/kin need + threat sense: (entity, pos, signature, combat, body_radius).
@@ -3675,8 +3682,8 @@ pub fn live_step(
         if whole_eaten.insert(*e) {
             // route the mass BEFORE despawning, keyed off the same dedup set: two creatures can claim one food
             // in the same tick, and accounting it twice would destroy matter that only existed once.
-            if let Some((_, pos, pg, mass, ..)) = foods.iter().find(|f| f.0 == *e) {
-                bio.consume_and_excrete(grid_cell(*pos), *mass as f64, tissue_comp(pg));
+            if let Some(f) = foods.iter().find(|f| f.0 == *e) {
+                bio.consume_and_excrete(grid_cell(f.1), f.3 as f64, tissue_comp(f.8));
             }
             commands.entity(*e).despawn();
         }
@@ -3798,6 +3805,7 @@ pub fn generation_step(
     // full plant-class query for the world snapshot: living plants + trees + carrion + ferment + fruit, with
     // positions + markers. Grass/seaweed carpets excluded (regenerated on load). Without<Creature> -> disjoint from cq.
     pf: Query<(&PlantGenome, &PlantState, &Transform, Option<&Tree>, Option<&Rot>, Option<&Ferment>, Option<&Seed>), (Without<Grass>, Without<Seaweed>, Without<Creature>)>,
+    carrion_q: Query<&PlantState, With<Carrion>>, // animal flesh: 7x the N, 10x the P of plant litter
     fields: FieldGrids,
     bank: Res<SeedBank>,
     mut exit: MessageWriter<AppExit>,
@@ -3808,6 +3816,14 @@ pub fn generation_step(
     mut best: Local<Option<(f32, crate::persist::Snapshot)>>,
 ) {
     let _g = crate::profile::scope("generation");
+    // Charge animal flesh at ANIMAL_COMP and plant matter at PLANT_COMP. Split by a dedicated marker, NOT by
+    // PlantGenome.kind: CARRION_KIND is 0 and plants use kind 0 for the green family, so the old test billed
+    // a large share of ordinary plants as meat. Invisible in carbon (both are 45% C), which is exactly why it
+    // showed up only as runaway N and P drift.
+    let carrion_kg: f64 = carrion_q.iter().map(|st| st.mass as f64).sum();
+    let all_flora_kg: f64 = pf.iter().map(|(_, st, ..)| st.mass as f64).sum();
+    let living_flora = crate::chem::PLANT_COMP * (all_flora_kg - carrion_kg).max(0.0)
+        + crate::chem::ANIMAL_COMP * carrion_kg;
     gen.tick = gen.tick.wrapping_add(1); // global clock: drives season (plant_step) + continuous timing
 
     // continuous mode (after warm-up): no generation boundary. Snapshot the ecosystem periodically; stop headless
@@ -3880,7 +3896,7 @@ pub fn generation_step(
                 "t {:>6} | pop {:>3} | energy {:.1} [f{:.1}/s{:.1}/F{:.1}] adp {:.2} | mast {:.2} brd {:.1} | life-fit {:.1} | age {:.0} | sens {:.1} | bite {:.2} | rig {:.2} | temp {:.2} lng {:.2} met {:.2} par {:.2} lat {:.2} | swim {:.2} alp {:.2} aq {} hi {} | def {:.2} nut {:.2} qual {:.2} wet {:.2} | plants {} | soil {:.2} | rain {:.2} fire {:.3} | wear {:.3} bare {} | CHEM {} | {}",
                 gen.tick, pop, e / n, fa / n, su / n, ft / n, adp / n, mast / n, brd / n, f / n, age / n, sens / n, bite / n, rig / n, temp / n, lng / n, met / n, par / n, abslat / n, sw / n, alp / n, aq, hi, avg_def, avg_nut, avg_qual, avg_wet, plant_n, fields.soil.avg(), fields.weather.rain, fields.fire.avg(), fields.wear.avg(), fields.wear.cell.iter().filter(|&&w| w > WEAR_GRASS_CULL).count(),
                 fields.bio.report(
-                    pf.iter().fold(crate::chem::Elements::ZERO, |t, (g, st, ..)| t + tissue_comp(g) * st.mass as f64)
+                    living_flora
                         + crate::chem::ANIMAL_COMP * cont_fauna_kg,
                     cont_fauna_kg,
                 ),
@@ -3996,10 +4012,10 @@ pub fn generation_step(
         .sum();
     // every entity counted at ITS OWN tissue composition, plus LIVING fauna, so a creature birth or death
     // is attributed to fauna instead of hiding inside the flora term.
-    let living_total = pf
-        .iter()
-        .fold(crate::chem::Elements::ZERO, |t, (g, st, ..)| t + tissue_comp(g) * st.mass as f64)
-        + crate::chem::ANIMAL_COMP * fauna_kg;
+    // charge animal flesh at ANIMAL_COMP and everything else at PLANT_COMP. Splitting by a dedicated marker
+    // rather than by PlantGenome.kind, which collides: CARRION_KIND is 0 and plants use kind 0 for the green
+    // family, so the old test billed a large share of ordinary plants as meat.
+    let living_total = living_flora + crate::chem::ANIMAL_COMP * fauna_kg;
     if gen.diet {
         let avg_rig: f32 = scored.iter().map(|(_, g)| g.rigidity).sum::<f32>() / n as f32;
         info!("gen {:>3} | nutri {:>6.2} | sens {:.1} r{:.0} | rig {:.2} | bite {:.2} vs def {:.2} | light {:.2} sz {:.2} sw {:.2} so {:.2} brain {:.1} | plant-nut {:.2} qual {:.2} wet {:.2} | roam {:.2} elev {:.1} | plants {} soil {:.2} gw {:.2} clim {:.2}[{:.2}-{:.2}] desert {:.0}% fire {:.3} wear {:.3} | trees {} h{:.2} b{:.2} | CHEM {}", gen.generation, avg, avg_sensors, avg_range, avg_rig, avg_bite, avg_def, avg_light, avg_size, avg_swim, avg_social, avg_hidden, avg_nut, avg_qual, avg_wet, avg_roam, avg_elev, plant_n, fields.soil.avg(), fields.gw.avg(), fields.climate.avg(), fields.climate.range().0, fields.climate.range().1, fields.climate.land_arid_frac(0.25) * 100.0, fields.fire.avg(), fields.wear.avg(), tree_n, avg_tree_h, avg_tree_b, fields.bio.report(living_total, fauna_kg));

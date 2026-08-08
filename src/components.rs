@@ -237,3 +237,13 @@ mod tests {
         assert!((wasted - 6.0).abs() < 1e-6);
     }
 }
+
+
+// Animal flesh, as opposed to plant detritus. Both carry Rot + Ferment, so neither component distinguishes
+// them. Needed because carrion is ~7x the nitrogen and ~10x the phosphorus of plant litter, and the matter
+// ledger has to charge each at its own composition.
+// Do NOT go back to keying this off PlantGenome.kind: CARRION_KIND is 0 and plants use kind 0 for the green
+// family, so that test silently classified a large share of ordinary plants as meat. It was invisible in
+// carbon (both compositions are 45% C) and showed up only as runaway N and P drift.
+#[derive(Component)]
+pub struct Carrion;
