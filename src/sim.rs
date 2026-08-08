@@ -1674,7 +1674,10 @@ pub fn spawn_world_render(
     commands.insert_resource(crate::viz::GrassMaterial(materials.add(StandardMaterial {
         base_color: Color::srgb(0.24, 0.52, 0.18),
         perceptual_roughness: 0.95,
-        double_sided: true,
+        // double_sided NEGATES the normal on back faces in Bevy PBR. Every blade normal is +Y, so a blade
+        // whose back happens to face the camera got -Y, caught zero sun, and rendered ambient-only: that is
+        // the black-spikes look, not the mesh. cull_mode None alone still draws both faces, lit correctly.
+        double_sided: false,
         cull_mode: None,
         ..default()
     })));
