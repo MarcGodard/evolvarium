@@ -34,6 +34,7 @@ mod snapshot;
 mod sphere;
 mod stars;
 mod terrain;
+mod thermo;
 mod viz;
 mod viz_flora;
 mod viz_ground;
