@@ -2379,11 +2379,24 @@ pub fn plant_step(
     for (_, pos, kg) in &nfix {
         bio.fix_nitrogen(grid_cell(*pos), *kg as f64);
     }
-    // fund growth: Liebig decides per cell, so plants competing for the same patch are served in index order
-    // and the last ones get whatever is left. That IS the competition, not a tie-break artifact.
+    // Fund growth under TWO real constraints, and the order matters.
+    // 1. LIGHT is captured per unit AREA, so a cell's whole plant community shares one NPP budget. Without
+    //    this, total productivity scaled with plant COUNT (a 10 m^2 footprint x 12000 plants claimed 120,000
+    //    m^2 of canopy on ~40,000 m^2 of land), so packing in more plants manufactured productivity the
+    //    ground does not have, and standing biomass tracked the entity cap instead of the world.
+    // 2. NUTRIENTS are Liebig-limited per cell, as before.
+    // Plants in a cell are served in parent-index order and later ones get what is left: that IS competition
+    // for light and nutrients, not a tie-break artifact.
+    let mut npp_left: Vec<f64> = vec![crate::chem::cell_npp_per_tick(); bio.soil.len()];
     for (_, e, pos, want) in &growth_wants {
-        let got = bio.draw_for_growth(grid_cell(*pos), comp, *want as f64);
+        let c = grid_cell(*pos);
+        let allowed = npp_left[c].min(*want as f64);
+        if allowed <= 0.0 {
+            continue; // canopy above is already intercepting all the light this patch receives
+        }
+        let got = bio.draw_for_growth(c, comp, allowed);
         if got > 0.0 {
+            npp_left[c] -= got;
             grants.0.insert(*e, got as f32);
         }
     }

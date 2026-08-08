@@ -6,7 +6,12 @@ use crate::rng::Rng;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-pub const PLANT_CAP: usize = 4000; // carrying cap: dense whole-planet food so scattered creatures find food
+pub const PLANT_CAP: usize = 12000; // PERF ceiling only, not a balance knob: under conserved chemistry the
+                                    // flora count is limited by the soil N and P budget (seedlings must be FUNDED
+                                    // to establish), so this should sit well ABOVE the equilibrium and never bind.
+                                    // If plant counts sit exactly at this number, the budget is not limiting and
+                                    // that is a bug in the chemistry, not a reason to raise the cap. Old value 4000
+                                    // WAS the binding constraint (counts pinned there on every seed). Prev comment: carrying cap: dense whole-planet food so scattered creatures find food
                                    // where they land. Bounded for perf: plant_step (+ mating search) scales w/ this/tick.
 pub const WHOLE_PLANET_SEED_MULT: usize = 20; // loaded/diverse world seeds 20x founding FOOD count -> establishes
                                               // dense everywhere (many land in survivable biomes)

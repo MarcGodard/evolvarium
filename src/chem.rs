@@ -137,9 +137,19 @@ pub const AIR_C_PER_M2: f64 = 1.6;
 pub const AIR_N_PER_M2: f64 = 7600.0;
 /// Soil organic carbon, temperate profile 0-30 cm.
 pub const SOIL_ORG_C_PER_M2: f64 = 8.0;
-/// Soil organic C:N and C:P mass ratios (typical humus).
-pub const SOIL_CN_RATIO: f64 = 12.0;
-pub const SOIL_CP_RATIO: f64 = 100.0;
+// Soil organic C:N and C:P, DERIVED from litter composition rather than taken from a humus table. Soil
+// organic matter here is litter-derived, so it inherits the litter's ratios, and that is what makes every
+// element balance at steady state at once: first-order decay of a pool at litter stoichiometry releases each
+// element at exactly the rate litterfall supplies it.
+// Getting this wrong is subtle and was a real bug: humus tables give C:N ~12 while plant litter is ~30, so a
+// pool held at 12 and decayed proportionally released 2.5x more nitrogen than litterfall could replace. Soil
+// N then climbed to 7-18x real levels, nothing was ever nutrient-limited, and the plant COUNT stayed pinned
+// to its cap instead of to the budget.
+// (Real soils DO narrow toward C:N 12, because microbes retain N while respiring C. Modelling that
+// immobilization explicitly is the refinement; it needs decomposition to hold N back until microbial demand
+// is met, rather than releasing it in proportion.)
+pub const SOIL_CN_RATIO: f64 = PLANT_COMP.c / PLANT_COMP.n;
+pub const SOIL_CP_RATIO: f64 = PLANT_COMP.c / PLANT_COMP.p;
 /// Plant-AVAILABLE mineral pools. Small by design: most soil N and P is locked in organic matter and must
 /// be mineralized by decomposers before a plant can touch it.
 pub const SOIL_MIN_N_PER_M2: f64 = 0.010;
@@ -186,9 +196,15 @@ pub fn bio_days_per_tick() -> f64 {
 // soil reads nutrient-POOR despite lush growth, because the budget is all held in living biomass. That is
 // tropical soil, and it falls out of two rate terms.
 /// Base first-order decay of soil organic matter, per REAL DAY at reference temperature and optimal
-/// moisture. Real bulk soil organic matter turns over on a ~1-3 year scale (fast litter pools are ~0.02/day,
-/// stabilized humus ~1e-4/day); 0.002/day sits between them at a ~500-day bulk turnover.
-pub const DECOMP_K_PER_DAY: f64 = 0.002;
+/// moisture. NOT free to pick: with NPP and the soil organic stock both taken from real Earth values, steady
+/// state (mineralization = litterfall) pins this rate at
+///   k = NPP * PLANT_COMP.c / SOIL_ORG_C_PER_M2 = 0.002 * 0.45 / 8 = 1.125e-4 /day
+/// which is the stabilized-humus figure real soils show, and a ~8900-day bulk turnover. An earlier 0.002/day
+/// was a fast-litter number and was inconsistent with the two stocks either side of it: it mineralized the
+/// whole 8 kg/m2 profile within a few generations while litterfall could not keep up, draining organic carbon
+/// to ~0 and piling mineral N to 67x its real level. `steady_state_is_self_consistent` locks the three
+/// constants together so changing one without the others fails the build.
+pub const DECOMP_K_PER_DAY: f64 = 1.125e-4;
 /// Q10 = 2.0: respiration doubles per 10 K, the standard soil value.
 pub const DECOMP_Q10: f64 = 2.0;
 /// Reference temperature for Q10, in the sim's 0..1 temperature field (see `sphere::base_temperature`).
@@ -250,6 +266,14 @@ pub const TREE_FOOTPRINT_M2: f64 = 60.0;
 /// much of this the local element budget can actually fund.
 pub fn npp_ceiling_per_tick() -> f64 {
     NPP_PER_M2_DAY * PLANT_FOOTPRINT_M2 * bio_days_per_tick()
+}
+
+/// Total mass one soil cell's plant community can add per tick, kg. This is the AREA constraint: sunlight
+/// falling on a patch is finite regardless of how many stems are planted in it, so the whole community
+/// shares this budget. The per-plant ceilings above are the separate physiological limit on a single
+/// individual's own canopy; both apply.
+pub fn cell_npp_per_tick() -> f64 {
+    NPP_PER_M2_DAY * cell_area() * bio_days_per_tick()
 }
 
 /// As `npp_ceiling_per_tick` for a tree's larger footprint.
@@ -342,8 +366,12 @@ impl Biosphere {
         let min_n_m2 = mineral.n / (n_cells * a);
         let avail = Elements::new(self.air.c, mineral.n / n_cells, mineral.p / n_cells);
         let drift = self.drift_ppm(living);
+        // standing biomass per m^2 is the number that says whether the budget is actually binding: real
+        // grassland carries 0.5-1 kg/m^2, and if the world sits far below that while mineral N accumulates,
+        // something other than nutrients is limiting growth.
+        let flora_kg_m2 = if PLANT_COMP.c > 0.0 { living.c / PLANT_COMP.c / (n_cells * a) } else { 0.0 };
         format!(
-            "orgC {org_c_m2:.2} minN {min_n_m2:.4} kg/m2 | lim {} | buried {:.1} | drift C{:+.3} N{:+.3} P{:+.3} ppm",
+            "flora {flora_kg_m2:.3} orgC {org_c_m2:.2} minN {min_n_m2:.4} kg/m2 | lim {} | buried {:.1} | drift C{:+.3} N{:+.3} P{:+.3} ppm",
             avail.limiting(PLANT_COMP).label(),
             self.buried.total(),
             drift.c,
@@ -713,6 +741,33 @@ mod tests {
         );
         // temperate systems are characteristically NITROGEN-limited, and these stocks reproduce that
         assert_eq!(avail.limiting(PLANT_COMP), Limiter::Nitrogen);
+    }
+
+    #[test]
+    fn steady_state_is_self_consistent() {
+        // NPP, the soil organic stock, and the decomposition rate are three real Earth numbers that CANNOT be
+        // chosen independently: at steady state mineralization must equal litterfall, so any two pin the
+        // third. This test is why the world holds its soil instead of draining it.
+        // must hold for EVERY element, not just carbon. Checking only C is what let soil N run away: the pool
+        // balanced on carbon while releasing nitrogen 2.5x faster than litterfall replaced it.
+        let org = Elements::new(
+            SOIL_ORG_C_PER_M2,
+            SOIL_ORG_C_PER_M2 / SOIL_CN_RATIO,
+            SOIL_ORG_C_PER_M2 / SOIL_CP_RATIO,
+        );
+        for (el, litter, stock) in [
+            ("C", NPP_PER_M2_DAY * PLANT_COMP.c, org.c),
+            ("N", NPP_PER_M2_DAY * PLANT_COMP.n, org.n),
+            ("P", NPP_PER_M2_DAY * PLANT_COMP.p, org.p),
+        ] {
+            let ratio = (DECOMP_K_PER_DAY * stock) / litter;
+            assert!(
+                (0.8..=1.25).contains(&ratio),
+                "{el} is not at steady state: mineralization/litterfall = {ratio:.2}. Soil organic ratios \
+                 must be derived from PLANT_COMP, and DECOMP_K_PER_DAY from \
+                 NPP_PER_M2_DAY * PLANT_COMP.c / SOIL_ORG_C_PER_M2"
+            );
+        }
     }
 
     #[test]
