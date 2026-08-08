@@ -117,10 +117,14 @@ fn spawn_camera(mut commands: Commands) {
     commands.spawn((
         Camera3d::default(),
         Transform::default(),
-        // Tonemapping: Bevy default (TonyMcMapface) is filmic path-to-white, desaturates bright areas toward
-        // white, bleaches vivid plant/ground colors in daylight. ReinhardLuminance keeps hue + saturation in
-        // highlights for punchy stylized look.
+        // Tonemapping: Bevy default (TonyMcMapface) is filmic path-to-white and bleaches vivid plant/ground
+        // colors in daylight. ReinhardLuminance keeps hue + saturation in highlights. AgX was tried here and
+        // is far worse, rendering the whole scene near-white: do not swap it back.
         bevy::core_pipeline::tonemapping::Tonemapping::ReinhardLuminance,
+        // Exposure. THIS, not the tonemap curve, is why sunlit ground read as a flat pale wash: Bevy's camera
+        // defaults to EV100 9.7 (indoor-ish) while the scene runs a 64k lux sun, leaving it ~5 stops
+        // overexposed, so every lit surface clipped toward white whatever its albedo.
+        bevy::camera::Exposure::SUNLIGHT,
         // far clip pushed out so distant sun + starfield render (thousands of units away)
         Projection::from(PerspectiveProjection { far: 12000.0, ..default() }),
         // soft ambient (per-camera in 0.18) so night side not pitch black

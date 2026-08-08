@@ -35,6 +35,9 @@ mod sphere;
 mod stars;
 mod terrain;
 mod viz;
+mod viz_flora;
+mod viz_ground;
+mod viz_sky;
 
 use bevy::app::ScheduleRunnerPlugin;
 use bevy::prelude::*;
@@ -350,10 +353,27 @@ fn setup_scene(
     // terrain past horizon at dawn-dusk. Also RECEIVES -> trees/creatures drop crisp shadows on land.
     // Walk's curved-terrain self-shadow acne held off by higher per-mode shadow_normal_bias
     // (camera::update_shadow_mode) + 4096 shadow map.
+    // Tiling detail + normal map so the ground stops reading as untextured plastic. Sampler MUST repeat:
+    // Bevy defaults to ClampToEdge, which smears a single texel across the whole planet.
+    let repeat = |img: &mut bevy::image::Image| {
+        img.sampler = bevy::image::ImageSampler::Descriptor(bevy::image::ImageSamplerDescriptor {
+            address_mode_u: bevy::image::ImageAddressMode::Repeat,
+            address_mode_v: bevy::image::ImageAddressMode::Repeat,
+            ..bevy::image::ImageSamplerDescriptor::linear()
+        });
+    };
+    let mut ground_img = viz_ground::ground_detail_texture(256);
+    repeat(&mut ground_img);
+    let mut ground_nrm = viz_ground::ground_normal_texture(256);
+    repeat(&mut ground_nrm);
+    let ground_tex = images.add(ground_img);
+    let ground_nrm = images.add(ground_nrm);
     commands.spawn((
         Mesh3d(meshes.add(terrain::build_globe(160))),
         MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::WHITE,
+            base_color: Color::WHITE, // texture x vertex colour x base all multiply; white keeps biome hue
+            base_color_texture: Some(ground_tex),
+            normal_map_texture: Some(ground_nrm),
             perceptual_roughness: 0.95,
             ..default()
         })),
