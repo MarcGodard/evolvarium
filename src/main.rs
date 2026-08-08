@@ -359,12 +359,17 @@ fn setup_scene(
         img.sampler = bevy::image::ImageSampler::Descriptor(bevy::image::ImageSamplerDescriptor {
             address_mode_u: bevy::image::ImageAddressMode::Repeat,
             address_mode_v: bevy::image::ImageAddressMode::Repeat,
+            // trilinear + anisotropy: mip_filter Linear is what actually USES the chain built above, and
+            // anisotropy keeps the ground sharp at the grazing angles that dominate a walk view.
+            mipmap_filter: bevy::image::ImageFilterMode::Linear,
+            anisotropy_clamp: 8,
             ..bevy::image::ImageSamplerDescriptor::linear()
         });
     };
-    let mut ground_img = viz_ground::ground_detail_texture(256);
+    // mipmaps then sampler: with_mipmaps rewrites data + mip_level_count, so build the chain FIRST
+    let mut ground_img = viz_ground::with_mipmaps(viz_ground::ground_detail_texture(512));
     repeat(&mut ground_img);
-    let mut ground_nrm = viz_ground::ground_normal_texture(256);
+    let mut ground_nrm = viz_ground::with_mipmaps(viz_ground::ground_normal_texture(512));
     repeat(&mut ground_nrm);
     let ground_tex = images.add(ground_img);
     let ground_nrm = images.add(ground_nrm);

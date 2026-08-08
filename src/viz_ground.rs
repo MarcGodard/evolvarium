@@ -16,9 +16,14 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 /// Tile repeats around the equator. 128 tiles over 2*PI*80 m = ~3.9 m per tile (grass-clump scale on foot).
-pub const GROUND_TILES_U: f32 = 128.0;
+// Repeat count is a VISIBILITY constraint, not a detail one. One tile stamped 128x64 times put every
+// feature of that tile on a regular lattice, and the eye integrates the repeats into lines: the planet read
+// as a grid from orbit even with the aliasing fixed. Mipmaps cure the moire, NOT the periodicity, so the
+// repeat itself has to come down. 32x16 puts a tile at ~16 m, sparse enough that the lattice stops being
+// legible, and the per-vertex ground_tint carries the large-scale variation the finer repeat used to fake.
+pub const GROUND_TILES_U: f32 = 32.0;
 /// Tile repeats pole to pole. Half of U because a meridian is half a great circle -> square tiles at equator.
-pub const GROUND_TILES_V: f32 = 64.0;
+pub const GROUND_TILES_V: f32 = 16.0;
 
 // ---------- noise helpers ----------
 
@@ -347,4 +352,53 @@ mod tests {
         let np = ground_uv(Vec3::Y);
         assert!((np[1] - GROUND_TILES_V).abs() < 1e-2, "north pole v {}", np[1]);
     }
+}
+
+// ---------- mipmaps ----------
+
+// Bevy 0.18 does NOT build mip chains. An unmipped tiling texture at GROUND_TILES_U repeats is undersampled
+// the moment a texel is smaller than a pixel, and the aliasing beats against the lat/lon tile lattice into
+// visible diagonal banding: from orbit the planet reads as a GRID rather than as ground. Filtering cannot
+// fix it at sample time, so the chain has to exist.
+//
+// Layout contract: wgpu wants every mip level concatenated after the base, each half the previous size
+// (floored, min 1), same row-major RGBA8 as the base. mip_level_count must match the number appended or
+// upload panics.
+pub fn with_mipmaps(mut img: Image) -> Image {
+    let w0 = img.texture_descriptor.size.width as usize;
+    let h0 = img.texture_descriptor.size.height as usize;
+    let Some(base) = img.data.clone() else { return img };
+    let mut out = base.clone();
+    let (mut w, mut h, mut prev) = (w0, h0, base);
+    let mut levels = 1u32;
+    while w > 1 || h > 1 {
+        let (nw, nh) = ((w / 2).max(1), (h / 2).max(1));
+        let mut next = vec![0u8; nw * nh * 4];
+        for y in 0..nh {
+            for x in 0..nw {
+                // box filter over the 2x2 parent block. Averaging in 8-bit sRGB is not gamma correct, but the
+                // texture is a near-neutral multiplier centred on ~0.85, so the error stays far below a
+                // quantization step and is not worth an encode/decode per texel.
+                for c in 0..4 {
+                    let mut sum = 0u32;
+                    for dy in 0..2 {
+                        for dx in 0..2 {
+                            let sx = (x * 2 + dx).min(w - 1);
+                            let sy = (y * 2 + dy).min(h - 1);
+                            sum += prev[(sy * w + sx) * 4 + c] as u32;
+                        }
+                    }
+                    next[(y * nw + x) * 4 + c] = (sum / 4) as u8;
+                }
+            }
+        }
+        out.extend_from_slice(&next);
+        prev = next;
+        w = nw;
+        h = nh;
+        levels += 1;
+    }
+    img.texture_descriptor.mip_level_count = levels;
+    img.data = Some(out);
+    img
 }
