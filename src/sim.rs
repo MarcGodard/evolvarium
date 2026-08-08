@@ -1670,9 +1670,9 @@ pub fn spawn_world_render(
     });
     // shared grass tuft mesh + one green material for ALL tufts (ubiquitous; size_grass scales each tuft length
     // by local soil). Double-sided so thin blades show from both faces.
-    commands.insert_resource(crate::viz::GrassMesh(meshes.add(crate::viz::grass_tuft_mesh())));
+    commands.insert_resource(crate::viz::GrassMesh(meshes.add(crate::viz_flora::grass_blade_mesh(14, 1))));
     commands.insert_resource(crate::viz::GrassMaterial(materials.add(StandardMaterial {
-        base_color: Color::srgb(0.24, 0.52, 0.18),
+        base_color: Color::srgb(0.40, 0.62, 0.26), // brighter than before: blade vertex colour supplies the base-to-tip darkening now
         perceptual_roughness: 0.95,
         // double_sided NEGATES the normal on back faces in Bevy PBR. Every blade normal is +Y, so a blade
         // whose back happens to face the camera got -Y, caught zero sun, and rendered ambient-only: that is

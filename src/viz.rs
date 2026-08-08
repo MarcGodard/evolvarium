@@ -2852,24 +2852,15 @@ fn update_sky(
             // water column reads as clearer water, not a gloomy murk.
             Vec3::new(0.05, 0.22, 0.32) * (0.45 + 0.55 * d)
         } else {
-            // Richer multi-stop day palette keyed by local daylight d (0 night .. 1 noon): deep indigo night ->
-            // violet pre-dawn -> warm orange dawn/dusk -> soft periwinkle low sun -> deep saturated zenith blue.
-            let stops = [
-                (0.00, Vec3::new(0.025, 0.035, 0.09)), // deep indigo night
-                (0.10, Vec3::new(0.14, 0.10, 0.26)),   // violet twilight
-                (0.22, Vec3::new(0.85, 0.42, 0.26)),   // warm dawn/dusk horizon
-                (0.40, Vec3::new(0.62, 0.58, 0.78)),   // hazy periwinkle, low sun
-                (1.00, Vec3::new(0.26, 0.55, 0.98)),   // deep clear midday blue
-            ];
-            let mut c = stops[stops.len() - 1].1;
-            for w in stops.windows(2) {
-                if d <= w[1].0 {
-                    let t = ((d - w[0].0) / (w[1].0 - w[0].0)).clamp(0.0, 1.0);
-                    let t = t * t * (3.0 - 2.0 * t); // smoothstep between stops
-                    c = w[0].1.lerp(w[1].1, t);
-                    break;
-                }
-            }
+            // Physically-motivated sky instead of a hand-tuned stop table. The old table's periwinkle stop
+            // dominated most of the day and is why the sky read as a flat lavender slab. sky_color_at takes
+            // real angles, so dawn warmth and zenith blue fall out of sun geometry rather than being keyed to
+            // a daylight scalar. Sampled at mid-sky elevation: one flat ClearColor cannot show a gradient, so
+            // pick the value that represents the bulk of the visible dome.
+            let sun = crate::sphere::sun_dir(vtick);
+            let sun_elev = sun.dot(dir).clamp(-1.0, 1.0).asin();
+            let c3 = crate::viz_sky::sky_color_at(0.55, sun_elev, std::f32::consts::FRAC_PI_2);
+            let c = Vec3::new(c3[0], c3[1], c3[2]);
             c
         }
     };
