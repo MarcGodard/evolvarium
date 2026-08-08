@@ -3103,7 +3103,15 @@ pub fn live_step(
         let on_ground = ((1.0 - wet_here) * (1.0 - air_here)).clamp(0.0, 1.0);
         let land_mult = 1.0 - on_ground * (1.0 - traction); // grounded legless -> traction; aloft/water -> 1.0
         let morph_water = 1.0 + (MORPH_FIN * morph.fin_area - MORPH_DRAG * (morph.frontal_area - MORPH_AREA_REF).max(0.0)) * wet_here;
+        // Q10: a body's biochemistry runs at ITS OWN temperature. A cold ectotherm goes sluggish and cannot
+        // forage or escape; an endotherm carries its climate and works at full rate. This is the BENEFIT that
+        // pays for warm blood, and without it the trade-off was one-sided: charging for endothermy while an
+        // ectotherm lost nothing in the cold inverted the thermal niches, putting the most endothermic
+        // creatures in the WARM band and the least in the cold, the exact reverse of Earth.
+        let here_t = crate::sphere::base_temperature(pos.normalize_or_zero());
+        let activity = crate::thermo::activity_scale(crate::thermo::field_to_kelvin(here_t), genome.endothermy, genome.temp_pref) as f32;
         let speed = MOVE_SPEED
+            * activity // cold-blooded and cold = slow
             * (1.0 + SWIM_SPEED * genome.swim * wet_here) // swimmers fast in water
             * (1.0 + FLIGHT_SPEED * genome.flight * air_here) // fliers fast aloft (gene x altitude)
             * land_mult // legged land traction (legless = crawl) -> selects for real locomotion
@@ -3876,6 +3884,11 @@ pub fn generation_step(
             let mut lng = 0.0;
             let mut met = 0.0;
             let mut endo = 0.0; // mean endothermy: shows whether warm blood is under selection
+            // ...and the same split by the climate each creature actually occupies. A global mean cannot tell
+            // "endotherms took the cold niche" (real, what Earth does) apart from "warm blood is uniformly
+            // unaffordable", because both produce the same average.
+            let (mut endo_c, mut endo_t, mut endo_w) = (0.0f32, 0.0f32, 0.0f32);
+            let (mut nc, mut nt, mut nw) = (0u32, 0u32, 0u32);
             let mut par = 0.0;
             let mut alp = 0.0; // mean alpine (mountain adaptation)
             let mut sw = 0.0; // mean swim (aquatic adaptation)
@@ -3903,6 +3916,11 @@ pub fn generation_step(
                 lng += g.longevity;
                 met += g.metab;
                 endo += g.endothermy;
+                match crate::sphere::base_temperature(t.translation.normalize_or_zero()) {
+                    x if x < 0.40 => { endo_c += g.endothermy; nc += 1; }
+                    x if x > 0.60 => { endo_w += g.endothermy; nw += 1; }
+                    _ => { endo_t += g.endothermy; nt += 1; }
+                }
                 par += g.parental;
                 alp += g.alpine;
                 sw += g.swim;
@@ -3916,8 +3934,10 @@ pub fn generation_step(
             let avg_qual: f32 = pq.iter().map(|(g, _)| g.quality).sum::<f32>() / plant_n as f32;
             let avg_wet: f32 = pq.iter().map(|(g, _)| g.wet).sum::<f32>() / plant_n as f32;
             info!(
-                "t {:>6} | pop {:>3} | energy {:.1} [f{:.1}/s{:.1}/F{:.1}] adp {:.2} | mast {:.2} brd {:.1} | life-fit {:.1} | age {:.0} | sens {:.1} | bite {:.2} | rig {:.2} | temp {:.2} lng {:.2} met {:.2} endo {:.2} par {:.2} lat {:.2} | swim {:.2} alp {:.2} aq {} hi {} | def {:.2} nut {:.2} qual {:.2} wet {:.2} | plants {} | soil {:.2} | rain {:.2} fire {:.3} | wear {:.3} bare {} | CHEM {} | {}",
-                gen.tick, pop, e / n, fa / n, su / n, ft / n, adp / n, mast / n, brd / n, f / n, age / n, sens / n, bite / n, rig / n, temp / n, lng / n, met / n, endo / n, par / n, abslat / n, sw / n, alp / n, aq, hi, avg_def, avg_nut, avg_qual, avg_wet, plant_n, fields.soil.avg(), fields.weather.rain, fields.fire.avg(), fields.wear.avg(), fields.wear.cell.iter().filter(|&&w| w > WEAR_GRASS_CULL).count(),
+                "t {:>6} | pop {:>3} | energy {:.1} [f{:.1}/s{:.1}/F{:.1}] adp {:.2} | mast {:.2} brd {:.1} | life-fit {:.1} | age {:.0} | sens {:.1} | bite {:.2} | rig {:.2} | temp {:.2} lng {:.2} met {:.2} endo {:.2}[c{:.2}/{} t{:.2}/{} w{:.2}/{}] par {:.2} lat {:.2} | swim {:.2} alp {:.2} aq {} hi {} | def {:.2} nut {:.2} qual {:.2} wet {:.2} | plants {} | soil {:.2} | rain {:.2} fire {:.3} | wear {:.3} bare {} | CHEM {} | {}",
+                gen.tick, pop, e / n, fa / n, su / n, ft / n, adp / n, mast / n, brd / n, f / n, age / n, sens / n, bite / n, rig / n, temp / n, lng / n, met / n, endo / n,
+                endo_c / nc.max(1) as f32, nc, endo_t / nt.max(1) as f32, nt, endo_w / nw.max(1) as f32, nw,
+                par / n, abslat / n, sw / n, alp / n, aq, hi, avg_def, avg_nut, avg_qual, avg_wet, plant_n, fields.soil.avg(), fields.weather.rain, fields.fire.avg(), fields.wear.avg(), fields.wear.cell.iter().filter(|&&w| w > WEAR_GRASS_CULL).count(),
                 fields.bio.report(
                     living_flora
                         + crate::chem::ANIMAL_COMP * cont_fauna_kg,

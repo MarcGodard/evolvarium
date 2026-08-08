@@ -231,3 +231,88 @@ mod tests {
         assert!((0.05..=0.95).contains(&freeze01), "0 C sits at field {freeze01:.2}");
     }
 }
+
+// --- the benefit side of endothermy ---
+// Charging for warm blood without paying it back is what inverted this world's thermal niches: mean
+// endothermy came out HIGHEST in the warm band (0.39) and LOWEST in the cold (0.19), the exact reverse of
+// Earth, where endotherms dominate cold climates. With only a cost term, the cold is simply where warm blood
+// is least affordable, so selection strips it there.
+// What was missing is why endothermy is worth anything: a body's biochemistry runs at its own temperature.
+// An ectotherm in the cold goes SLUGGISH and cannot forage, escape, or compete; an endotherm carries its
+// climate with it and works at full rate in the dark and the cold. That is the payoff, and without it the
+// trade-off is one-sided.
+
+/// Q10 for whole-animal performance. Real ectotherm locomotion and digestion run Q10 ~2-3: every 10 K drop
+/// roughly halves the rate.
+pub const ACTIVITY_Q10: f64 = 2.5;
+/// Temperature at which an ectotherm performs at full rate, K (~30 C, a basking reptile's preferred body
+/// temperature). Above this, performance is capped rather than continuing to climb.
+pub const ACTIVITY_REF_K: f64 = 303.0;
+
+/// Operating body temperature: an endotherm defends its setpoint, an ectotherm takes the environment's.
+/// Mixed values interpolate, which is real: many animals are partial or seasonal endotherms.
+pub fn body_temp_k(env_k: f64, endothermy: f32) -> f64 {
+    let e = (endothermy as f64).clamp(0.0, 1.0);
+    env_k + (ENDO_SETPOINT_K - env_k) * e
+}
+
+/// Half-width of an ectotherm's thermal performance curve, K. Real ectotherm performance curves are narrow:
+/// a lizard near its preferred temperature is quick, and 15 K off it is torpid.
+pub const ECTO_TOLERANCE_K: f64 = 14.0;
+
+/// Performance multiplier 0..1. The real trade-off is not "warm is fast" but CURVE SHAPE: an ectotherm has a
+/// narrow curve peaked at the temperature it is ADAPTED to, and an endotherm has a flat one because it
+/// carries its own climate. So endothermy does not buy raw speed, it buys BREADTH: freedom to range across
+/// climates, forage through the cold, and ignore where it is, while an ectotherm is locked to its band.
+///
+/// An earlier version pinned every ectotherm's optimum at a fixed 30 C. On a world averaging ~7 C that made
+/// essentially the whole population permanently torpid (~9% speed) and halved the population, which is a
+/// modelling error rather than a result: real ectotherms adapt their optimum to their local climate, and
+/// `temp_pref` is exactly that adaptation.
+pub fn activity_scale(env_k: f64, endothermy: f32, temp_pref: f32) -> f64 {
+    let e = (endothermy as f64).clamp(0.0, 1.0);
+    let optimum = field_to_kelvin(temp_pref);
+    let miss = (env_k - optimum).abs();
+    // gaussian-ish falloff off the optimum, flattened toward 1.0 as endothermy rises
+    let ecto = (-(miss / ECTO_TOLERANCE_K).powi(2)).exp();
+    (ecto + (1.0 - ecto) * e).clamp(0.05, 1.0)
+}
+
+#[cfg(test)]
+mod activity_tests {
+    use super::*;
+
+    #[test]
+    fn an_ectotherm_is_fast_at_home_and_torpid_away_from_it() {
+        // narrow curve: full rate at its adapted temperature, useless well off it
+        let home = activity_scale(field_to_kelvin(0.3), 0.0, 0.3);
+        let away = activity_scale(field_to_kelvin(0.9), 0.0, 0.3);
+        assert!(home > 0.95, "an ectotherm at its own optimum is quick, got {home:.2}");
+        assert!(away < 0.3, "far off its optimum it should be torpid, got {away:.2}");
+    }
+
+    #[test]
+    fn endothermy_buys_breadth_not_speed() {
+        // the actual payoff: an endotherm gives up nothing anywhere, so it can range across climates while an
+        // ectotherm is pinned to its band. It gains NO advantage at the ectotherm's own optimum.
+        let pref = 0.3;
+        let at_home = (activity_scale(field_to_kelvin(0.3), 1.0, pref), activity_scale(field_to_kelvin(0.3), 0.0, pref));
+        let away = (activity_scale(field_to_kelvin(0.9), 1.0, pref), activity_scale(field_to_kelvin(0.9), 0.0, pref));
+        assert!((at_home.0 - at_home.1).abs() < 0.06, "no edge on the ectotherm's home ground");
+        assert!(away.0 > away.1 * 2.5, "big edge away from it: {:.2} vs {:.2}", away.0, away.1);
+    }
+
+    #[test]
+    fn a_cold_adapted_ectotherm_is_not_punished_for_the_cold() {
+        // guards the bug this replaced: a fixed 30 C optimum made every creature on a ~7 C world torpid
+        let cold = field_to_kelvin(0.15);
+        assert!(activity_scale(cold, 0.0, 0.15) > 0.95, "cold-adapted life must work in the cold");
+    }
+
+    #[test]
+    fn body_temp_tracks_strategy() {
+        let cold = field_to_kelvin(0.1);
+        assert!((body_temp_k(cold, 0.0) - cold).abs() < 1e-9, "an ectotherm takes ambient");
+        assert!((body_temp_k(cold, 1.0) - ENDO_SETPOINT_K).abs() < 1e-9, "an endotherm holds setpoint");
+    }
+}
