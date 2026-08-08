@@ -2517,7 +2517,12 @@ pub fn plant_step(
             break;
         }
         let est = 0.6 + 0.8 * g.seed_weight;
-        spawn_plant(&mut commands, g, rng.range(0.5, 1.3) * PLANT_START_MASS * est, pos);
+        let want = (rng.range(0.5, 1.3) * PLANT_START_MASS * est) as f64;
+        let funded = bio.draw_for_growth(grid_cell(pos), crate::chem::PLANT_COMP, want);
+        if funded <= 0.0 {
+            continue; // seed germinates into exhausted ground and fails
+        }
+        spawn_plant(&mut commands, g, funded as f32, pos);
         pop += 1;
     }
     // reseed floor: keep a minimal biome-matched seed base so creatures can't drive food fully extinct.
@@ -2526,7 +2531,16 @@ pub fn plant_step(
         let pos = rand_pos(&mut rng, FOOD_Y);
         let g = plant_for_site(&mut rng, pos.normalize_or_zero());
         let est = 0.6 + 0.8 * g.seed_weight;
-        spawn_plant(&mut commands, g, rng.range(0.5, 1.3) * PLANT_START_MASS * est, pos);
+        // Anti-extinction RESCUE, the one path deliberately allowed to create matter, because a food web that
+        // has fully collapsed cannot bootstrap itself out of an empty soil. It draws whatever the ground can
+        // actually fund first and mints only the shortfall, so in a healthy world it costs nothing.
+        let want = (rng.range(0.5, 1.3) * PLANT_START_MASS * est) as f64;
+        let funded = bio.draw_for_growth(grid_cell(pos), crate::chem::PLANT_COMP, want);
+        let minted = want - funded;
+        if minted > 0.0 {
+            bio.rescue_minted += crate::chem::PLANT_COMP * minted;
+        }
+        spawn_plant(&mut commands, g, want as f32, pos);
         pop += 1;
     }
     let mut spawned_trees = 0usize;
@@ -3580,7 +3594,8 @@ pub fn live_step(
             let fat = (energy.fat / fat_max.max(0.01)).clamp(0.0, 1.0); // fattiness at death
             // carrion + death-fert + self-despawn deferred to apply (carrion spawn order -> deterministic new index;
             // soil float-sum sorted; pop decremented serially). Drowning returned earlier -> leaves no carrion.
-            bat.carrion.push((idx, ct.translation, CARRION_MASS, fat));
+            let body_kg = crate::chem::creature_mass_kg(morph.mass) as f32;
+            bat.carrion.push((idx, ct.translation, body_kg, fat));
             bat.soil_adds.push((idx, ct.translation, DEATH_FERT)); // death enriches ground here
             // continuous (post-warmup): corpse entity gone (became carrion). Generational mode + warm-up keep it
             // (Alive=false) to recycle into next generation.
@@ -3652,7 +3667,13 @@ pub fn live_step(
     wear.decay();
     // carrion from this tick's deaths (sorted -> deterministic new entity indices)
     for (_, pos, mass, fat) in &carrion {
-        spawn_carrion(&mut commands, *pos, *mass, *fat);
+        // a carrion entity holds at most CARRION_MASS; a bigger corpse leaves the remainder as litter rather
+        // than having it vanish
+        let kept = mass.min(CARRION_MASS);
+        if *mass > kept {
+            bio.deposit_litter(grid_cell(*pos), (*mass - kept) as f64, crate::chem::ANIMAL_COMP);
+        }
+        spawn_carrion(&mut commands, *pos, kept, *fat);
     }
     // endozoochory-dispersed plants (coarse PLANT_CAP gate already applied in decide via start-of-tick foods.len())
     for (_, g, pos) in plant_births {
@@ -3669,6 +3690,15 @@ pub fn live_step(
     let mut run_niche = niche_pop;
     for (_, child, pos, birth_e, ni) in births {
         if run_pop >= CREATURE_CAP || run_niche[ni] >= NICHE_CAP[ni] {
+            continue;
+        }
+        // fund the newborn's tissue from the population's assimilated matter. A world whose plants could not
+        // pass up enough nitrogen simply stops producing offspring, so animal carrying capacity becomes a
+        // consequence of the food web rather than of CREATURE_CAP.
+        let body_kg = crate::chem::creature_mass_kg(
+            child.morph.map(|m| m.mass).unwrap_or_else(|| crate::morph::Morphometrics::of(&child.body).mass),
+        );
+        if !bio.draw_fauna(crate::chem::ANIMAL_COMP * body_kg) {
             continue;
         }
         spawn_creature(&mut commands, child, pos, &mut rng, birth_e);
@@ -3785,7 +3815,11 @@ pub fn generation_step(
             let mut aq = 0u32; // count of aquatic creatures (swim > 0.6) -> fish niche size
             let mut hi = 0u32; // count of highland creatures (alpine > 0.5) -> mountain niche size
             let mut abslat = 0.0; // mean |latitude| of the population (0 equator .. ~1.57 pole) -> spread check
+            let mut cont_fauna_kg = 0.0f64; // animal standing stock for the CHEM ledger
             for (t, en, fit, _h, _a, g, _b, diet, _l) in cq.iter() {
+                cont_fauna_kg += crate::chem::creature_mass_kg(
+                    g.morph.map(|m| m.mass).unwrap_or_else(|| crate::morph::Morphometrics::of(&g.body).mass),
+                );
                 e += en.total();
                 fa += en.fast;
                 su += en.sugar;
@@ -3814,8 +3848,13 @@ pub fn generation_step(
             let avg_qual: f32 = pq.iter().map(|(g, _)| g.quality).sum::<f32>() / plant_n as f32;
             let avg_wet: f32 = pq.iter().map(|(g, _)| g.wet).sum::<f32>() / plant_n as f32;
             info!(
-                "t {:>6} | pop {:>3} | energy {:.1} [f{:.1}/s{:.1}/F{:.1}] adp {:.2} | mast {:.2} brd {:.1} | life-fit {:.1} | age {:.0} | sens {:.1} | bite {:.2} | rig {:.2} | temp {:.2} lng {:.2} met {:.2} par {:.2} lat {:.2} | swim {:.2} alp {:.2} aq {} hi {} | def {:.2} nut {:.2} qual {:.2} wet {:.2} | plants {} | soil {:.2} | rain {:.2} fire {:.3} | wear {:.3} bare {}",
-                gen.tick, pop, e / n, fa / n, su / n, ft / n, adp / n, mast / n, brd / n, f / n, age / n, sens / n, bite / n, rig / n, temp / n, lng / n, met / n, par / n, abslat / n, sw / n, alp / n, aq, hi, avg_def, avg_nut, avg_qual, avg_wet, plant_n, fields.soil.avg(), fields.weather.rain, fields.fire.avg(), fields.wear.avg(), fields.wear.cell.iter().filter(|&&w| w > WEAR_GRASS_CULL).count()
+                "t {:>6} | pop {:>3} | energy {:.1} [f{:.1}/s{:.1}/F{:.1}] adp {:.2} | mast {:.2} brd {:.1} | life-fit {:.1} | age {:.0} | sens {:.1} | bite {:.2} | rig {:.2} | temp {:.2} lng {:.2} met {:.2} par {:.2} lat {:.2} | swim {:.2} alp {:.2} aq {} hi {} | def {:.2} nut {:.2} qual {:.2} wet {:.2} | plants {} | soil {:.2} | rain {:.2} fire {:.3} | wear {:.3} bare {} | CHEM {}",
+                gen.tick, pop, e / n, fa / n, su / n, ft / n, adp / n, mast / n, brd / n, f / n, age / n, sens / n, bite / n, rig / n, temp / n, lng / n, met / n, par / n, abslat / n, sw / n, alp / n, aq, hi, avg_def, avg_nut, avg_qual, avg_wet, plant_n, fields.soil.avg(), fields.weather.rain, fields.fire.avg(), fields.wear.avg(), fields.wear.cell.iter().filter(|&&w| w > WEAR_GRASS_CULL).count(),
+                fields.bio.report(
+                    pf.iter().fold(crate::chem::Elements::ZERO, |t, (g, st, ..)| t + tissue_comp(g) * st.mass as f64)
+                        + crate::chem::ANIMAL_COMP * cont_fauna_kg,
+                    cont_fauna_kg,
+                )
             );
             // Track best healthy snapshot for --save. Score = pop, gated on well-fed (avg energy >= 30) so we never
             // bank a starving crowd. Captured only when saving (snapshot clone not free).
@@ -3912,8 +3951,15 @@ pub fn generation_step(
     let avg_wet: f32 = pq.iter().map(|(g, _)| g.wet).sum::<f32>() / plant_n as f32;
     // fauna standing stock, measured not governed: creature bodies are still derived from geometry rather
     // than accumulated by eating, so this quantifies the gap Phase 2 has to close.
+    // Only LIVING creatures hold matter. In generational warm-up a dead creature keeps its entity as a
+    // recyclable placeholder AND spawns carrion, so counting every entity double-counts that corpse and
+    // reports a mint. The placeholder is not a body; the carrion is. Consequence worth knowing when reading
+    // logs: during warm-up this line is sampled at a generation boundary, when the whole population is
+    // momentarily dead, so fauna reads ~0 and the matter shows up in the flora/carrion term instead. Past
+    // WARMUP_GENS (12) the sim runs continuous and the figure is a real standing stock.
     let fauna_kg: f64 = cq
         .iter()
+        .filter(|(_, _, _, _, a, ..)| a.0)
         .map(|(_, _, _, _, _, g, ..)| {
             crate::chem::creature_mass_kg(g.morph.map(|m| m.mass).unwrap_or_else(|| crate::morph::Morphometrics::of(&g.body).mass))
         })

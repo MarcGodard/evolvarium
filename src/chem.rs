@@ -288,6 +288,12 @@ pub fn npp_ceiling_per_tick() -> f64 {
 /// radius, eat/attack reach, camera framing) and belongs in a visual pass, not here. Revisit it then.
 pub const BODY_MASS_PER_MORPH: f64 = 1.5;
 
+/// Share of ingested matter that becomes new animal tissue rather than being respired and excreted. Real net
+/// production efficiency runs ~1-10% for endotherms and up to ~40% for ectotherms; 0.2 sits in the middle for
+/// a mixed population. This one number IS the trophic step, so raising it toward 1.0 would let animals
+/// approach the biomass of their food supply, which is exactly the inverted pyramid this world had.
+pub const ASSIMILATION: f64 = 0.2;
+
 /// Live mass in kg of a body with the given `Morphometrics.mass` shape proxy.
 pub fn creature_mass_kg(morph_volume: f32) -> f64 {
     morph_volume.max(0.0) as f64 * BODY_MASS_PER_MORPH
@@ -352,6 +358,20 @@ pub struct Biosphere {
     pub buried: Elements,
     /// Unweathered crust. Only tap for phosphorus, since P cannot come from the air.
     pub rock: Elements,
+    /// Matter assimilated from food but not yet built into a body: the population's shared tissue budget.
+    /// One world-level pool rather than a per-creature stock, deliberately. Per-individual stores would add a
+    /// component, a grant system, and a claim-dedup pass to every eating path, and would buy per-individual
+    /// condition that `Energy` already models. What actually matters ecologically is the POPULATION-level
+    /// constraint, and this delivers it: births draw from here, so when the world's assimilated nitrogen runs
+    /// out, reproduction fails. Carrying capacity for animals stops being CREATURE_CAP and becomes the
+    /// nitrogen the plants could actually pass up a trophic level.
+    #[serde(default)]
+    pub fauna_pool: Elements,
+    /// Matter created by the anti-extinction reseed rescue. NOT a reservoir: it is a running tally of the
+    /// only sanctioned violation of conservation, kept so the ledger can subtract it and still report honest
+    /// drift. A healthy world should leave this near zero; a large value means the food web keeps collapsing.
+    #[serde(default)]
+    pub rescue_minted: Elements,
     /// Non-living total at world creation, kept so `drift_ppm` can report leakage as a live number rather
     /// than only in tests. Once living biomass is element-backed, pass it to `drift_ppm` and this becomes
     /// the single honest answer to "is the world still conserving".
@@ -380,6 +400,8 @@ impl Biosphere {
             air: Elements::new(AIR_C_PER_M2 * total_area, AIR_N_PER_M2 * total_area, 0.0),
             buried: Elements::ZERO,
             rock: Elements::new(0.0, 0.0, ROCK_P_PER_M2 * total_area),
+            fauna_pool: Elements::ZERO,
+            rescue_minted: Elements::ZERO,
             initial_total: Elements::ZERO,
         };
         b.initial_total = b.total();
@@ -389,7 +411,7 @@ impl Biosphere {
     /// Leakage since creation, parts per million per element, given the `living` biomass currently held
     /// outside these reservoirs. Must stay at 0; anything else means a path is creating or destroying matter.
     pub fn drift_ppm(&self, living: Elements) -> Elements {
-        let now = self.total() + living;
+        let now = self.total() + living - self.rescue_minted;
         let base = self.initial_total;
         let rel = |a: f64, b: f64| if b.abs() > 0.0 { (a - b) / b * 1.0e6 } else { 0.0 };
         Elements::new(rel(now.c, base.c), rel(now.n, base.n), rel(now.p, base.p))
@@ -428,7 +450,7 @@ impl Biosphere {
 
     /// All non-living matter. Pair with living biomass for the full ledger.
     pub fn total(&self) -> Elements {
-        let mut t = self.air + self.buried + self.rock;
+        let mut t = self.air + self.buried + self.rock + self.fauna_pool;
         for c in &self.soil {
             t += c.total();
         }
@@ -519,10 +541,33 @@ impl Biosphere {
             return;
         }
         let eaten = comp * mass;
-        self.air.c += eaten.c; // respiration
+        // Only a small share of what is eaten becomes new animal tissue; the rest is respired for
+        // maintenance and excreted. Real net production efficiency is ~1-10% for endotherms and up to ~40%
+        // for ectotherms. This split is the trophic step: it is WHY each level supports so much less biomass
+        // than the one below it, and it is what keeps the pyramid upright without a hard cap.
+        let kept = eaten * ASSIMILATION;
+        let lost = eaten - kept;
+        self.fauna_pool += kept;
+        self.air.c += lost.c; // respiration
         let cell = &mut self.soil[idx];
-        cell.mineral.n += eaten.n; // urea and dung, already plant-available
-        cell.mineral.p += eaten.p;
+        cell.mineral.n += lost.n; // urea and dung, already plant-available
+        cell.mineral.p += lost.p;
+    }
+
+    /// Try to build `need` of animal tissue from the shared pool. Returns false and takes nothing when the
+    /// pool cannot cover it, which is how a birth fails for want of nitrogen rather than for want of a cap.
+    pub fn draw_fauna(&mut self, need: Elements) -> bool {
+        if need.c > self.fauna_pool.c || need.n > self.fauna_pool.n || need.p > self.fauna_pool.p {
+            return false;
+        }
+        self.fauna_pool -= need;
+        self.fauna_pool = self.fauna_pool.max0();
+        true
+    }
+
+    /// Return animal tissue to the shared pool (a body that never became carrion, e.g. drowned at sea).
+    pub fn return_fauna(&mut self, amount: Elements) {
+        self.fauna_pool += amount;
     }
 
     /// Biological nitrogen fixation: rhizobia pulling inert atmospheric N2 into plant-available soil N.
@@ -706,6 +751,68 @@ mod tests {
             b.decompose(7, 0.7, 0.6, 20.0);
         }
         assert_conserved(start, b.total(), "decay");
+    }
+
+    #[test]
+    fn eating_splits_without_leaking() {
+        // the trophic step itself: most of what is eaten is respired and excreted, a small share is retained
+        // as animal tissue. Both destinations are tracked, so the split must be exactly matter-neutral.
+        let mut b = Biosphere::new();
+        let start = b.total();
+        let grown = b.draw_for_growth(5, PLANT_COMP, 20.0);
+        assert!(grown > 0.0);
+        assert_conserved(start, b.total() + PLANT_COMP * grown, "growth before eating");
+        b.consume_and_excrete(5, grown, PLANT_COMP);
+        assert_conserved(start, b.total(), "eating");
+        // and the retained share is the assimilation fraction, not everything
+        let retained = b.fauna_pool.c;
+        assert!(
+            (retained - PLANT_COMP.c * grown * ASSIMILATION).abs() < 1e-9,
+            "assimilation share wrong: {retained}"
+        );
+    }
+
+    #[test]
+    fn a_birth_cannot_outrun_the_fauna_pool() {
+        // the population-level constraint that replaces CREATURE_CAP: no assimilated nitrogen, no offspring.
+        let mut b = Biosphere::new();
+        assert!(!b.draw_fauna(ANIMAL_COMP * 1.0), "an empty pool must not fund a birth");
+        let start = b.total();
+        b.fauna_pool = ANIMAL_COMP * 2.0;
+        let after_seed = b.total();
+        assert!(b.draw_fauna(ANIMAL_COMP * 1.5), "a stocked pool should fund a birth");
+        assert!(!b.draw_fauna(ANIMAL_COMP * 1.0), "the remainder cannot cover a second birth");
+        // matter taken from the pool is now standing in a body, so account for it explicitly
+        assert_conserved(after_seed, b.total() + ANIMAL_COMP * 1.5, "birth draw");
+        assert!(b.fauna_pool.n >= 0.0, "pool went negative");
+        let _ = start;
+    }
+
+    #[test]
+    fn the_whole_food_web_conserves() {
+        // one full circuit: soil+air -> plant -> eaten -> animal tissue -> carcass -> litter -> mineralized.
+        // This is the loop the entire phase exists to close, so it is asserted end to end.
+        let mut b = Biosphere::new();
+        let start = b.total();
+        let plant = b.draw_for_growth(11, PLANT_COMP, 30.0);
+        assert!(plant > 0.0);
+        assert_conserved(start, b.total() + PLANT_COMP * plant, "grown");
+
+        b.consume_and_excrete(11, plant, PLANT_COMP); // herbivory
+        assert_conserved(start, b.total(), "eaten");
+
+        let body_kg = b.fauna_pool.max_biomass(ANIMAL_COMP) * 0.5;
+        assert!(body_kg > 0.0, "eating must leave enough to build a body");
+        assert!(b.draw_fauna(ANIMAL_COMP * body_kg));
+        assert_conserved(start, b.total() + ANIMAL_COMP * body_kg, "body standing");
+
+        b.deposit_litter(11, body_kg, ANIMAL_COMP); // death: carcass returns at ANIMAL composition
+        assert_conserved(start, b.total(), "death");
+
+        for _ in 0..500 {
+            b.decompose(11, 0.7, 0.6, 30.0);
+        }
+        assert_conserved(start, b.total(), "decomposed");
     }
 
     #[test]

@@ -280,8 +280,21 @@ Roadmap: fundamentals -> living ocean -> parasites. Scale decision: 1 world unit
       band of 0.5-1, and nitrogen is the limiting element as in real temperate systems.
 - [x] `PLANT_CAP` 4000 -> 12000, redefined as a PERF ceiling. Counts sitting exactly on it mean the chemistry
       is not limiting, which is a bug rather than a reason to raise it.
-- [ ] **Phase 2**: element-backed creature bodies (closes the last drift gap), then thermodynamics (Kleiber,
-      body-temperature heat balance), mechanics (drag, Archimedes, lift), stellar radiation.
+- [~] **Phase 2 fauna** (in progress): creature mass calibrated from the ecology (`BODY_MASS_PER_MORPH`),
+      tissue accounted at its own composition (`tissue_comp`: carrion is animal flesh, ~7x the N of litter),
+      and a world-level `Biosphere.fauna_pool` holding assimilated-but-unbuilt matter. Eating now SPLITS at
+      `ASSIMILATION` (0.2): a small share is retained as animal tissue, the rest respired and excreted. That
+      split IS the trophic step and is what keeps the pyramid upright without a cap. Births DRAW from the
+      pool, so when assimilated nitrogen runs out reproduction fails: animal carrying capacity becomes a
+      consequence of the food web rather than of `CREATURE_CAP`. Death now returns the creature's ACTUAL mass
+      (was a `CARRION_MASS` constant). Chose a single shared pool over per-creature body stocks deliberately:
+      per-individual stores would need a component, a grant system, and claim dedup on every eating path, to
+      buy condition that `Energy` already models, while the constraint that matters is population-level.
+      Full food-web circuit asserted matter-neutral end to end in `chem.rs` tests.
+- [ ] **Phase 2 remaining**: verify drift in CONTINUOUS mode (all runs so far sat inside the 12-gen
+      generational warm-up, where a dead creature keeps its entity as a recyclable placeholder AND spawns
+      carrion, so the sim double-counts by design and the ledger cannot read clean). Then thermodynamics
+      (Kleiber, body-temperature heat balance), mechanics (drag, Archimedes, lift), stellar radiation.
 
 ### Findings that only became visible once matter was measured
 
