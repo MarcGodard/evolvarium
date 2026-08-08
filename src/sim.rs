@@ -3892,11 +3892,19 @@ pub fn generation_step(
     let avg_nut: f32 = pq.iter().map(|(g, _)| g.nutrient).sum::<f32>() / plant_n as f32;
     let avg_qual: f32 = pq.iter().map(|(g, _)| g.quality).sum::<f32>() / plant_n as f32;
     let avg_wet: f32 = pq.iter().map(|(g, _)| g.wet).sum::<f32>() / plant_n as f32;
+    // fauna standing stock, measured not governed: creature bodies are still derived from geometry rather
+    // than accumulated by eating, so this quantifies the gap Phase 2 has to close.
+    let fauna_kg: f64 = cq
+        .iter()
+        .map(|(_, _, _, _, _, g, ..)| {
+            crate::chem::creature_mass_kg(g.morph.map(|m| m.mass).unwrap_or_else(|| crate::morph::Morphometrics::of(&g.body).mass))
+        })
+        .sum();
     if gen.diet {
         let avg_rig: f32 = scored.iter().map(|(_, g)| g.rigidity).sum::<f32>() / n as f32;
-        info!("gen {:>3} | nutri {:>6.2} | sens {:.1} r{:.0} | rig {:.2} | bite {:.2} vs def {:.2} | light {:.2} sz {:.2} sw {:.2} so {:.2} brain {:.1} | plant-nut {:.2} qual {:.2} wet {:.2} | roam {:.2} elev {:.1} | plants {} soil {:.2} gw {:.2} clim {:.2}[{:.2}-{:.2}] desert {:.0}% fire {:.3} wear {:.3} | trees {} h{:.2} b{:.2} | CHEM {}", gen.generation, avg, avg_sensors, avg_range, avg_rig, avg_bite, avg_def, avg_light, avg_size, avg_swim, avg_social, avg_hidden, avg_nut, avg_qual, avg_wet, avg_roam, avg_elev, plant_n, fields.soil.avg(), fields.gw.avg(), fields.climate.avg(), fields.climate.range().0, fields.climate.range().1, fields.climate.land_arid_frac(0.25) * 100.0, fields.fire.avg(), fields.wear.avg(), tree_n, avg_tree_h, avg_tree_b, fields.bio.report(flora_matter(pf.iter().map(|(_, st, ..)| st.mass as f64).sum())));
+        info!("gen {:>3} | nutri {:>6.2} | sens {:.1} r{:.0} | rig {:.2} | bite {:.2} vs def {:.2} | light {:.2} sz {:.2} sw {:.2} so {:.2} brain {:.1} | plant-nut {:.2} qual {:.2} wet {:.2} | roam {:.2} elev {:.1} | plants {} soil {:.2} gw {:.2} clim {:.2}[{:.2}-{:.2}] desert {:.0}% fire {:.3} wear {:.3} | trees {} h{:.2} b{:.2} | CHEM {}", gen.generation, avg, avg_sensors, avg_range, avg_rig, avg_bite, avg_def, avg_light, avg_size, avg_swim, avg_social, avg_hidden, avg_nut, avg_qual, avg_wet, avg_roam, avg_elev, plant_n, fields.soil.avg(), fields.gw.avg(), fields.climate.avg(), fields.climate.range().0, fields.climate.range().1, fields.climate.land_arid_frac(0.25) * 100.0, fields.fire.avg(), fields.wear.avg(), tree_n, avg_tree_h, avg_tree_b, fields.bio.report(flora_matter(pf.iter().map(|(_, st, ..)| st.mass as f64).sum()), fauna_kg));
     } else {
-        info!("gen {:>3} | food {:>6.2} | sens {:.1} r{:.0} | bite {:.2} vs def {:.2} | plant-nut {:.2} qual {:.2} wet {:.2} | roam {:.2} elev {:.1} | plants {} soil {:.2} gw {:.2} | CHEM {}", gen.generation, avg, avg_sensors, avg_range, avg_bite, avg_def, avg_nut, avg_qual, avg_wet, avg_roam, avg_elev, plant_n, fields.soil.avg(), fields.gw.avg(), fields.bio.report(flora_matter(pf.iter().map(|(_, st, ..)| st.mass as f64).sum())));
+        info!("gen {:>3} | food {:>6.2} | sens {:.1} r{:.0} | bite {:.2} vs def {:.2} | plant-nut {:.2} qual {:.2} wet {:.2} | roam {:.2} elev {:.1} | plants {} soil {:.2} gw {:.2} | CHEM {}", gen.generation, avg, avg_sensors, avg_range, avg_bite, avg_def, avg_nut, avg_qual, avg_wet, avg_roam, avg_elev, plant_n, fields.soil.avg(), fields.gw.avg(), fields.bio.report(flora_matter(pf.iter().map(|(_, st, ..)| st.mass as f64).sum()), fauna_kg));
     }
 
     // elite pool (clone+mutate, asexual)

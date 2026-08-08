@@ -266,6 +266,44 @@ pholmq/TSN (GPL-2.0) @ commit 49fd49c (pinned in `orrery.rs` + `stars.rs` commen
       240, `TREE_CAP` 480 so forests fill the globe (ambient reproduction tops up).
 - [ ] **Rebalance population** for the heavier whole-planet world (grass graze + tree caps); deferred.
 
+## Fundamentals retrofit (chemistry + physics) — IN PROGRESS
+
+Plan: `~/.claude/plans/steady-wishing-swan.md`. Principle: **matter is closed, energy flows through**.
+Roadmap: fundamentals -> living ocean -> parasites. Scale decision: 1 world unit = 1 metre, SI throughout.
+
+- [x] **Phase 0**: baseline captured (seeds 1/5/9); pre-retrofit `plants` sat pinned at `PLANT_CAP`.
+- [x] **Phase 1 chemistry** (`src/chem.rs`): conserved C/N/P reservoirs (soil mineral/organic, atmosphere,
+      buried sediment, rock), Liebig's law of the minimum replacing the fertility multiplier, bacteria+fungi
+      as a Q10 decomposition rate law, real N fixation / P weathering / burial / uplift. Plants now DRAW from
+      the budget; death, fire (real combustion, N volatilizes and P stays as ash), grazing, and reproduction
+      all route through reservoirs. Standing biomass reaches 0.40 kg/m2 against the real temperate grassland
+      band of 0.5-1, and nitrogen is the limiting element as in real temperate systems.
+- [x] `PLANT_CAP` 4000 -> 12000, redefined as a PERF ceiling. Counts sitting exactly on it mean the chemistry
+      is not limiting, which is a bug rather than a reason to raise it.
+- [ ] **Phase 2**: element-backed creature bodies (closes the last drift gap), then thermodynamics (Kleiber,
+      body-temperature heat balance), mechanics (drag, Archimedes, lift), stellar radiation.
+
+### Findings that only became visible once matter was measured
+
+- **INVERTED TROPHIC PYRAMID (open, biggest one).** Fauna standing stock is 1.95-2.12 kg/m2 against flora
+  0.12-0.21: animals outweigh plants 10-16x. Real ecosystems run the other way round, with animal stock at
+  1-10% of plant stock, because each trophic step loses ~90%. Mean creature body is 1.74 m^3 of geometric
+  volume, which at flesh density is ~1700 kg, a rhinoceros. So the world is roughly 100-1000x overstocked
+  for its area. Not fixable by tuning: either the planet is far too small for its population (PLANET_R 80 m
+  would need to be ~700 m for 1100 sheep-sized animals), or `Morphometrics.mass` is not metre-scale volume
+  and needs an explicit calibration. DECIDE BEFORE Phase 2, since element-backed bodies make it binding.
+  Diagnostic lives in `chem::trophic_ratio` + the CHEM log line.
+- **Two clocks disagree.** Astronomical (DAY_TICKS*DT = 40 s per calendar day vs 86400 real) vs biological
+  (a creature lives ~1 calendar day vs ~1.5 real years). Confined to `chem::BIO_ACCEL`; all biotic rates
+  carry the same factor so their ratios stay real, which is what preserves emergent behaviour.
+- **Soil ratios are not free parameters.** NPP, soil organic stock, and decomposition rate are mutually
+  determined at steady state, and the organic pool's C:N must come from LITTER (30), not a humus table (12),
+  or nitrogen is over-released 2.5x and nothing is ever nutrient-limited. Locked by a test across all three
+  elements; checking carbon alone is what let N run away.
+- **NPP is area-limited, not per-plant.** Light falls on ground, so a cell's plant community shares one
+  budget. Previously productivity scaled with entity count.
+- Residual ledger drift is +4794 ppm over 5 gens, entirely from fauna not being element-backed yet.
+
 ## Open
 
 ### Agent tuning harness (see clients/evolvarium/14-tuning-harness.md)

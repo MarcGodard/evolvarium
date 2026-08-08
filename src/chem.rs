@@ -268,6 +268,32 @@ pub fn npp_ceiling_per_tick() -> f64 {
     NPP_PER_M2_DAY * PLANT_FOOTPRINT_M2 * bio_days_per_tick()
 }
 
+/// Density of animal tissue, kg/m^3. Real flesh is close to water.
+pub const BODY_DENSITY: f64 = 1000.0;
+
+/// Convert a body's geometric volume (`Morphometrics.mass` = sum of part volumes, m^3 under the 1 unit =
+/// 1 metre scale) into kilograms. Creature bodies are not yet element-backed stocks; this is what lets the
+/// ledger MEASURE the fauna it does not yet govern.
+pub fn creature_mass_kg(morph_volume: f32) -> f64 {
+    morph_volume.max(0.0) as f64 * BODY_DENSITY
+}
+
+/// Plausible band for animal standing stock as a fraction of plant standing stock. Each trophic step loses
+/// roughly 90% of its energy, so a real ecosystem carries far less animal than plant: ~1-10%. A world above
+/// this is asking its plants to support more animal flesh than they physically can, whatever the energy
+/// bookkeeping says, and no amount of tuning fixes it because it is a thermodynamic constraint.
+pub const TROPHIC_RATIO_MAX: f64 = 0.10;
+
+/// Animal-to-plant standing-stock ratio. Diagnostic, not a limiter: the sim currently runs far above the
+/// plausible band (measured ~10-16x, i.e. animals outweighing plants) and correcting that is a live balance
+/// question about planet size versus population, not something to silently clamp.
+pub fn trophic_ratio(flora_kg: f64, fauna_kg: f64) -> f64 {
+    if flora_kg <= 0.0 {
+        return f64::INFINITY;
+    }
+    fauna_kg / flora_kg
+}
+
 /// Total mass one soil cell's plant community can add per tick, kg. This is the AREA constraint: sunlight
 /// falling on a patch is finite regardless of how many stems are planted in it, so the whole community
 /// shares this budget. The per-plant ceilings above are the separate physiological limit on a single
@@ -356,7 +382,7 @@ impl Biosphere {
 
     /// One-line ledger for the balance logs: what the world holds, what binds it, and whether it leaks.
     /// `living` is biomass held outside the reservoirs (plants, creatures, carrion).
-    pub fn report(&self, living: Elements) -> String {
+    pub fn report(&self, living: Elements, fauna_kg: f64) -> String {
         let a = cell_area();
         let n_cells = self.soil.len() as f64;
         let mineral: Elements = self.soil.iter().fold(Elements::ZERO, |t, c| t + c.mineral);
@@ -370,8 +396,13 @@ impl Biosphere {
         // grassland carries 0.5-1 kg/m^2, and if the world sits far below that while mineral N accumulates,
         // something other than nutrients is limiting growth.
         let flora_kg_m2 = if PLANT_COMP.c > 0.0 { living.c / PLANT_COMP.c / (n_cells * a) } else { 0.0 };
+        // fauna alongside flora is the comparison that matters: a real ecosystem's animal standing stock is
+        // a small FRACTION of its plant standing stock (roughly 1-10%), because each trophic step loses ~90%.
+        // Animals outweighing their food supply is thermodynamically impossible and means the world is
+        // overstocked relative to the area it actually has.
+        let fauna_kg_m2 = fauna_kg / (n_cells * a);
         format!(
-            "flora {flora_kg_m2:.3} orgC {org_c_m2:.2} minN {min_n_m2:.4} kg/m2 | lim {} | buried {:.1} | drift C{:+.3} N{:+.3} P{:+.3} ppm",
+            "flora {flora_kg_m2:.3} fauna {fauna_kg_m2:.3} orgC {org_c_m2:.2} minN {min_n_m2:.4} kg/m2 | lim {} | buried {:.1} | drift C{:+.3} N{:+.3} P{:+.3} ppm",
             avail.limiting(PLANT_COMP).label(),
             self.buried.total(),
             drift.c,
@@ -768,6 +799,15 @@ mod tests {
                  NPP_PER_M2_DAY * PLANT_COMP.c / SOIL_ORG_C_PER_M2"
             );
         }
+    }
+
+    #[test]
+    fn trophic_ratio_flags_an_inverted_pyramid() {
+        // guards the CHECK, not the world: the sim currently measures ~10-16x (animals outweighing plants),
+        // which is the inverted pyramid this is meant to catch once fauna becomes element-backed.
+        assert!(trophic_ratio(1.0, 0.05) < TROPHIC_RATIO_MAX, "5% animal is plausible");
+        assert!(trophic_ratio(0.2, 2.1) > TROPHIC_RATIO_MAX, "animals outweighing plants must fail");
+        assert_eq!(trophic_ratio(0.0, 1.0), f64::INFINITY, "no plants at all cannot support animals");
     }
 
     #[test]
