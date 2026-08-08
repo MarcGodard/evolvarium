@@ -296,6 +296,20 @@ Roadmap: fundamentals -> living ocean -> parasites. Scale decision: 1 world unit
       carrion, so the sim double-counts by design and the ledger cannot read clean). Then thermodynamics
       (Kleiber, body-temperature heat balance), mechanics (drag, Archimedes, lift), stellar radiation.
 
+### VERDICT: the conserved world is self-sustaining (40-gen run)
+
+The question that decided whether this retrofit produced a living world or a dying one. Every time a
+subsidy was removed the population fell (~1100 -> ~500 -> ~160 -> 113), which read like a slide toward
+extinction. It is not: those were transients. Over 40 generations population RECOVERS and climbs to
+**723 -> 1347**, above where the old subsidised world sat, and holds.
+
+The ledger holds while it does: C oscillates in a bounded band (6922 -> 6297 -> 6874 ppm, not
+accumulating), N sits at 1.9 ppm, P creeps 1050 -> 1096 across the whole run. So carrying capacity is now
+a consequence of the element budget rather than of `CREATURE_CAP`, and the budget balances.
+
+Lesson for future balance work: do NOT judge a conservation change on a 16-gen run. The trough is deep and
+the recovery only shows past ~20 gens.
+
 ### Findings that only became visible once matter was measured
 
 - **INVERTED TROPHIC PYRAMID (open, biggest one).** Fauna standing stock is 1.95-2.12 kg/m2 against flora
