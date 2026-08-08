@@ -2205,7 +2205,13 @@ pub fn plant_step(
                 let mature = st.mass >= g.maturity;
                 if mature && tree.edible && prng.f32() < P_FRUIT_DROP * (0.5 + g.nutrient) {
                     let fpos = disperse_pos(&mut prng, ppos, 3.0, FOOD_Y); // within crown footprint
+                    // a fruit is BUILT from the parent's tissue, so the parent pays for it. Spawning fruit at a
+                    // fixed mass with no cost was minting matter on every drop, continuously, from every mature
+                    // tree and berry bush: one of the largest leaks in the world.
+                    if st.mass > FALLEN_FRUIT_MASS * 1.5 {
+                        st.mass -= FALLEN_FRUIT_MASS;
                     out.fruit_drops.push((idx, g.clone(), fpos));
+                    }
                 }
                 let ambient = mature && local <= TREE_MAX_LOCAL && prng.f32() < P_TREE_REPRO * fert_boost;
                 let disperse = mature && tree.edible && grazed && prng.f32() < P_TREE_EAT_DISPERSE; // seed carried off
@@ -2289,7 +2295,13 @@ pub fn plant_step(
             let mature = st.mass >= g.maturity;
             // fruiting non-tree (berry bush, nightshade) drops fallen fruit -> fast-energy + ferment chain.
             if mature && g.fruiting > 0.2 && prng.f32() < P_FRUIT_DROP * g.fruiting {
+                // a fruit is BUILT from the parent's tissue, so the parent pays for it. Spawning fruit at a
+                // fixed mass with no cost was minting matter on every drop, continuously, from every mature
+                // tree and berry bush: one of the largest leaks in the world.
+                if st.mass > FALLEN_FRUIT_MASS * 1.5 {
+                    st.mass -= FALLEN_FRUIT_MASS;
                 out.fruit_drops.push((idx, g.clone(), disperse_pos(&mut prng, ppos, 2.0, FOOD_Y)));
+                }
             }
             // endozoochory: fruiting plant that survived grazing has a seed carried off + dropped far. Toxic fruit
             // disperses less. pcap enforced in apply.
@@ -2651,7 +2663,14 @@ pub fn predation_step(
         if killed.contains(&e) {
             alive.0 = false;
             let fat = (energy.fat / fat_cap(gen_e).max(0.01)).clamp(0.0, 1.0); // how fatty the prey was
-            spawn_carrion(&mut commands, t.translation, CARRION_MASS * 0.5, fat); // predator already ate some
+            // carrion tracks the VICTIM's actual mass, not a constant: a constant mints or destroys the
+            // difference on every kill. Half remains as carcass, the predator ate the rest.
+            // KNOWN GAP: the eaten half is not yet routed into the biosphere here (predation_step has no
+            // reservoir access), so a kill still loses that matter. Tracked as remaining P/N drift.
+            let victim_kg = crate::chem::creature_mass_kg(
+                gen_e.morph.map(|m| m.mass).unwrap_or_else(|| crate::morph::Morphometrics::of(&gen_e.body).mass),
+            ) as f32;
+            spawn_carrion(&mut commands, t.translation, victim_kg * 0.5, fat);
             soil.add(t.translation, DEATH_FERT); // death enriches the ground here
             if continuous_live {
                 commands.entity(e).despawn();
