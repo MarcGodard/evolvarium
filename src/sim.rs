@@ -3204,10 +3204,23 @@ pub fn live_step(
         let fat_frac = energy.fat / fat_max.max(0.01); // 0..1 fat-store fullness (drives upkeep)
         // thermal niche split into cold + warm sides so pelt (fur) insulates the COLD side only.
         let temp_here = crate::sphere::base_temperature(pdir);
-        let cold_miss = (genome.temp_pref - temp_here).max(0.0); // colder than preferred (pelt helps)
+        // cold_miss is gone: the cold side is now a real heat balance (thermo::thermoregulation_watts), which
+        // charges by body mass, surface area, insulation and medium rather than by distance from temp_pref.
         let warm_miss = (temp_here - genome.temp_pref).max(0.0); // warmer than preferred (pelt hurts)
+        // Kleiber: basal scales as MASS^0.75, not size^2.0. The old exponent made big bodies cost more per kg
+        // than small ones, exactly backwards. Endothermy sets the coefficient (a warm body idles ~20x hotter),
+        // and thermoregulation below charges what holding that temperature actually costs here.
+        let body_kg = crate::chem::creature_mass_kg(morph.mass);
+        let basal_w = crate::thermo::basal_watts(body_kg, genome.endothermy);
+        let thermo_w = crate::thermo::thermoregulation_watts(
+            crate::thermo::field_to_kelvin(temp_here),
+            body_kg,
+            genome.pelt,
+            genome.endothermy,
+            wet_here > 0.5,
+        );
         energy.burn((BASAL_COST * (1.0 - 0.6 * metab_f) // frugal metabolism lowers the cost of living
-            + SIZE_BASAL * genome.size.powf(SIZE_BASAL_EXP) // size = energy use: basal scales allometrically with mass
+            + WATT_TO_ENERGY * (basal_w + thermo_w) as f32 // real metabolic + thermoregulatory load
             + MOVE_COST * (1.0 + SIZE_MOVE * genome.size + ARMOR_MOVE * genome.armor + LIMB_MOVE_COST * genome.limbs + MORPH_MASS_MOVE * (morph.mass - MORPH_MASS_REF).max(0.0)) * thrust * thrust // mass + plates + legs + evolved-body mass to push
             + BITE_COST * genome.bite
             + ROCK_MOVE_COST * rock * thrust.abs() * (1.0 - ALPINE_RELIEF * genome.alpine) // alpine climbers cross rock cheaply
@@ -3217,7 +3230,11 @@ pub fn live_step(
             + BRAIN_COST * (1.0 - HEAD_BRAIN_RELIEF * genome.head) * genome.net.ih.len() as f32 // a roomy head houses the brain cheaper
             + HEIGHT_COST * genome.height
             + LIGHT_COST * (light - genome.light_pref).abs() // positional daylight at this creature's location
-            + TEMP_COST * (warm_miss + cold_miss * (1.0 - PELT_COLD_RELIEF * genome.pelt)) // fur insulates the cold side
+            // (old TEMP_COST term removed: cold is now charged by thermo::thermoregulation_watts, which knows
+            // about body mass, surface area, insulation and the medium, instead of a flat penalty for sitting
+            // away from temp_pref. warm_miss stays: overheating is still a real cost and is not yet modelled
+            // as an evaporative/behavioural load.)
+            + TEMP_COST * warm_miss
             + HEAT_SUN_COST * (light * temp_here - HEAT_COMFORT).max(0.0) * (1.0 - SHADE_RELIEF * shade01) // open-sun heat: seek shade
             + PELT_HEAT_COST * genome.pelt * temp_here // a coat overheats in hot places
             + PELT_WATER_DRAG * genome.pelt * wet_here // a waterlogged coat drags in water
@@ -3858,6 +3875,7 @@ pub fn generation_step(
             let mut temp = 0.0;
             let mut lng = 0.0;
             let mut met = 0.0;
+            let mut endo = 0.0; // mean endothermy: shows whether warm blood is under selection
             let mut par = 0.0;
             let mut alp = 0.0; // mean alpine (mountain adaptation)
             let mut sw = 0.0; // mean swim (aquatic adaptation)
@@ -3884,6 +3902,7 @@ pub fn generation_step(
                 temp += g.temp_pref;
                 lng += g.longevity;
                 met += g.metab;
+                endo += g.endothermy;
                 par += g.parental;
                 alp += g.alpine;
                 sw += g.swim;
@@ -3897,8 +3916,8 @@ pub fn generation_step(
             let avg_qual: f32 = pq.iter().map(|(g, _)| g.quality).sum::<f32>() / plant_n as f32;
             let avg_wet: f32 = pq.iter().map(|(g, _)| g.wet).sum::<f32>() / plant_n as f32;
             info!(
-                "t {:>6} | pop {:>3} | energy {:.1} [f{:.1}/s{:.1}/F{:.1}] adp {:.2} | mast {:.2} brd {:.1} | life-fit {:.1} | age {:.0} | sens {:.1} | bite {:.2} | rig {:.2} | temp {:.2} lng {:.2} met {:.2} par {:.2} lat {:.2} | swim {:.2} alp {:.2} aq {} hi {} | def {:.2} nut {:.2} qual {:.2} wet {:.2} | plants {} | soil {:.2} | rain {:.2} fire {:.3} | wear {:.3} bare {} | CHEM {} | {}",
-                gen.tick, pop, e / n, fa / n, su / n, ft / n, adp / n, mast / n, brd / n, f / n, age / n, sens / n, bite / n, rig / n, temp / n, lng / n, met / n, par / n, abslat / n, sw / n, alp / n, aq, hi, avg_def, avg_nut, avg_qual, avg_wet, plant_n, fields.soil.avg(), fields.weather.rain, fields.fire.avg(), fields.wear.avg(), fields.wear.cell.iter().filter(|&&w| w > WEAR_GRASS_CULL).count(),
+                "t {:>6} | pop {:>3} | energy {:.1} [f{:.1}/s{:.1}/F{:.1}] adp {:.2} | mast {:.2} brd {:.1} | life-fit {:.1} | age {:.0} | sens {:.1} | bite {:.2} | rig {:.2} | temp {:.2} lng {:.2} met {:.2} endo {:.2} par {:.2} lat {:.2} | swim {:.2} alp {:.2} aq {} hi {} | def {:.2} nut {:.2} qual {:.2} wet {:.2} | plants {} | soil {:.2} | rain {:.2} fire {:.3} | wear {:.3} bare {} | CHEM {} | {}",
+                gen.tick, pop, e / n, fa / n, su / n, ft / n, adp / n, mast / n, brd / n, f / n, age / n, sens / n, bite / n, rig / n, temp / n, lng / n, met / n, endo / n, par / n, abslat / n, sw / n, alp / n, aq, hi, avg_def, avg_nut, avg_qual, avg_wet, plant_n, fields.soil.avg(), fields.weather.rain, fields.fire.avg(), fields.wear.avg(), fields.wear.cell.iter().filter(|&&w| w > WEAR_GRASS_CULL).count(),
                 fields.bio.report(
                     living_flora
                         + crate::chem::ANIMAL_COMP * cont_fauna_kg,

@@ -463,7 +463,15 @@ pub const R_EAT: f32 = 1.0; // bonus reward on tick food eaten
 // --- M4 creature expansion: physiology + morphology gene costs/effects (see plan + 02/03) ---
 // size = energy use: basal upkeep scales SUPER-LINEARLY with body size (allometry), so big body markedly
 // hungrier per mass. size still buys storage/combat/reach (above) -> big = powerful but dear.
-pub const SIZE_BASAL_EXP: f32 = 2.0; // allometric exponent: size basal term = SIZE_BASAL * size^this
+// DEAD: allometry now comes from Kleiber's 3/4 law in thermo.rs. 2.0 had big bodies costing MORE per kg than
+// small ones, which is backwards: gram for gram a mouse burns far hotter than an elephant.
+// pub const SIZE_BASAL_EXP: f32 = 2.0;
+
+// Sim energy units per watt. The sim's "energy/sec" is not joules, so real watts need a scale to enter it.
+// Calibrated to PRESERVE the existing energy economy while fixing the LAW: a mid creature (~2.6 kg, mid
+// endothermy) lands near its old basal cost of ~0.95 energy/sec, so the change alters how cost scales with
+// mass and warm-bloodedness, not the overall budget the food web was balanced against.
+pub const WATT_TO_ENERGY: f32 = 0.26;
 // detox (liver): clears toxic_load; costs basal upkeep.
 pub const DETOX_COST: f32 = 0.5; // energy/sec basal at full detox (running a big liver costs)
 // toxic load: ingested toxins (plant tox, rotten meat, fermented spoilage, venomous prey, protein excess)

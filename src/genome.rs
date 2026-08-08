@@ -81,6 +81,11 @@ pub struct Genome {
     pub metab: f32,          // 0..1 metabolic tempo: high = frugal (cheaper basal) but sluggish (slower top speed); low = fast (higher top speed) but costly. Default 0.5 = neutral (old saves unchanged).
     #[serde(default = "half")]
     pub parental: f32,       // 0..1 r/K: 0 = r (breed young+cheap, many small fragile young), 1 = K (breed late+costly, few provisioned young). Scales repro threshold/cost/birth-energy/maturity. Default 0.5 = neutral (old saves unchanged).
+    #[serde(default = "endo_default")]
+    pub endothermy: f32,     // 0 ectotherm (cheap, weather-bound) .. 1 endotherm (holds ~37 C, costs continuously
+                             // but stays active in cold). Feeds the real heat balance in thermo.rs; NEITHER end is
+                             // better, the environment decides. Default 0.35 keeps old saves near their previous
+                             // basal cost rather than handing every loaded creature a warm-blooded bill.
     #[serde(default = "zero")]
     pub alpine: f32,         // 0..1 mountain: high = cheap highland crossing (climber) + heavy-build penalty on flat; low = lowland-light. Mirror of swim for mountains. Default 0 = neutral (old saves unchanged).
     #[serde(default = "half")]
@@ -168,6 +173,10 @@ pub enum BrainEncoding {
 }
 
 // serde defaults for traits absent in old saves
+fn endo_default() -> f32 {
+    0.35
+}
+
 fn half() -> f32 {
     0.5
 }
@@ -323,6 +332,7 @@ impl Genome {
             temp_pref: rng.f32(), // founders span cold..warm -> spread across latitudes
             longevity: rng.f32(),
             metab: rng.f32(),
+            endothermy: rng.f32(),
             parental: rng.f32(),
             alpine: rng.f32(), // founders span lowland..mountain -> highland niche can emerge
             adiposity: rng.f32(), // span lean..fatty storage
@@ -538,6 +548,7 @@ impl Genome {
         c.temp_pref = pick(rng, a.temp_pref, b.temp_pref);
         c.longevity = pick(rng, a.longevity, b.longevity);
         c.metab = pick(rng, a.metab, b.metab);
+        c.endothermy = pick(rng, a.endothermy, b.endothermy);
         c.parental = pick(rng, a.parental, b.parental);
         c.alpine = pick(rng, a.alpine, b.alpine);
         c.adiposity = pick(rng, a.adiposity, b.adiposity);
@@ -640,6 +651,7 @@ impl Genome {
         }
         if rng.f32() < rate {
             self.metab = (self.metab + rng.normal() * 0.12).clamp(0.0, 1.0);
+            self.endothermy = (self.endothermy + rng.normal() * 0.10).clamp(0.0, 1.0);
         }
         if rng.f32() < rate {
             self.parental = (self.parental + rng.normal() * 0.12).clamp(0.0, 1.0);
