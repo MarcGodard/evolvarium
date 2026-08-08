@@ -218,6 +218,30 @@ pub fn base_temperature(d: Vec3) -> f32 {
     (by_lat - lapse).clamp(0.0, 1.0)
 }
 
+// Diurnal temperature swing, in FIELD units (the 0..1 field spans ~75 K, see thermo::field_to_kelvin).
+// Land swings ~14 K between night and mid-afternoon; ocean barely moves because water's heat capacity is
+// enormous, which is exactly why coasts are mild and deserts are not.
+const DIURNAL_AMP_LAND: f32 = 0.093; // +/- this, so ~0.19 field = ~14 K peak to peak
+const DIURNAL_AMP_SEA: f32 = 0.013; // ~2 K: water damps almost all of it
+// Thermal lag: ground keeps absorbing after solar noon, so the daily peak is mid-afternoon, not noon. Real
+// lag is ~2-3 h; DAY_TICKS/12 is 2 h.
+const DIURNAL_LAG: u32 = DAY_TICKS / 12;
+
+/// Temperature 0..1 at `d` INCLUDING the day/night cycle. Use this for anything a living body feels;
+/// `base_temperature` remains the static climate baseline for biome colour, ice caps and habitability, which
+/// should not flicker with the hour.
+///
+/// This is the one temporal temperature cycle creatures can actually experience: a day is ~DAY_TICKS ticks
+/// against a lifespan of roughly the same order, whereas a year is ~360x longer than any creature lives. It
+/// is what gives endothermy something to buy, since a flat performance curve is only worth paying for when
+/// the temperature MOVES.
+pub fn temperature(d: Vec3, tick: u32) -> f32 {
+    let base = base_temperature(d);
+    let amp = if is_ocean(d) { DIURNAL_AMP_SEA } else { DIURNAL_AMP_LAND };
+    let light = daylight_at(d, tick.saturating_sub(DIURNAL_LAG));
+    (base + amp * (light * 2.0 - 1.0)).clamp(0.0, 1.0)
+}
+
 /// Moisture 0..1 at `d`: oceans + low ground wet, noise patch pattern on top (deserts emerge in dry patches
 /// away from coast). Latitude bands (wet tropics/poles, dry subtropics) add Earth-like belts.
 pub fn moisture(d: Vec3) -> f32 {
@@ -647,6 +671,26 @@ mod tests {
         let eq = lonlat_to_pos(0.0, 0.0, 0.0).normalize();
         let pole = lonlat_to_pos(0.0, 1.55, 0.0).normalize();
         assert!(base_temperature(eq) > base_temperature(pole));
+    }
+
+    #[test]
+    fn diurnal_cycle_swings_land_and_spares_the_sea() {
+        // the temporal variation endothermy exists to buy insurance against. Ocean must barely move: water's
+        // heat capacity is why coasts are mild and why a swimmer's thermal world is not a walker's.
+        let land = lonlat_to_pos(0.35, 0.2, 0.0).normalize();
+        let land = if is_ocean(land) { Vec3::from_array(HOMELAND_DIR).normalize() } else { land };
+        let mut lo = f32::MAX;
+        let mut hi = f32::MIN;
+        for k in 0..24 {
+            let t = temperature(land, k * DAY_TICKS / 24);
+            lo = lo.min(t);
+            hi = hi.max(t);
+        }
+        let swing = hi - lo;
+        assert!(swing > 0.05, "land must feel a real day/night swing, got {swing:.3}");
+        // and the daily mean should stay near the static baseline, or the cycle silently rewrites climate
+        let mean: f32 = (0..24).map(|k| temperature(land, k * DAY_TICKS / 24)).sum::<f32>() / 24.0;
+        assert!((mean - base_temperature(land)).abs() < 0.06, "diurnal cycle must not shift the climate mean");
     }
 
     #[test]

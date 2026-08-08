@@ -3108,7 +3108,7 @@ pub fn live_step(
         // pays for warm blood, and without it the trade-off was one-sided: charging for endothermy while an
         // ectotherm lost nothing in the cold inverted the thermal niches, putting the most endothermic
         // creatures in the WARM band and the least in the cold, the exact reverse of Earth.
-        let here_t = crate::sphere::base_temperature(pos.normalize_or_zero());
+        let here_t = crate::sphere::temperature(pos.normalize_or_zero(), tick); // felt temperature, incl. night
         let activity = crate::thermo::activity_scale(crate::thermo::field_to_kelvin(here_t), genome.endothermy, genome.temp_pref) as f32;
         let speed = MOVE_SPEED
             * activity // cold-blooded and cold = slow
@@ -3211,7 +3211,7 @@ pub fn live_step(
         let sense_range: f32 = genome.sensors.iter().map(|s| s.range).sum();
         let fat_frac = energy.fat / fat_max.max(0.01); // 0..1 fat-store fullness (drives upkeep)
         // thermal niche split into cold + warm sides so pelt (fur) insulates the COLD side only.
-        let temp_here = crate::sphere::base_temperature(pdir);
+        let temp_here = crate::sphere::temperature(pdir, tick); // felt temperature, incl. night
         // cold_miss is gone: the cold side is now a real heat balance (thermo::thermoregulation_watts), which
         // charges by body mass, surface area, insulation and medium rather than by distance from temp_pref.
         let warm_miss = (temp_here - genome.temp_pref).max(0.0); // warmer than preferred (pelt hurts)
