@@ -181,7 +181,6 @@ pub const BITE_COST: f32 = 0.7; // energy/sec maintenance cost of bite strength 
 pub const EAT_GAIN: f32 = 19.0;
 pub const MEAT_BONUS: f32 = 1.6; // meat (carrion) richer + longer-lasting than plant food
 pub const ATTACK_RADIUS: f32 = 1.6; // must be adjacent to attack
-pub const PREDATION_GAIN: f32 = 16.0; // energy predator gains from kill (moderate: big windfall fuels boom-bust)
 // (old PREDATION_HUNGER gate removed in M6: attack now NN-gated by ATTACK_INTENT_THRESH, not hunger)
 // Predation needs real combat EDGE, not just proximity. Success = sigmoid(BITE_K*(adv) - BIAS) where adv
 // = attacker combat - prey combat. Equal combat (uniform pop) -> success ~= sigmoid(-BIAS) = low, so

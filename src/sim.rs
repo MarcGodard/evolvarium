@@ -2620,7 +2620,7 @@ pub fn predation_step(
     mut commands: Commands,
     mut soil: ResMut<Soil>,
     mut bio: ResMut<crate::chem::Biosphere>,
-    mut cq: Query<(Entity, &Transform, &mut Energy, &mut Fitness, &mut Alive, &Genome, &mut Brain), With<Creature>>,
+    mut cq: Query<(Entity, &Transform, &mut Energy, &mut Fitness, &mut Alive, &Genome, &mut Brain, &mut DietState), With<Creature>>,
 ) {
     let _g = crate::profile::scope("predation");
     // snapshot living creatures: (entity, pos, ATTACK combat, energy, kin-sig, DEFENSE combat, venom, climb,
@@ -2628,8 +2628,8 @@ pub fn predation_step(
     // hunt); intents = brain out[2]/out[3] stashed this tick in live_step.
     let snap: Vec<(Entity, Vec3, f32, f32, [f32; 10], f32, f32, f32, f32, f32, f32)> = cq
         .iter()
-        .filter(|(_, _, _, _, a, _, _)| a.0)
-        .map(|(e, t, en, _, _, g, b)| {
+        .filter(|(_, _, _, _, a, _, _, _)| a.0)
+        .map(|(e, t, en, _, _, g, b, _)| {
             // Offence is the bite; defence is armour. Body MASS is what separates them, via the log-ratio
             // term in the adv calculation below.
             //
@@ -2647,14 +2647,20 @@ pub fn predation_step(
             let body_kg = crate::chem::creature_mass_kg(
                 g.morph.map(|m| m.mass).unwrap_or_else(|| crate::morph::Morphometrics::of(&g.body).mass),
             ) as f32;
-            (e, t.translation, g.bite, en.total(), signature(g), ARMOR_DEF * g.armor, g.venom, g.climb, b.attack, b.defend, body_kg)
+            // index 3 is the prey's FAT FRACTION, not its energy total: what a carcass is worth to a predator
+            // is how fatty it was, which is the rabbit-starvation axis. Energy total was never read.
+            let fat_frac = (en.fat / fat_cap_of(g).max(0.01)).clamp(0.0, 1.0);
+            (e, t.translation, g.bite, fat_frac, signature(g), ARMOR_DEF * g.armor, g.venom, g.climb, b.attack, b.defend, body_kg)
         })
         .collect();
     if snap.len() < 2 {
         return;
     }
     let mut killed: HashSet<Entity> = HashSet::new();
-    let mut gains: HashMap<Entity, f32> = HashMap::new();
+    // (meat kg, fat-weighted kg, venom-weighted kg): a kill is FOOD now, so the predator's share carries the
+    // carcass properties that decide what it is worth, not a flat constant. Weighted sums so a predator that
+    // takes two prey in one tick gets the mass-weighted mean fatness and venom rather than the last one's.
+    let mut gains: HashMap<Entity, (f32, f32, f32)> = HashMap::new();
     let mut committed: HashSet<Entity> = HashSet::new(); // attackers that chose to hunt this tick (intent > thresh)
     let mut defended: HashSet<Entity> = HashSet::new(); // prey that braced and repelled an attack
     let mut def_credit: HashMap<Entity, f32> = HashMap::new(); // per-prey risk averted BY the brace
@@ -2698,7 +2704,7 @@ pub fn predation_step(
         }
         if let Some((_, bi)) = best {
             engaged.insert(ae); // a real lunge: something was in reach
-            let (be, bpos, _, _, bsig, bdef, bven, bclimb, _, b_def_intent, b_kg) = snap[bi];
+            let (be, bpos, _, b_fat, bsig, bdef, bven, bclimb, _, b_def_intent, b_kg) = snap[bi];
             // herd safety: prey surrounded by KIN is harder to pick off (vigilance) -> being social pays
             let mut kin = 0.0f32;
             for (e2, p2, _, _, s2, _, _, _, _, _, _) in &snap {
@@ -2733,8 +2739,12 @@ pub fn predation_step(
             if rng.f32() < success {
                 killed.insert(be);
                 gen.kills.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                // venomous prey is a sickening kill -> the predator gains far less (the venom deterrent)
-                *gains.entry(ae).or_insert(0.0) += PREDATION_GAIN * (1.0 - VENOM_DETER * bven);
+                // predator's share is half the carcass, matching what consume_and_excrete charges it below
+                let meat_kg = b_kg * 0.5;
+                let g = gains.entry(ae).or_insert((0.0, 0.0, 0.0));
+                g.0 += meat_kg;
+                g.1 += meat_kg * b_fat;
+                g.2 += meat_kg * bven;
             } else if b_def_intent > 0.5 {
                 // Reward the RISK ACTUALLY AVERTED, not mere survival. A flat reward for "braced and lived"
                 // paid out on ~99.95% of engagements, because almost every attack fails anyway: expected
@@ -2760,13 +2770,34 @@ pub fn predation_step(
         return; // nobody chose to attack -> no kills, no combat rewards to assign
     }
     let continuous_live = gen.continuous && gen.generation >= WARMUP_GENS;
-    for (e, t, mut energy, mut fit, mut alive, gen_e, mut brain) in &mut cq {
+    for (e, t, mut energy, mut fit, mut alive, gen_e, mut brain, mut diet) in &mut cq {
         if engaged.contains(&e) {
             energy.burn(ATTACK_COST * brain.attack * DT); // paid for the lunge itself, land or miss
         }
-        if let Some(g) = gains.get(&e) {
-            energy.add_fat(*g, fat_cap_of(gen_e)); // a kill = meat -> fat store
-            fit.0 += g * 0.3; // predation counts toward selection
+        if let Some(&(meat_kg, fat_w, ven_w)) = gains.get(&e) {
+            // A kill is FOOD, digested on the same terms as carrion. It used to credit a flat PREDATION_GAIN
+            // straight to fat, bypassing the gut entirely, so hunting exerted NO selection on `carnivory` and
+            // the gene drifted down while kills climbed. Now the gut gates extraction, prey mass sets the
+            // portion, and lean prey imposes rabbit starvation, so being a predator and being built like one
+            // are finally the same trait.
+            let fat_content = (fat_w / meat_kg.max(1e-6)).clamp(0.0, 1.0);
+            let venom = (ven_w / meat_kg.max(1e-6)).clamp(0.0, 1.0);
+            let gut = (PROTEIN_FLOOR + PROTEIN_CARN * gen_e.carnivory).min(1.0);
+            // SAME energy density as scavenging the same flesh fresh (see the carrion branch in live_step):
+            // a kilo of meat is a kilo of meat however it was obtained. Killing it yourself buys freshness
+            // and first claim, not extra calories. This is what let PREDATION_GAIN be deleted: a flat
+            // per-kill windfall was a second, unrelated price for flesh sitting beside the carrion one.
+            let meat_e = EAT_GAIN * MEAT_BONUS * meat_kg * CARRION_NUTRIENT * gut * (1.0 - VENOM_DETER * venom);
+            // lean protein needs carbs to become usable energy; the remainder is ammonia, not food
+            let carb = (energy.sugar / SUGAR_CAP).clamp(0.0, 1.0);
+            let fat_part = meat_e * fat_content;
+            let protein_usable = meat_e * (1.0 - fat_content) * carb;
+            let protein_wasted = meat_e * (1.0 - fat_content) * (1.0 - carb);
+            let cap = fat_cap_of(gen_e);
+            let overflow = energy.add_fat(fat_part + protein_usable, cap);
+            energy.add_sugar(overflow, SUGAR_CAP, cap);
+            diet.toxic_load = (diet.toxic_load + protein_wasted * PROTEIN_TOX).min(TOX_LOAD_CAP);
+            fit.0 += (fat_part + protein_usable) * 0.3; // predation counts toward selection
             brain.fight_reward += R_KILL; // this attack paid off -> reinforce the attack output
         } else if committed.contains(&e) {
             brain.fight_reward += R_WASTE; // committed but landed nothing -> discourage pointless aggression
