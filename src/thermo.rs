@@ -19,6 +19,7 @@ pub const STEFAN_BOLTZMANN: f64 = 5.670374e-8;
 /// infrared regardless of visible colour, which is why a white animal still radiates like a black one.
 pub const EMISSIVITY: f64 = 0.95;
 /// Specific heat of animal tissue, J/(kg*K). Mostly water, so close to water's 4184.
+#[allow(dead_code)]
 pub const TISSUE_SPECIFIC_HEAT: f64 = 3470.0;
 /// Convective heat transfer coefficient in still air, W/(m^2*K).
 pub const H_AIR: f64 = 10.0;
@@ -63,6 +64,20 @@ pub fn surface_area(mass_kg: f64) -> f64 {
     MEEH_K * mass_kg.max(1e-6).powf(2.0 / 3.0)
 }
 
+/// How much food a body takes per feeding event, relative to a reference-sized animal.
+///
+/// SAME exponent as Kleiber on purpose. An animal must ingest what it burns, so if metabolism goes as
+/// M^0.75 then so must intake, and the ratio between them is then size-INDEPENDENT. That is the point: it
+/// makes body size neutral in the energy budget, leaving thermal inertia, predation, and famine buffering to
+/// decide it. Before this, cost scaled with mass while a bite paid the same at any size, so small was
+/// strictly cheaper with nothing pushing back, and the population evolved to ~1/87 of founder mass.
+///
+/// Reference is MORPH_MASS_REF, the body mass the rest of the balance is already written against.
+pub fn intake_scale(mass_kg: f64) -> f64 {
+    let reference = crate::chem::creature_mass_kg(crate::config::MORPH_MASS_REF);
+    (mass_kg.max(1e-6) / reference).powf(KLEIBER_EXP)
+}
+
 /// Resting metabolic heat production, watts. `endothermy` 0 = fully ectothermic, 1 = fully endothermic.
 pub fn basal_watts(mass_kg: f64, endothermy: f32) -> f64 {
     let e = (endothermy as f64).clamp(0.0, 1.0);
@@ -82,6 +97,13 @@ pub fn conductance(mass_kg: f64, pelt: f32, in_water: bool) -> f64 {
 
 /// Net heat flow into a body, watts. Positive warms it.
 /// `metabolic_w` includes basal plus whatever activity is producing; `solar_w` is absorbed shortwave.
+// BODY TEMPERATURE AS STATE: written, unit-tested, NOT yet wired into sim.rs. The live path uses the
+// steady-state pair (thermoregulation_watts + activity_scale), which assumes a creature is always AT its
+// equilibrium temperature. These three carry the transient instead: dT/dt = net_watts / (mass * specific
+// heat). Wiring them buys thermal inertia, which scales with MASS and is the size advantage the energy
+// budget currently lacks (a big body coasts through a cold night, a small one tracks the air). Kept rather
+// than deleted because deleting tested physics to silence a warning trades a warning for a rewrite.
+#[allow(dead_code)]
 pub fn net_heat_watts(
     body_k: f64,
     env_k: f64,
@@ -102,6 +124,7 @@ pub fn net_heat_watts(
 /// Advance body temperature by `dt` seconds under a net heat flow. Thermal inertia scales with MASS, so a
 /// large body tracks the environment slowly (thermal stability for free, the real advantage of being big)
 /// while a small one equilibrates almost immediately.
+#[allow(dead_code)]
 pub fn step_body_temp(body_k: f64, net_w: f64, mass_kg: f64, dt_s: f64) -> f64 {
     let heat_capacity = mass_kg.max(1e-6) * TISSUE_SPECIFIC_HEAT;
     body_k + net_w * dt_s / heat_capacity
@@ -131,6 +154,26 @@ pub fn thermoregulation_watts(
 
 #[cfg(test)]
 mod tests {
+    // THE invariant behind intake_scale: if intake and basal cost share Kleiber's exponent, their ratio does
+    // not depend on body size, so the energy budget stops voting for small. Guards against someone "fixing"
+    // intake with a different exponent, which would quietly restore the free lunch that shrank the
+    // population to ~1/87 of founder mass.
+    #[test]
+    fn intake_and_upkeep_scale_together_so_size_is_neutral() {
+        let mouse = super::intake_scale(0.03) / super::basal_watts(0.03, 0.0);
+        let mid = super::intake_scale(3.75) / super::basal_watts(3.75, 0.0);
+        let big = super::intake_scale(60.0) / super::basal_watts(60.0, 0.0);
+        assert!((mouse / mid - 1.0).abs() < 1e-6, "mouse {mouse} vs mid {mid}");
+        assert!((big / mid - 1.0).abs() < 1e-6, "big {big} vs mid {mid}");
+    }
+
+    // A reference-mass body takes a full-size bite, so existing balance constants keep their meaning.
+    #[test]
+    fn reference_mass_bites_at_unity() {
+        let reference = crate::chem::creature_mass_kg(crate::config::MORPH_MASS_REF);
+        assert!((super::intake_scale(reference) - 1.0).abs() < 1e-9);
+    }
+
     use super::*;
 
     #[test]
@@ -243,14 +286,12 @@ mod tests {
 // trade-off is one-sided.
 
 /// Q10 for whole-animal performance. Real ectotherm locomotion and digestion run Q10 ~2-3: every 10 K drop
-/// roughly halves the rate.
-pub const ACTIVITY_Q10: f64 = 2.5;
 /// Temperature at which an ectotherm performs at full rate, K (~30 C, a basking reptile's preferred body
 /// temperature). Above this, performance is capped rather than continuing to climb.
-pub const ACTIVITY_REF_K: f64 = 303.0;
 
 /// Operating body temperature: an endotherm defends its setpoint, an ectotherm takes the environment's.
 /// Mixed values interpolate, which is real: many animals are partial or seasonal endotherms.
+#[allow(dead_code)]
 pub fn body_temp_k(env_k: f64, endothermy: f32) -> f64 {
     let e = (endothermy as f64).clamp(0.0, 1.0);
     env_k + (ENDO_SETPOINT_K - env_k) * e

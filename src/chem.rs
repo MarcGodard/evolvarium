@@ -62,9 +62,6 @@ impl Elements {
         Elements::new(self.c.max(0.0), self.n.max(0.0), self.p.max(0.0))
     }
 
-    pub fn is_finite(&self) -> bool {
-        self.c.is_finite() && self.n.is_finite() && self.p.is_finite()
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -303,11 +300,13 @@ pub fn creature_mass_kg(morph_volume: f32) -> f64 {
 /// roughly 90% of its energy, so a real ecosystem carries far less animal than plant: ~1-10%. A world above
 /// this is asking its plants to support more animal flesh than they physically can, whatever the energy
 /// bookkeeping says, and no amount of tuning fixes it because it is a thermodynamic constraint.
+#[cfg(test)]
 pub const TROPHIC_RATIO_MAX: f64 = 0.10;
 
 /// Animal-to-plant standing-stock ratio. Diagnostic, not a limiter: the sim currently runs far above the
 /// plausible band (measured ~10-16x, i.e. animals outweighing plants) and correcting that is a live balance
 /// question about planet size versus population, not something to silently clamp.
+#[cfg(test)]
 pub fn trophic_ratio(flora_kg: f64, fauna_kg: f64) -> f64 {
     if flora_kg <= 0.0 {
         return f64::INFINITY;
@@ -579,10 +578,6 @@ impl Biosphere {
     }
 
     /// Return animal tissue to the shared pool (a body that never became carrion, e.g. drowned at sea).
-    pub fn return_fauna(&mut self, amount: Elements) {
-        self.fauna_pool += amount;
-    }
-
     /// Biological nitrogen fixation: rhizobia pulling inert atmospheric N2 into plant-available soil N.
     /// The `PlantGenome.nitrogen_fix` gene drives this, so a legume genuinely enriches its patch instead of
     /// conjuring fertility from nothing.

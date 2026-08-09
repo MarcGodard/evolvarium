@@ -235,3 +235,48 @@ pub fn niche_step(
         tr.last_rescue_tick = tick; // resets the self-sustain clock
     }
 }
+
+#[cfg(test)]
+mod habitat_probe {
+    // DIAGNOSTIC: `cargo test habitat_share -- --ignored --nocapture`.
+    //
+    // NICHE_FLOOR is one number applied to every niche, but the niches do not get equal amounts of planet.
+    // Highland asked for rescue 199 times in a 40-generation run while every other niche asked 20-39 times,
+    // which is a niche on life support rather than a self-sustaining one. Prints each niche's share of the
+    // surface so the floor can be compared against the habitat that actually exists.
+    #[test]
+    #[ignore]
+    fn habitat_share_per_niche() {
+        const N: usize = 240;
+        let (mut ocean, mut land, mut high, mut cold, mut warm) = (0u32, 0u32, 0u32, 0u32, 0u32);
+        let mut total = 0u32;
+        for i in 0..N {
+            // equal-area latitude sampling: acos over a uniform grid, else poles get oversampled
+            let z = -1.0 + 2.0 * (i as f32 + 0.5) / N as f32;
+            let r = (1.0 - z * z).max(0.0).sqrt();
+            for j in 0..N {
+                let a = std::f32::consts::TAU * (j as f32 + 0.5) / N as f32;
+                let d = bevy::prelude::Vec3::new(r * a.cos(), z, r * a.sin());
+                total += 1;
+                if crate::sphere::is_ocean(d) {
+                    ocean += 1;
+                    continue;
+                }
+                land += 1;
+                if crate::sphere::elevation01(d) > 0.80 {
+                    high += 1;
+                }
+                let t = crate::sphere::base_temperature(d);
+                if t < 0.35 {
+                    cold += 1;
+                } else if t > 0.65 {
+                    warm += 1;
+                }
+            }
+        }
+        let pct = |v: u32| 100.0 * v as f32 / total as f32;
+        println!("surface: ocean {:.1}% land {:.1}%", pct(ocean), pct(land));
+        println!("of the whole planet: highland(elev>0.80) {:.2}% cold {:.1}% warm {:.1}%", pct(high), pct(cold), pct(warm));
+        println!("NICHE_FLOOR = {} applied identically to every niche", crate::config::NICHE_FLOOR);
+    }
+}

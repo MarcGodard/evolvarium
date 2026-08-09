@@ -818,16 +818,27 @@ fn flap_wings(gen: Res<GenState>, mut q: Query<(&Wing, &mut Transform)>) {
     }
 }
 
-// Tree part meshes (inserted by spawn_world_render): trunk + two canopy shapes.
+// Tree part meshes (inserted by spawn_world_render). Trunk/crown/conifer are VARIANT LISTS, not one mesh
+// each: a single shared mesh made every tree in a forest identical, which reads as cloned scenery. Picked
+// per tree by entity hash (see add_plant_visuals), so a pick is stable for that tree's lifetime and costs
+// nothing per frame. Variant counts are coprime-ish so trunk/crown pairings do not repeat in lockstep.
 #[derive(Resource)]
 pub struct TreeMeshes {
-    pub trunk: Handle<Mesh>,
-    // several crowns, not one: a single shared canopy mesh made every broadleaf in a forest identical, which
-    // reads as cloned scenery. Picked per tree by entity hash, so it is stable for that tree's lifetime and
-    // costs nothing per frame.
+    pub trunk: Vec<Handle<Mesh>>,
     pub broadleaf: Vec<Handle<Mesh>>,
-    pub conifer: Handle<Mesh>,   // cone canopy for evergreens
-    pub vine: Handle<Mesh>,      // helix vine spiraling up trunk (only some trees)
+    pub conifer: Vec<Handle<Mesh>>, // drooping scalloped fir skirts, base at y=0
+    pub vine: Handle<Mesh>,         // helix vine spiraling up trunk (only some trees)
+}
+
+// Bake the tree mesh variants. Seeds are arbitrary but FIXED: baked once at startup, so --capture diffs
+// stay comparable run to run.
+pub fn tree_meshes(meshes: &mut Assets<Mesh>) -> TreeMeshes {
+    TreeMeshes {
+        trunk: (0..5).map(|i| meshes.add(crate::viz_flora::tree_trunk_mesh(11 + i * 613))).collect(),
+        broadleaf: (0..4).map(|i| meshes.add(crate::viz_flora::tree_canopy_mesh(7 + (i as usize) % 3, 1.0, 2 + i * 977))).collect(),
+        conifer: (0..3).map(|i| meshes.add(crate::viz_flora::conifer_mesh(7 + i * 331))).collect(),
+        vine: meshes.add(vine_mesh(0.16)), // helix vine hugging the trunk (radius ~ trunk)
+    }
 }
 
 // Dress any plant lacking a mesh: form silhouette + genome-colored material (hue=kind,
@@ -852,9 +863,11 @@ fn add_plant_visuals(
             };
             // bark varies tree to tree; a forest of identical brown poles reads as instanced props
             let bk = (h >> 8) as f32 / u32::MAX as f32 * 256.0 % 1.0;
+            // trunk mesh carries per-vertex bark shading (ridges lighter, crevices + damp foot darker), so
+            // the material colour is the tree's average bark tone, not its darkest.
             commands.entity(e).insert((
-                Mesh3d(tm.trunk.clone()),
-                MeshMaterial3d(materials.add(Color::srgb(0.34 + 0.12 * bk, 0.22 + 0.08 * bk, 0.11 + 0.06 * bk))),
+                Mesh3d(tm.trunk[(h as usize >> 3) % tm.trunk.len()].clone()),
+                MeshMaterial3d(materials.add(Color::srgb(0.30 + 0.14 * bk, 0.20 + 0.09 * bk, 0.12 + 0.07 * bk))),
             ));
             // broadleaf crown centered (sits high in canopy); stacked-cone conifer base at y=0 rests on
             // trunk top (lower attach). Trunk centered (half-height 1.0); canopies attach to envelop most
@@ -862,12 +875,12 @@ fn add_plant_visuals(
             let (canopy, cmat, cy) = if t.edible {
                 (tm.broadleaf[(h as usize) % tm.broadleaf.len()].clone(), materials.add(plant_color(g)), 1.0)
             } else {
-                // conifer cones are open shells: double-sided so hollow shows dark-green inner face (no
-                // see-through to trunk/sky); spine cone fills core. Evergreen needle-green: brighter
-                // blue-green reads as foliage not black blob; roughness 0.6 near foliage default (0.5) so
-                // sun catches soft sheen like broadleaf. Old 0.9 matte + dark base: noon sun never lit it.
+                // conifer skirts are open shells: no_cull (NOT double-sided, which negates the back-face
+                // normal and blacks the tree out); spine cone fills the core so nothing sees through to the
+                // sky. Evergreen needle-green: brighter blue-green reads as foliage not black blob;
+                // roughness 0.6 near foliage default (0.5) so sun catches soft sheen like broadleaf.
                 let m = no_cull_mat(&mut materials, Color::srgb(0.16, 0.52, 0.30), Some(0.6));
-                (tm.conifer.clone(), m, -0.6)
+                (tm.conifer[(h as usize >> 5) % tm.conifer.len()].clone(), m, -0.6)
             };
             let child = commands
                 .spawn((Mesh3d(canopy), MeshMaterial3d(cmat), Transform::from_xyz(0.0, cy, 0.0)))
@@ -1363,38 +1376,6 @@ fn push_sphere(b: &mut MeshBuf, idx: &mut Vec<u32>, center: Vec3, r: f32, rings:
     }
 }
 
-// Append SMOOTH cone (base at `base`, up `height`, base radius r). Ring vertices carry radial slant
-// normals (not flat per-face) -> smooth rounded gradient, reads as 3D cone not cardboard triangle. Shade
-// fades base->apex (dark->light).
-fn push_cone(b: &mut MeshBuf, idx: &mut Vec<u32>, base: Vec3, r: f32, height: f32, seg: usize, v: f32) {
-    let apex = base + Vec3::Y * height;
-    // cone slant normal at angle th: outward (scaled by height) + up (scaled by r)
-    let slant = |th: f32| Vec3::new(th.cos() * height, r, th.sin() * height).normalize_or_zero();
-    let ring0 = b.pos.len() as u32;
-    for si in 0..=seg {
-        let th = std::f32::consts::TAU * si as f32 / seg as f32;
-        let p = base + Vec3::new(th.cos() * r, 0.0, th.sin() * r);
-        let n = slant(th);
-        b.pos.push([p.x, p.y, p.z]);
-        b.nor.push([n.x, n.y, n.z]);
-        b.col.push(shade_col(v * 0.85));
-    }
-    let apex0 = b.pos.len() as u32;
-    for si in 0..seg {
-        let th = std::f32::consts::TAU * (si as f32 + 0.5) / seg as f32; // apex normal aimed at face center
-        let n = slant(th);
-        b.pos.push([apex.x, apex.y, apex.z]);
-        b.nor.push([n.x, n.y, n.z]);
-        b.col.push(shade_col(v * 1.05));
-    }
-    for si in 0..seg as u32 {
-        // wind ring->ring->apex so OUTER cone surface is FRONT face. Was reversed: outer face came out
-        // back-facing -> double_sided canopy flipped normal (out+up -> in+down) -> cone lit from below
-        // (bright undersides, dark sunlit tops). Front-facing outward = lit from above.
-        idx.extend_from_slice(&[ring0 + si + 1, ring0 + si, apex0 + si]);
-    }
-}
-
 // Bushy clump of overlapping blobs. Each blob = (center, radius, shade). Used for herbs, shrubs, ground
 // cover, moss bumps, broadleaf tree canopies -> full foliage, not one ball.
 pub fn blob_cluster_mesh(blobs: &[(Vec3, f32, f32)]) -> Mesh {
@@ -1483,25 +1464,6 @@ pub fn cactus_mesh() -> Mesh {
         push_sphere(&mut b, &mut idx, Vec3::new(sx, h, 0.0), 0.1, 4, 6, 0.78);
         push_sphere(&mut b, &mut idx, Vec3::new(sx * 1.4, h + 0.12, 0.0), 0.09, 4, 6, 0.82);
         push_sphere(&mut b, &mut idx, Vec3::new(sx * 1.5, h + 0.28, 0.0), 0.085, 4, 6, 0.9);
-    }
-    b.finish(idx)
-}
-
-// Conifer: stacked cones OVERLAPPING heavily (each tier base well inside cone below) -> merge into ONE
-// solid Christmas-tree silhouette, not three floating cones. Base at y=0; each apex rises past next cone
-// base, closing gaps.
-pub fn conifer_mesh() -> Mesh {
-    let mut b = MeshBuf::new();
-    let mut idx = Vec::new();
-    // TIERED fir: smooth cones (no cardboard facets) as drooping branch skirts, stacked so each rim pokes
-    // out below the next. Narrow central SPINE cone fills core; canopy material double-sided (see
-    // add_plant_visuals) -> no hollow see-through, trunk stays hidden.
-    push_cone(&mut b, &mut idx, Vec3::new(0.0, 0.0, 0.0), 0.35, 2.55, 12, 0.85); // central spine (core fill)
-    // (base_y, base_radius, height, shade) skirts: wide bottom -> narrow top, moderate overlap = visible
-    // tiers. Shade floor raised (was 0.68) so lower tiers keep light, not near-black.
-    let skirts = [(0.1_f32, 1.5_f32, 1.0_f32, 0.82_f32), (0.7, 1.2, 1.0, 0.88), (1.3, 0.9, 1.0, 0.94), (1.85, 0.55, 0.95, 1.0)];
-    for (y, r, h, shade) in skirts {
-        push_cone(&mut b, &mut idx, Vec3::new(0.0, y, 0.0), r, h, 16, shade);
     }
     b.finish(idx)
 }
@@ -2665,17 +2627,22 @@ fn log_viz_help() {
 }
 
 
-// Recolor + rescale creature on genome change (spawn + every generation boundary).
+// Recolor creature on genome change (spawn + every generation boundary).
+//
+// Deliberately does NOT touch tf.scale. size_creatures already writes scale for every creature every frame,
+// and it is the only one of the two that applies the juvenile grow-in. A second writer here set FULL adult
+// scale, so on any frame the scheduler happened to run this last, every juvenile snapped to adult size for
+// that frame. Changed<Genome> fires for the whole population at startup, which is why it read as every
+// animal's size jumping around for the first moments after launch.
 fn restyle_creatures(
     mut mats: ResMut<Assets<StandardMaterial>>,
-    mut q: Query<(&Genome, &MeshMaterial3d<StandardMaterial>, &mut Transform), Changed<Genome>>,
+    q: Query<(&Genome, &MeshMaterial3d<StandardMaterial>), Changed<Genome>>,
 ) {
-    for (g, mm, mut tf) in &mut q {
+    for (g, mm) in &q {
         let (color, _) = creature_look(g); // skin_hue/sat, venom warning, fur/armor tint (multiplies vertex colors)
         if let Some(m) = mats.get_mut(&mm.0) {
             m.base_color = color;
         }
-        tf.scale = Vec3::splat(body_scale(g));
     }
 }
 

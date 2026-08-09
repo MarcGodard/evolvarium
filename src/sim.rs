@@ -144,10 +144,6 @@ pub struct FieldGrids<'w> {
 // rather than a query so both the logger and the sealer can call it with their own query shapes.
 // Callers MUST include detritus/carrion, not just living plants: death moves mass from a plant to a detritus
 // ENTITY, so excluding those reads a matter-neutral transfer as a leak.
-pub fn flora_matter(mass_kg: f64) -> crate::chem::Elements {
-    crate::chem::PLANT_COMP * mass_kg
-}
-
 // Composition of a food/detritus entity, keyed off its genome kind. Carrion is animal flesh and carries ~7x
 // the nitrogen of plant litter, so counting it as plant tissue books a phantom leak on every carcass and
 // under-returns nitrogen when it rots.
@@ -1658,20 +1654,7 @@ pub fn spawn_world_render(
             cap: meshes.add(crate::viz::dome_mesh()), // domed mushroom cap
         });
     }
-    commands.insert_resource(crate::viz::TreeMeshes {
-        // tapered trunk: real trunks are wider at the base, and a straight cylinder reads as a dowel. Bevy's
-        // ConicalFrustum gives the taper without a custom mesh.
-        trunk: meshes.add(ConicalFrustum { radius_top: 0.10, radius_bottom: 0.21, height: 1.4 }),
-        // fuller broadleaf crown: cluster of overlapping blobs (centered ~origin; placed in crown)
-        // irregular multi-lobe crown with per-vertex shading (darker inside/underside) so it reads as
-        // foliage depth rather than a smooth ball. Same origin-centered radius-1 convention as the old
-        // blob cluster, so the spawn path needs no change.
-        broadleaf: (0..4)
-            .map(|i| meshes.add(crate::viz_flora::tree_canopy_mesh(5 + i % 3, 1.0, 2 + i as u32 * 977)))
-            .collect(),
-        conifer: meshes.add(crate::viz::conifer_mesh()), // stacked-cone Christmas-tree silhouette
-        vine: meshes.add(crate::viz::vine_mesh(0.16)),    // helix vine hugging the trunk (radius ~ trunk)
-    });
+    commands.insert_resource(crate::viz::tree_meshes(&mut meshes));
     // fallen-log prop dropped where a tree dies (viz::spawn_logs_on_tree_death): shared cylinder, per-log color.
     commands.insert_resource(crate::viz::LogProps {
         mesh: meshes.add(Cylinder::new(0.2, 2.2)),
@@ -2122,7 +2105,6 @@ pub fn plant_step(
     let seed = gen.seed;
     let tick = gen.tick;
     // read-only snapshots for the parallel decide (soil/tree_bites not mutated until the serial apply below)
-    let soil_r: &Soil = &soil;
     let bio_r: &crate::chem::Biosphere = &bio;
     let gw_r: &GroundWater = &gw;
     let climate_r: &Climate = &climate;
@@ -3331,6 +3313,10 @@ pub fn live_step(
                     // digestion efficiency = MASTER expression gene (reserves vs uptake demand). Gates energy
                     // from ALL food in diet mode; legacy --no-diet ungated (eff=1).
                     let eff = if gen.diet { master_expression(&genome.uptake, &diet.reserves, RESERVE_REQ, MASTER_FLOOR) } else { 1.0 };
+                    // Gape: bite size scales with body mass on the SAME exponent as Kleiber, so intake and
+                    // upkeep move together and size stops being a free lunch. Applied to bite MASS, not just
+                    // to the energy, so a mouse-sized grazer also stops stripping a whole plant per bite.
+                    let gape = crate::thermo::intake_scale(body_kg) as f32;
                     let fert = soil_r.get(np);
                     let soil_f = 1.0 - SOIL_NUTRI + SOIL_NUTRI * (fert / FERT_CAP).min(1.0); // richer soil -> more nutrients delivered
                     if let Some(true) = tree {
@@ -3338,7 +3324,7 @@ pub fn live_step(
                         // nutrition (TREE_MASS_NUTRI): bulkier tree gives less energy/bite. Creature too SHORT to
                         // reach without branches feeds HARMLESSLY (0 mass damage); tall enough to reach crown
                         // strips mass + can over-graze. Either way feeding is recorded (triggers dispersal).
-                        let bite_mass = TREE_BITE_MASS.min(mass);
+                        let bite_mass = (TREE_BITE_MASS * gape).min(mass);
                         let mass_nutri = 1.0 - TREE_MASS_NUTRI * (mass / TREE_MATURITY).min(1.0);
                         let base = bite_mass * pg.nutrient * mass_nutri * (0.5 + pg.quality);
                         let wasted = energy.add_sugar(EAT_GAIN * base * eff, SUGAR_CAP, fat_max); // fruit flesh -> sugar
@@ -3412,7 +3398,7 @@ pub fn live_step(
                         // (>60%). Not gated by master expr; balanced for reserves.
                         let f = (age as f32 / ROT_GONE as f32).clamp(0.0, 1.0); // 0 fresh .. 1 rotten
                         let freshness = 1.0 - (f / 0.6).min(1.0); // ~1 for first 60% of decomposition
-                        let meat = mass * pg.nutrient * freshness;
+                        let meat = mass * pg.nutrient * freshness * gape.min(1.0);
                         let toxin = TOXIN_MAX * ((f - 0.6) / 0.4).max(0.0); // no toxin until 60% rotted
                         // RABBIT STARVATION (real mechanic): usable ENERGY of a carcass = its FAT. Lean meat (low
                         // fat) = mostly PROTEIN; converting protein to usable energy/fat needs CARBS (eater sugar
@@ -3446,7 +3432,7 @@ pub fn live_step(
                         // regular plant: strip a fraction set by `regrow`: carrot (~whole) vs berry bush (small
                         // bite, persists). Recorded as grazing; plant_step reduces mass / despawns.
                         let frac = (1.0 - 0.85 * pg.regrow).clamp(0.12, 1.0);
-                        let bite_mass = mass * frac;
+                        let bite_mass = mass * (frac * gape).min(1.0);
                         bat.tree_bites.push((idx, e, bite_mass));
                         // quality scales extractable energy: factor 0.5..1.5, ~1.0 at quality 0.5 (balance-neutral)
                         let base = bite_mass * pg.nutrient * (0.5 + pg.quality);

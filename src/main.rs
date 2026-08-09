@@ -38,6 +38,7 @@ mod thermo;
 mod viz;
 mod viz_flora;
 mod viz_ground;
+mod viz_atmo;
 mod viz_sky;
 
 use bevy::app::ScheduleRunnerPlugin;
@@ -311,6 +312,7 @@ fn main() {
             .insert_resource(Time::<Fixed>::from_hz((1.0 / sim::DT) as f64))
             .add_plugins(camera::OrbitCameraPlugin)
             .add_plugins(viz::VizPlugin)
+            .add_systems(Update, viz_atmo::update_haze)
             .add_plugins(audio::GameAudioPlugin) // procedural world audio (render-only, never headless)
             .add_plugins(orrery_view::OrreryViewPlugin)
             .add_systems(Startup, (setup_scene, sim::spawn_world_render))
@@ -458,6 +460,7 @@ fn setup_scene(
         Visibility::Hidden, // shown only in orbit (atmosphere_visibility)
         viz::Atmosphere,
     ));
+    viz_atmo::spawn_haze(&mut commands, &mut meshes, &mut materials);
     // sun (directional light; direction set per-frame by day_night_lighting). shadows_enabled toggled by
     // camera::update_shadow_mode: OFF in orbit (shadow-range boundary showed as "eclipse" disc when zoomed),
     // ON in walk (eye-level horizon close so range covers whole view -> real shadows, no disc). Cascade tuned

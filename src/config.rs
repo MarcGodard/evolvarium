@@ -100,7 +100,6 @@ pub const HEIGHT_COST: f32 = 0.7; // energy/sec upkeep per unit height (tall rea
 // maintain. Small = nimble + cheap; large = tank. Physical axis visualizer shows as scale.
 pub const SIZE_ENERGY: f32 = 1.0;  // fat-store ceiling scales: fat_cap *= (1 + this*size)
 pub const SIZE_COMBAT: f32 = 0.5;  // added to bite as effective combat power in predation (mass wins fights)
-pub const SIZE_BASAL: f32 = 2.8;   // energy/sec extra basal upkeep at full size (big bodies cost to maintain)
 pub const SIZE_MOVE: f32 = 1.2;    // move cost mult scales (1 + this*size) (more mass to push)
 // Swim (aquatic): in water/wet lowland a swimmer moves faster + cheaper (exploits river + productive
 // moist shoreline -> "fish" niche); on dry high ground its fins are liability (move penalty).
@@ -363,7 +362,6 @@ pub const SEA_ICE_TEMP: f32 = 0.30;      // ocean pack-ice render onset: seaweed
 // at first mismatch. Growth still tapers off-niche via shared TEMP_FLOOR factor.
 pub const TREE_TEMP_TOL: f32 = 0.4;      // tree temp_pref mismatch under this harmless (wider than plants)
 pub const TREE_TEMP_KILL: f32 = 0.004;   // per-tick death scale for tree beyond its (wide) thermal tolerance
-pub const NFIX_RATE: f32 = 0.6;          // soil fertility/sec full nitrogen-fixer (legume) adds at its spot
 pub const DESICCATE_KILL: f32 = 0.1;     // per-tick death for aquatic plant (high wet) stranded on dry land
                                          // (mirror of drown): aquatic flora needs water, can't carpet land
 // Dynamic ground water (rain cycle): wetness layer on TOP of static terrain moisture. Sun evaporates
@@ -495,7 +493,6 @@ pub const PROTEIN_CARN: f32 = 0.65;  // extra meat-extraction fraction at full c
 pub const PROTEIN_TOX: f32 = 0.06;   // toxic load per unit UNCONVERTIBLE protein (lean meat eaten without carbs)
 // pelt (hair/fur): insulation. Cuts COLD side of thermal mismatch; adds HEAT-side cost in hot places,
 // drags in water, costs little basal upkeep.
-pub const PELT_COLD_RELIEF: f32 = 0.7; // fraction of cold-side temp cost removed at full pelt
 pub const PELT_HEAT_COST: f32 = 0.6;   // energy/sec extra at full pelt in hottest places (overheating)
 pub const PELT_WATER_DRAG: f32 = 1.2;  // energy/sec extra at full pelt fully in water (waterlogged coat)
 pub const PELT_UPKEEP: f32 = 0.2;      // energy/sec basal at full pelt (growing + carrying a coat)
