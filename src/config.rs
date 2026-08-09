@@ -593,6 +593,11 @@ pub const MORPH_REACH_BROWSE: f32 = 0.18; // browse-reach added per body-reach u
 // threat sense: nearby creature with enough COMBAT edge over you registers as predator -> brain can learn
 // to flee (threat_dist/threat_bearing inputs).
 pub const THREAT_RADIUS: f32 = 22.0; // bigger-combat creature within this sensed as threat
+// Distance discount when a hunter sizes up prey (see live_step prey sense). In log-mass units per world
+// unit, so it trades the mass advantage of a target against the ground needed to reach it: at 0.02 a
+// creature will cross the full 22-unit sense radius only for prey ~0.44 log-mass lighter (~1.5x), and takes
+// the near one otherwise.
+pub const PREY_TRIP_COST: f32 = 0.02;
 pub const THREAT_MARGIN: f32 = 0.4;  // combat edge neighbor needs over you to register as threat
 // acoustics (M6): hearing = OMNIDIRECTIONAL sense (unlike vision cone). A listener hears an emitter loudest
 // when its hear_freq matches the emitter's size-pitch (1-size). Emission = NN out[7] (when/loud); emit pitch

@@ -3129,6 +3129,7 @@ pub fn live_step(
         let mut threat_pos = Vec3::ZERO;
         let mut prey_d2 = f32::INFINITY;
         let mut prey_pos = Vec3::ZERO;
+        let mut prey_score = f32::NEG_INFINITY;
         for (e2, p2, _, c2, _) in &cre_snap {
             if *e2 == entity {
                 continue;
@@ -3139,9 +3140,19 @@ pub fn live_step(
                     threat_d2 = d2;
                     threat_pos = *p2;
                 }
-            } else if *c2 < my_combat - THREAT_MARGIN && d2 < prey_d2 {
-                prey_d2 = d2;
-                prey_pos = *p2;
+            } else if *c2 < my_combat - THREAT_MARGIN && d2 < THREAT_RADIUS * THREAT_RADIUS {
+                // Report the BEST prey, not the nearest. Nearest meant a hunter homed on whichever slightly
+                // smaller neighbour happened to be closest, so engagements ran between near-equals and the
+                // size advantage the world offers went unused: measured p90/p10 = 3.8x available (edge 0.67)
+                // while actual matchups sat at adv -0.89. Score by mass advantage discounted for the trip,
+                // which is what sizing up prey means: a much smaller animal is worth crossing ground for,
+                // a marginally smaller one is not.
+                let score = (my_combat - *c2) - PREY_TRIP_COST * d2.sqrt();
+                if score > prey_score {
+                    prey_score = score;
+                    prey_d2 = d2;
+                    prey_pos = *p2;
+                }
             }
         }
         let rel_bearing = |target: Vec3| {
@@ -4176,8 +4187,17 @@ pub fn generation_step(
             // rather than stillness and rose whenever the population grew.
             let (mut path_sum, mut net_sum, mut straight_sum, mut moved, mut mature) = (0.0f32, 0.0f32, 0.0f32, 0u32, 0u32);
             let mut carn_spec = 0usize;
+            // Body-mass SPREAD, not just the mean. mass_edge = SIZE_COMBAT * ln(attacker/prey), so the
+            // p90/p10 ratio is literally the largest size advantage this world can offer a predator: a
+            // size-uniform population has ratio ~1, edge ~0, and predation with nothing to win on however
+            // well the success formula behaves. This is the number that says whether a food web has
+            // structure or just an average.
+            let mut masses: Vec<f32> = Vec::with_capacity(pop);
             for (t, en, fit, _h, _a, g, _b, diet, l) in cq.iter() {
                 if diet.age > 200 {
+                    masses.push(crate::chem::creature_mass_kg(
+                        g.morph.map(|m| m.mass).unwrap_or_else(|| crate::morph::Morphometrics::of(&g.body).mass),
+                    ) as f32);
                     mature += 1;
                     carn += g.carnivory;
                     if g.carnivory > 0.5 {
@@ -4226,6 +4246,11 @@ pub fn generation_step(
                 if g.alpine > 0.5 { hi += 1; }
                 abslat += crate::sphere::dir_to_lonlat(t.translation.normalize_or_zero()).1.abs();
             }
+            masses.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let pick = |f: f32| masses.get(((masses.len() as f32 * f) as usize).min(masses.len().saturating_sub(1))).copied().unwrap_or(0.0);
+            let (m_p10, m_p90) = (pick(0.10), pick(0.90));
+            // best edge on offer: what the heaviest decile gains attacking the lightest
+            let mass_edge_avail = SIZE_COMBAT * (m_p90 / m_p10.max(1e-6)).max(1.0).ln();
             let plant_n = pq.iter().len().max(1);
             let avg_def: f32 = pq.iter().map(|(g, _)| g.defense).sum::<f32>() / plant_n as f32;
             let avg_nut: f32 = pq.iter().map(|(g, _)| g.nutrient).sum::<f32>() / plant_n as f32;
@@ -4239,7 +4264,7 @@ pub fn generation_step(
             let (h_adv, h_armor, h_brace) = (hmean(&gen.adv_sum), hmean(&gen.armor_sum), hmean(&gen.brace_sum));
             let (h_kin, h_climb, h_succ) = (hmean(&gen.kin_sum), hmean(&gen.climb_sum), hmean(&gen.succ_sum));
             info!(
-                "t {:>6} | pop {:>3} | kg {:.3} | path {:.1} net {:.1} straight {:.2} still {:.0}% foodCV {:.2} | E in {:.3} out {:.3} ratio {:.2} | noP-births {} atk {} kills {} carn {:.2} spec {} | HUNT adv {:.3} [armor {:.3} brace {:.3}] kin {:.2} climb {:.2} p {:.5} | energy {:.1} [f{:.1}/s{:.1}/F{:.1}] adp {:.2} | mast {:.2} brd {:.1} | life-fit {:.1} | age {:.0} | sens {:.1} | bite {:.2} | rig {:.2} | temp {:.2} lng {:.2} met {:.2} endo {:.2}[c{:.2}/{} t{:.2}/{} w{:.2}/{}] par {:.2} lat {:.2} | swim {:.2} alp {:.2} aq {} hi {} | def {:.2} nut {:.2} qual {:.2} wet {:.2} | plants {} | soil {:.2} | rain {:.2} fire {:.3} | wear {:.3} bare {} | CHEM {} | {}",
+                "t {:>6} | pop {:>3} | kg {:.3} | path {:.1} net {:.1} straight {:.2} still {:.0}% foodCV {:.2} | E in {:.3} out {:.3} ratio {:.2} | noP-births {} atk {} kills {} carn {:.2} spec {} | mass p10 {:.3} p90 {:.3} edge {:.2} | HUNT adv {:.3} [armor {:.3} brace {:.3}] kin {:.2} climb {:.2} p {:.5} | energy {:.1} [f{:.1}/s{:.1}/F{:.1}] adp {:.2} | mast {:.2} brd {:.1} | life-fit {:.1} | age {:.0} | sens {:.1} | bite {:.2} | rig {:.2} | temp {:.2} lng {:.2} met {:.2} endo {:.2}[c{:.2}/{} t{:.2}/{} w{:.2}/{}] par {:.2} lat {:.2} | swim {:.2} alp {:.2} aq {} hi {} | def {:.2} nut {:.2} qual {:.2} wet {:.2} | plants {} | soil {:.2} | rain {:.2} fire {:.3} | wear {:.3} bare {} | CHEM {} | {}",
                 // MEAN BODY MASS in real kg, not the size GENE. The two diverged ~87x unnoticed because only
                 // the gene was ever logged, and every Kleiber/thermoregulation term keys off the kg.
                 gen.tick, pop, cont_fauna_kg / pop.max(1) as f64,
@@ -4256,6 +4281,7 @@ pub fn generation_step(
                 gen.kills.swap(0, std::sync::atomic::Ordering::Relaxed),
                 carn / mature.max(1) as f32,
                 carn_spec,
+                m_p10, m_p90, mass_edge_avail,
                 h_adv, h_armor, h_brace, h_kin, h_climb, h_succ,
                 e / n, fa / n, su / n, ft / n, adp / n, mast / n, brd / n, f / n, age / n, sens / n, bite / n, rig / n, temp / n, lng / n, met / n, endo / n,
                 endo_c / nc.max(1) as f32, nc, endo_t / nt.max(1) as f32, nt, endo_w / nw.max(1) as f32, nw,
