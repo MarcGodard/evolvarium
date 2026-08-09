@@ -1490,7 +1490,7 @@ fn add_seaweed_visuals(
     let (Some(mesh), Some(mat)) = (mesh, mat) else { return };
     for (e, st, mut tf) in &mut q {
         let up = tf.translation.normalize_or_zero();
-        let base = crate::sphere::surface_pos(up, 0.0); // holdfast anchored on seabed
+        let base = crate::terrain::render_surface_pos(up, 0.0); // holdfast anchored on the RENDERED seabed
         let e01 = crate::sphere::elevation01(up);
         let depth = ((crate::sphere::SEA_LEVEL - e01) / crate::sphere::SEA_LEVEL).clamp(0.0, 1.0);
         let mass_f = 0.6 + 0.4 * st.mass.min(1.2);
@@ -1912,7 +1912,11 @@ struct CloudPuff {
 }
 
 fn cloud_alt() -> f32 {
-    crate::sphere::PLANET_R + crate::sphere::ELEV_MAX + 10.0
+    // Deck sits AT peak terrain height, so the tallest mountains just reach it and the highest poke through,
+    // which is what real ranges do to a cumulus base. Was +10 ABOVE the peak, putting the deck 22 units up on
+    // an 80-unit planet, ~27% of the planet's radius, where real cumulus base is ~0.02% of Earth's. From
+    // orbit that read as a detached shell floating well past the limb.
+    crate::sphere::PLANET_R + crate::sphere::ELEV_MAX
 }
 
 // How far past the GROUND terminator a cloud keeps seeing the sun: sin of the angle subtended by the planet
@@ -2008,7 +2012,7 @@ fn spawn_clouds(
                     grow: 0.0,
                     scale_var: 0.55 + hash01(seed ^ 0x1234) * 0.9,
                     flat: 0.42 + hash01(seed ^ 0x5678) * 0.22, // less squash: cluster keeps billow volume
-                    hbias: (hash01(seed ^ 0xabcd) - 0.5) * 6.0,
+                    hbias: (hash01(seed ^ 0xabcd) - 0.5) * 4.0, // tighter than the old +/-3: deck is lower now, so a deep puff would otherwise reach the ground
                 },
             ));
         }

@@ -8,7 +8,16 @@ pub const HEIGHT_MAX: f32 = 12.0; // peak terrain elev above sea sphere (world u
 // Render-only ocean-floor drop: shallow shelf (elevation ~0 at coast) would otherwise sit a hair below the
 // translucent ocean shell (~PLANET_R+0.16) -> z-fight shimmer seen through the water in orbit. Drop the whole
 // ocean floor by this so the shelf clears the shell with margin. Sim bathymetry (sphere::elevation) untouched.
-const OCEAN_RENDER_DROP: f32 = 0.8;
+pub const OCEAN_RENDER_DROP: f32 = 0.8;
+
+/// Surface point AS RENDERED. Differs from `sphere::surface_pos` under water, where the globe mesh sinks the
+/// floor by OCEAN_RENDER_DROP to clear the ocean shell. Anything seated on the seabed must use this: sampling
+/// the sim bathymetry instead leaves it hovering exactly that far above the visible floor, which is what the
+/// kelp was doing.
+pub fn render_surface_pos(d: Vec3, offset: f32) -> Vec3 {
+    let drop = if crate::sphere::elevation(d) < 0.0 { OCEAN_RENDER_DROP } else { 0.0 };
+    crate::sphere::surface_pos(d, offset - drop)
+}
 
 // UV sphere displaced by terrain elevation, vertex-colored by biome (oceans blue, land green/sand/rock,
 // polar ice). `res` = latitude bands. longitude uses 2*res.
