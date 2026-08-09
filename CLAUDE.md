@@ -77,6 +77,11 @@ cargo run -- --capture=PREFIX               # walk view at the homeland (morning
   --cap-mmfield=N                           # open corner minimap on overlay N (4 soil, 5 water, 6 fire, 7 life, 8 wear)
 ```
 
+**Redirect capture output to a file, never pipe it.** The PNG is written a few frames AFTER the "capture:
+writing" log line. Piping to `head`/`tail`/`grep` closes the pipe, SIGPIPE kills the process before the
+screenshot lands, and it exits 2 with no error and no file, which reads exactly like a crash. Use
+`--capture=X > x.log 2>&1` and then read the log.
+
 `--shots[=PREFIX]` is a separate CPU ray-traced snapshot (no GPU) for offline planet views.
 
 **NEVER auto-start the long-running visualizer** (`cargo run` with a window) to "watch" it — use `--capture`

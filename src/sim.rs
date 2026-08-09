@@ -2654,7 +2654,7 @@ pub fn predation_step(
     let continuous_live = gen.continuous && gen.generation >= WARMUP_GENS;
     for (e, t, mut energy, mut fit, mut alive, gen_e, mut brain) in &mut cq {
         if let Some(g) = gains.get(&e) {
-            energy.add_fat(*g, fat_cap(gen_e)); // a kill = meat -> fat store
+            energy.add_fat(*g, fat_cap_of(gen_e)); // a kill = meat -> fat store
             fit.0 += g * 0.3; // predation counts toward selection
             brain.fight_reward += R_KILL; // this attack paid off -> reinforce the attack output
         } else if committed.contains(&e) {
@@ -2665,7 +2665,7 @@ pub fn predation_step(
         }
         if killed.contains(&e) {
             alive.0 = false;
-            let fat = (energy.fat / fat_cap(gen_e).max(0.01)).clamp(0.0, 1.0); // how fatty the prey was
+            let fat = (energy.fat / fat_cap_of(gen_e).max(0.01)).clamp(0.0, 1.0); // how fatty the prey was
             // carrion tracks the VICTIM's actual mass, not a constant: a constant mints or destroys the
             // difference on every kill. Half remains as carcass, the predator ate the rest.
             // KNOWN GAP: the eaten half is not yet routed into the biosphere here (predation_step has no
@@ -2859,7 +2859,10 @@ pub fn live_step(
         let idx = entity.index().index();
         let mut prng = crate::rng::Rng::for_entity(seed, idx, tick);
         let pos = ct.translation;
-        let fat_max = fat_cap(genome); // adiposity + size set this creature's fat-store ceiling
+        let body_kg = crate::chem::creature_mass_kg(
+            genome.morph.map(|m| m.mass).unwrap_or_else(|| crate::morph::Morphometrics::of(&genome.body).mass),
+        );
+        let fat_max = fat_cap(genome, body_kg); // adiposity + real body mass set the fat-store ceiling
 
         // SINGLE grid-bounded pass over nearby foods (perf): scan only food-grid cells within query radius
         // (>= max sensor range so every sensable food covered; >= NEAR_QUERY so global-nearest found given dense
@@ -3211,7 +3214,7 @@ pub fn live_step(
         );
         energy.burn((BASAL_COST * (1.0 - 0.6 * metab_f) // frugal metabolism lowers the cost of living
             + WATT_TO_ENERGY * (basal_w + thermo_w) as f32 // real metabolic + thermoregulatory load
-            + MOVE_COST * (1.0 + SIZE_MOVE * genome.size + ARMOR_MOVE * genome.armor + LIMB_MOVE_COST * genome.limbs + MORPH_MASS_MOVE * (morph.mass - MORPH_MASS_REF).max(0.0)) * thrust * thrust // mass + plates + legs + evolved-body mass to push
+            + MOVE_COST * (1.0 + SIZE_MOVE * genome.size + ARMOR_MOVE * genome.armor + LIMB_MOVE_COST * genome.limbs) * crate::thermo::locomotion_scale(body_kg) as f32 * thrust * thrust // plates + legs to drive, whole cost on the same M^0.75 allometry as intake
             + BITE_COST * genome.bite
             + ROCK_MOVE_COST * rock * thrust.abs() * (1.0 - ALPINE_RELIEF * genome.alpine) // alpine climbers cross rock cheaply
             + ALPINE_FLAT_COST * genome.alpine * (1.0 - rock) // heavy mountain build wastes energy on flat ground
@@ -3770,8 +3773,27 @@ fn sigmoid(x: f32) -> f32 {
 // Per-creature FAT-store ceiling: adiposity sets storage strategy, body size adds capacity. Fat is the big bank
 // (fast/sugar caps fixed small/medium). Bigger+fattier bodies buffer famine but pay carrying upkeep (FAT_UPKEEP)
 // + sluggishness (FAT_POWER) -> no free lunch.
-fn fat_cap(g: &Genome) -> f32 {
-    FAT_CAP * (0.4 + ADIPOSITY_CAP * g.adiposity) * (1.0 + SIZE_ENERGY * g.size)
+// Fat-store ceiling. Scales with ACTUAL body mass, not the `size` gene.
+//
+// Fat is a fraction of a body, so storage goes as M^1 while metabolism goes as M^0.75, and the ratio is
+// fasting endurance ~ M^0.25: a big animal outlasts a famine a small one dies in. That is the physical force
+// selecting FOR size, and the world had none of it.
+//
+// Keying this off g.size was the exploit behind the dwarfism. The sim carries two uncoupled notions of size:
+// the `size` gene, and morph.mass from the developed body graph (Morphometrics::of takes only &BodyGraph, so
+// the gene is not an input). Metabolism and intake key off morph.mass, storage keyed off the gene, so a
+// lineage could shrink the body that costs energy while keeping the gene that grants storage and combat
+// reach. Measured exactly that: sz held 0.59-0.61 while mean body mass fell 1.73 -> 0.24 kg.
+// Convenience for call sites that hold only the genome: derives body mass from it.
+fn fat_cap_of(g: &Genome) -> f32 {
+    let kg = crate::chem::creature_mass_kg(g.morph.map(|m| m.mass).unwrap_or_else(|| crate::morph::Morphometrics::of(&g.body).mass));
+    fat_cap(g, kg)
+}
+
+fn fat_cap(g: &Genome, body_kg: f64) -> f32 {
+    let reference = crate::chem::creature_mass_kg(crate::config::MORPH_MASS_REF);
+    let mass_frac = (body_kg / reference).clamp(0.05, 8.0) as f32;
+    FAT_CAP * (0.4 + ADIPOSITY_CAP * g.adiposity) * mass_frac
 }
 
 // Collision body radius (~visual half-width): build factor (sensor count + size) x COLLIDE_R. Matches rendered

@@ -102,7 +102,6 @@ pub const OVEREAT_G: f32 = 0.2; // growth-load gained per unit energy eaten whil
 pub const HEIGHT_COST: f32 = 0.7; // energy/sec upkeep per unit height (tall reaches trees but costs more)
 // Body size (mass): bigger creature stores more energy + hits harder in combat, but costs more to run +
 // maintain. Small = nimble + cheap; large = tank. Physical axis visualizer shows as scale.
-pub const SIZE_ENERGY: f32 = 1.0;  // fat-store ceiling scales: fat_cap *= (1 + this*size)
 pub const SIZE_COMBAT: f32 = 0.5;  // added to bite as effective combat power in predation (mass wins fights)
 pub const SIZE_MOVE: f32 = 1.2;    // move cost mult scales (1 + this*size) (more mass to push)
 // Swim (aquatic): in water/wet lowland a swimmer moves faster + cheaper (exploits river + productive
@@ -540,7 +539,6 @@ pub const MORPH_AREA_REF: f32 = 1.5;    // reference frontal cross-section (abov
 pub const MORPH_REACH_REF: f32 = 2.2;   // reference body reach (above = taller browse reach)
 pub const MORPH_TISSUE_COST: f32 = 0.05; // energy/sec per developed part above ref (running more tissue)
 pub const MORPH_MASS_BASAL: f32 = 0.12;  // energy/sec per mass-unit above ref (bigger body, higher basal)
-pub const MORPH_MASS_MOVE: f32 = 0.25;   // move-cost mult add per mass-unit above ref (heavy = costly to push)
 // STRONG embodied-locomotion pressure (2026-06-25): ground speed REQUIRES traction from real legs (evolved
 // body-graph ground-contacts). A legless blob crawls at this floor; ~MORPH_GC_REF leg-tips on the ground ->
 // full speed. So a creature that can't forage/flee at 0.18x MUST grow legs (morphology) to survive -> real

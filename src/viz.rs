@@ -906,12 +906,15 @@ fn add_plant_visuals(
             // it LOW (short ground creatures reach). Local y maps that drop; ring sits in the broadleaf crown.
             // Ripe red/orange, toxic fruit warns violet (fruit_toxicity, decoupled from body toxicity).
             if t.edible && g.fruiting > 0.3 {
-                let (fruit, fem) = if g.fruit_toxicity > 0.5 {
-                    (Color::srgb(0.62, 0.05, 0.78), LinearRgba::rgb(0.20, 0.0, 0.28)) // toxic: violet warning
+                // Ripe orange-red, toxic violet. NO emissive: fruit does not emit light, and emissive ignores
+                // the sun, so a "slight glow" made every fruit on the planet a lantern on the night side while
+                // the trees holding them went black. Warning colouration in nature reflects, it does not shine.
+                let fruit = if g.fruit_toxicity > 0.5 {
+                    Color::srgb(0.62, 0.05, 0.78) // toxic: violet warning
                 } else {
-                    (Color::srgb(0.95, 0.30, 0.06), LinearRgba::rgb(0.32, 0.08, 0.0)) // ripe: orange-red, slight glow
+                    Color::srgb(0.95, 0.30, 0.06) // ripe: orange-red
                 };
-                let frmat = materials.add(StandardMaterial { base_color: fruit, emissive: fem, ..default() });
+                let frmat = materials.add(StandardMaterial { base_color: fruit, ..default() });
                 let fy = 1.4 - 0.95 * g.branches.clamp(0.0, 1.0); // bare ~1.4 (top), full branches ~0.45 (low in branches)
                 let n = 6;
                 for k in 0..n {
@@ -921,7 +924,7 @@ fn add_plant_visuals(
                         .spawn((
                             Mesh3d(forms.berry.clone()),
                             MeshMaterial3d(frmat.clone()),
-                            Transform::from_xyz(r * a.cos(), fy, r * a.sin()).with_scale(Vec3::splat(1.4)),
+                            Transform::from_xyz(r * a.cos(), fy, r * a.sin()).with_scale(Vec3::splat(1.12)),
                         ))
                         .id();
                     commands.entity(e).add_child(c);
@@ -957,7 +960,7 @@ fn add_plant_visuals(
         let mat = materials.add(StandardMaterial {
             base_color: body_color,
             perceptual_roughness: 0.9,
-            emissive: if seed.is_some() { LinearRgba::rgb(0.10, 0.06, 0.0) } else { LinearRgba::BLACK }, // fruit glows a touch
+            // fallen fruit: no emissive either, same reason as canopy fruit above
             double_sided: leafy, // thin leaf/frond/disc meshes need both faces
             cull_mode: if leafy { None } else { Some(bevy::render::render_resource::Face::Back) },
             ..default()
@@ -2911,12 +2914,15 @@ fn animate_ocean(gen: Res<GenState>, mut q: Query<&mut Transform, With<Ocean>>) 
 // the shell, so the see-through stays stable there. Mutates the shared Ocean material only on a real change
 // (alpha_mode flip rebuilds the pipeline, so don't touch it every frame).
 fn ocean_opacity(
-    mode: Res<crate::camera::CameraMode>,
+    underwater: Res<Underwater>,
     q: Query<&MeshMaterial3d<StandardMaterial>, With<Ocean>>,
     mut mats: ResMut<Assets<StandardMaterial>>,
 ) {
-    let walk = *mode == crate::camera::CameraMode::Walk;
-    let (want_mode, want_alpha) = if walk { (AlphaMode::Blend, 0.62) } else { (AlphaMode::Opaque, 1.0) };
+    // See-through ONLY while submerged, so a swimmer can look out. Keying this off walk MODE instead meant
+    // the surface went transparent the moment you were on foot, so from a shoreline you looked straight
+    // through the water to the seabed. From above, water at a glancing angle is dominated by surface
+    // reflection and reads solid, which is what the eye expects.
+    let (want_mode, want_alpha) = if underwater.0 { (AlphaMode::Blend, 0.62) } else { (AlphaMode::Opaque, 1.0) };
     let Ok(h) = q.single() else { return };
     let Some(m) = mats.get_mut(&h.0) else { return };
     if m.alpha_mode != want_mode || (m.base_color.alpha() - want_alpha).abs() > 0.01 {

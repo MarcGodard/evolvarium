@@ -296,6 +296,44 @@ Roadmap: fundamentals -> living ocean -> parasites. Scale decision: 1 world unit
       carrion, so the sim double-counts by design and the ledger cannot read clean). Then thermodynamics
       (Kleiber, body-temperature heat balance), mechanics (drag, Archimedes, lift), stellar radiation.
 
+- [x] **Phase 3 thermodynamics** (`src/thermo.rs`): Kleiber `B = a*M^0.75` and a real heat balance
+      (Stefan-Boltzmann radiation, conductance with insulation in series, Meeh surface area) replace the
+      invented `SIZE_BASAL_EXP`, `TEMP_COST * mismatch`, and `PELT_COLD_RELIEF`. Thermal performance curves
+      make endothermy buy BREADTH, not speed. Diurnal temperature (~14 K land, ~2 K sea, 2 h lag) gave that
+      breadth something to be worth: mean endothermy 0.11 -> 0.43.
+- [x] **Carrying capacity stopped being a constant (2026-08-09)**: intake now scales as `M^0.75`, the same
+      exponent as Kleiber, so a bite and the metabolism it funds move together. Before, cost scaled with mass
+      while a bite paid the same at any size, so small was strictly cheaper with nothing pushing back.
+      Population went from pinned at `CREATURE_CAP` (5000) to ~150 set by the food web, and mean body mass
+      0.032 -> 0.24 kg. Applied to bite MASS, not just energy, so a small grazer also stops stripping a whole
+      plant per bite.
+- [x] **`NICHE_FLOOR` 40 -> 8**: 6 niches x 40 exceeded the whole post-retrofit population, so every niche
+      sat permanently under its floor and the world ran on continuous rescue. A floor above the equilibrium
+      is a pump, not a backstop. It had been masking the true equilibrium, which is lower than the rescued
+      numbers suggested.
+- [x] **Structural-mutation ratchet**: add was gated on node room AND edge room, removal on neither, so a
+      body at `MAX_NODES` could only ever lose edges. Developed part count fell 6.25 -> 5.30 over 40
+      generations of PURE DRIFT; it now holds. Found with `morph::drift_probe` (kept, `--ignored`).
+- [x] **Two uncoupled notions of body size, and the exploit between them**: `Morphometrics::of` takes only
+      `&BodyGraph`, so `morph.mass` is independent of the `size` gene. Metabolism and intake key off
+      `morph.mass` while `fat_cap` keyed off the gene, letting a lineage shrink the body that costs energy
+      and keep the gene that grants storage. Measured directly: `sz` held 0.59-0.61 while mean body mass fell
+      1.73 -> 0.24 kg. Fat storage now scales with real body mass, so storage goes as M^1 against metabolism
+      at M^0.75 and fasting endurance ~ M^0.25 becomes the force selecting FOR size. Deleted `SIZE_ENERGY`.
+
+### Open in this phase
+- [ ] Aerial and highland niches are still not self-sustaining (89 rescues each in a 22-gen run, vs 24 cold
+      and 46 land). Highland is only 4.17% of the surface (`niche::habitat_probe`), so a uniform floor is
+      probably the wrong shape for it.
+- [ ] Fauna standing stock is ~0.1% of flora where real ecosystems run ~1%: the world is under-stocked by
+      roughly 10x in biomass even with the pyramid upright.
+- [ ] Legacy `Soil` grid still runs UNCONSERVED alongside the `Biosphere`, feeding plant regrowth and
+      `SOIL_NUTRI`. Phase 1 lists it for deletion.
+- [ ] Body temperature as STATE (`thermo::net_heat_watts`/`step_body_temp`) is written and unit-tested but
+      not wired; the live path uses the steady-state pair. Wiring it buys thermal inertia, a second
+      mass-scaled advantage for large bodies.
+- [ ] Carbon drift ~0.2-0.3% per run is the largest remaining ledger term.
+
 ### VERDICT: the conserved world is self-sustaining (40-gen run)
 
 The question that decided whether this retrofit produced a living world or a dying one. Every time a

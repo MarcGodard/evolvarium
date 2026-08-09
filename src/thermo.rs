@@ -78,6 +78,17 @@ pub fn intake_scale(mass_kg: f64) -> f64 {
     (mass_kg.max(1e-6) / reference).powf(KLEIBER_EXP)
 }
 
+/// Cost of moving a body, relative to a reference-sized animal. Same 3/4 allometry as metabolism and
+/// intake, and for the same reason: locomotion is paid for out of the same budget, so a law that scales
+/// differently silently votes for or against size.
+///
+/// Replaces a term that applied ONLY above the reference mass, so anything smaller paid a flat locomotion
+/// bill while its intake fell as M^0.75. With MOVE_COST at 12x BASAL_COST that dominated the budget, and
+/// small animals could not earn enough to move: the world could not feed itself without rescue.
+pub fn locomotion_scale(mass_kg: f64) -> f64 {
+    intake_scale(mass_kg)
+}
+
 /// Resting metabolic heat production, watts. `endothermy` 0 = fully ectothermic, 1 = fully endothermic.
 pub fn basal_watts(mass_kg: f64, endothermy: f32) -> f64 {
     let e = (endothermy as f64).clamp(0.0, 1.0);
@@ -165,6 +176,20 @@ mod tests {
         let big = super::intake_scale(60.0) / super::basal_watts(60.0, 0.0);
         assert!((mouse / mid - 1.0).abs() < 1e-6, "mouse {mouse} vs mid {mid}");
         assert!((big / mid - 1.0).abs() < 1e-6, "big {big} vs mid {mid}");
+    }
+
+    // Fasting endurance = store / burn rate. Store goes as M^1 (fat is a fraction of a body) while
+    // metabolism goes as M^0.75, so a big animal outlasts a famine that kills a small one. This is the one
+    // force in the model that selects FOR size; without it every law scaled sub-linearly and size drifted
+    // down forever. Uses the same reference as intake_scale so the three laws stay commensurate.
+    #[test]
+    fn bigger_bodies_outlast_famine() {
+        let endurance = |kg: f64| kg / super::basal_watts(kg, 0.5);
+        let mouse = endurance(0.24);
+        let mid = endurance(3.75);
+        let big = endurance(60.0);
+        assert!(mid > mouse * 1.5, "mid {mid} should clearly outlast mouse {mouse}");
+        assert!(big > mid * 1.5, "big {big} should clearly outlast mid {mid}");
     }
 
     // A reference-mass body takes a full-size bite, so existing balance constants keep their meaning.

@@ -20,10 +20,13 @@ pub struct AtmosphereHaze;
 /// below the rim shell at 1.17 so the two layers stack rather than intersect.
 pub const HAZE_R: f32 = 1.10;
 
-/// Peak scattered radiance at the sub-solar point looking straight down, in LINEAR light. Sized against the
-/// surfaces it sits over: deep water is ~0.06 albedo and land ~0.2-0.3, so this roughly doubles the ocean
-/// while leaving land a faint veil. Additive, so it is a LIFT on the surface, not a replacement.
-const HAZE_GAIN: f32 = 0.075;
+/// Peak scattered radiance at the sub-solar point looking straight down, in LINEAR light.
+///
+/// Sized against LAND, not ocean. The air path is the same whether the camera is at 300 units or at 105, so
+/// a gain tuned on a distant disc (mostly dark ocean, where a strong blue reads as "planet") lands unchanged
+/// on lit grass up close and reads as being underwater. 0.075 did exactly that. At 0.030 the limb path term
+/// still carries a visible atmosphere while land keeps its own hue.
+const HAZE_GAIN: f32 = 0.030;
 
 /// Air mass is 1/cos(theta) and diverges at the limb. Real atmospheres saturate instead (the ray exits the
 /// top of the air column), so cap it; without the cap the limb blows to white.
