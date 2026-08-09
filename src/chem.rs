@@ -579,6 +579,13 @@ impl Biosphere {
         cell.mineral.p += lost.p;
     }
 
+    /// Prime the circulating animal-matter pool at world init. Separate from `return_fauna`-style additions
+    /// so the intent is explicit: this is initialisation of a mature biosphere, not matter appearing at
+    /// runtime. Caller must run it before the ledger seals or it will read as a leak.
+    pub fn seed_fauna_pool(&mut self, amount: Elements) {
+        self.fauna_pool += amount;
+    }
+
     /// Try to build `need` of animal tissue from the shared pool. Returns false and takes nothing when the
     /// pool cannot cover it, which is how a birth fails for want of nitrogen rather than for want of a cap.
     pub fn draw_fauna(&mut self, need: Elements) -> bool {

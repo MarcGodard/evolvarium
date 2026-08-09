@@ -177,6 +177,17 @@ pub fn seal_matter_ledger(
         .iter()
         .map(|g| crate::chem::creature_mass_kg(g.morph.map(|m| m.mass).unwrap_or_else(|| crate::morph::Morphometrics::of(&g.body).mass)))
         .sum();
+    // Seed the circulating animal-matter pool. Births draw a whole body's worth of C/N/P up front and only
+    // get it back when that body dies, so a world starting with an EMPTY pool has to wait out a full
+    // generation of deaths before it can afford the next generation of births. That is an Allee trap, and it
+    // is bistable: seed 1 cleared it and reached ~2100, seed 5 fell into it and flatlined at ~40 with its
+    // plants left ungrazed at 0.72 kg/m2. It is a buffer problem, not a throughput one, since at equilibrium
+    // every death returns exactly what a birth drew.
+    //
+    // One standing stock's worth is the honest amount: a mature biosphere always has animal matter in
+    // circulation as gut contents and tissue turnover, and this world is initialised mature rather than
+    // sterile. Seeded BEFORE the ledger seals, so it is inside initial_total and conservation is unaffected.
+    bio.seed_fauna_pool(crate::chem::ANIMAL_COMP * fauna_kg);
     bio.initial_total = bio.total() + flora + crate::chem::ANIMAL_COMP * fauna_kg;
     info!(
         "ledger sealed: total C{:.0} N{:.0} P{:.0} | flora P{:.1} fauna P{:.3} | {}",
@@ -2583,6 +2594,7 @@ pub fn predation_step(
     mut rng: ResMut<Rng>,
     mut commands: Commands,
     mut soil: ResMut<Soil>,
+    mut bio: ResMut<crate::chem::Biosphere>,
     mut cq: Query<(Entity, &Transform, &mut Energy, &mut Fitness, &mut Alive, &Genome, &mut Brain), With<Creature>>,
 ) {
     let _g = crate::profile::scope("predation");
@@ -2669,13 +2681,17 @@ pub fn predation_step(
         if killed.contains(&e) {
             alive.0 = false;
             let fat = (energy.fat / fat_cap_of(gen_e).max(0.01)).clamp(0.0, 1.0); // how fatty the prey was
-            // carrion tracks the VICTIM's actual mass, not a constant: a constant mints or destroys the
-            // difference on every kill. Half remains as carcass, the predator ate the rest.
-            // KNOWN GAP: the eaten half is not yet routed into the biosphere here (predation_step has no
-            // reservoir access), so a kill still loses that matter. Tracked as remaining P/N drift.
+            // Carrion tracks the VICTIM's actual mass: a constant would mint or destroy the difference on
+            // every kill. Half remains as carcass, the predator ate the rest.
+            //
+            // That eaten half used to VANISH (predation_step had no reservoir access), so every kill
+            // destroyed animal matter and drained the very fauna pool that births draw from. It now routes
+            // through the same consume_and_excrete path as any other feeding, so the predator retains its
+            // nutrient share and respires and excretes the rest. Meat is ANIMAL composition, not litter.
             let victim_kg = crate::chem::creature_mass_kg(
                 gen_e.morph.map(|m| m.mass).unwrap_or_else(|| crate::morph::Morphometrics::of(&gen_e.body).mass),
             ) as f32;
+            bio.consume_and_excrete(grid_cell(t.translation), (victim_kg * 0.5) as f64, crate::chem::ANIMAL_COMP);
             spawn_carrion(&mut commands, t.translation, victim_kg * 0.5, fat);
             soil.add(t.translation, DEATH_FERT); // death enriches the ground here
             if continuous_live {
