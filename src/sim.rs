@@ -2626,19 +2626,28 @@ pub fn predation_step(
     // snapshot living creatures: (entity, pos, ATTACK combat, energy, kin-sig, DEFENSE combat, venom, climb,
     // attack-intent, defend-intent). attack = bite + size; defense = attack + armor (armor protects, doesn't help
     // hunt); intents = brain out[2]/out[3] stashed this tick in live_step.
-    let snap: Vec<(Entity, Vec3, f32, f32, [f32; 10], f32, f32, f32, f32, f32)> = cq
+    let snap: Vec<(Entity, Vec3, f32, f32, [f32; 10], f32, f32, f32, f32, f32, f32)> = cq
         .iter()
         .filter(|(_, _, _, _, a, _, _)| a.0)
         .map(|(e, t, en, _, _, g, b)| {
-            // Defence deliberately includes the creature's own attack value, so it always exceeds attack by
-            // the armour term. TRIED making bite offence-only (defence = size + armour) on the grounds that a
-            // bite is a weapon, not armour, and REVERTED: armour then became the sole defensive gene,
-            // selection drove it up, and total defence recovered. Kills fell 52-60 -> 13-23 at equal
-            // population and carnivory fell 0.04 -> 0.02, the opposite of the intent. Giving prey one cheap
-            // lever to pull is worse than giving them none. The real blocker is that armour is too cheap,
-            // not that bite defends.
-            let attack = g.bite + SIZE_COMBAT * g.size;
-            (e, t.translation, attack, en.total(), signature(g), attack + ARMOR_DEF * g.armor, g.venom, g.climb, b.attack, b.defend)
+            // Offence is the bite; defence is armour. Body MASS is what separates them, via the log-ratio
+            // term in the adv calculation below.
+            //
+            // The old form made defence = attack + armour, i.e. the prey's own BITE defended it. Within one
+            // population that is an identity with no solution: E[a.bite] = E[b.bite], so
+            //   E[adv] = E[a.bite - b.bite] - armour - brace = -(armour + brace) < 0, always.
+            // Predation could never be favourable on average no matter what evolved. Measured over 15 gens:
+            // bite went 0.16 -> 0.70 under real selection and adv got WORSE (-0.53 -> -0.84), because every
+            // point of bite raised the prey's defence by the same point. Carnivory fell 0.03 -> 0.01.
+            //
+            // A previous attempt at offence-only bite (defence = size + armour) was reverted when armour
+            // became the sole defensive gene and arms-raced. That attempt removed the identity without
+            // replacing the asymmetry, so there was still nothing a predator could win on. Mass ratio is
+            // that asymmetry, and it is the one real predators actually use.
+            let body_kg = crate::chem::creature_mass_kg(
+                g.morph.map(|m| m.mass).unwrap_or_else(|| crate::morph::Morphometrics::of(&g.body).mass),
+            ) as f32;
+            (e, t.translation, g.bite, en.total(), signature(g), ARMOR_DEF * g.armor, g.venom, g.climb, b.attack, b.defend, body_kg)
         })
         .collect();
     if snap.len() < 2 {
@@ -2657,7 +2666,7 @@ pub fn predation_step(
     let (mut kin_acc, mut climb_acc, mut succ_acc) = (0.0f32, 0.0f32, 0.0f32);
     let r2 = ATTACK_RADIUS * ATTACK_RADIUS;
     let rs2 = SOCIAL_RADIUS * SOCIAL_RADIUS;
-    for (ai, &(ae, apos, abite, _aenergy, _asig, _, _, _, a_atk_intent, _)) in snap.iter().enumerate() {
+    for (ai, &(ae, apos, abite, _aenergy, _asig, _, _, _, a_atk_intent, _, a_kg)) in snap.iter().enumerate() {
         if killed.contains(&ae) {
             continue; // a creature killed this tick doesn't also attack
         }
@@ -2675,7 +2684,7 @@ pub fn predation_step(
         // whatever is closest, and picking the softest target is what turns an outlier bite into a diet.
         // Brace counts here (a braced animal reads as defensive), so a hunter skips the one standing ground.
         let mut best: Option<(f32, usize)> = None;
-        for (bi, &(be, bpos, _, _, _, bdef, _, _, _, b_def_intent)) in snap.iter().enumerate() {
+        for (bi, &(be, bpos, _, _, _, bdef, _, _, _, b_def_intent, _)) in snap.iter().enumerate() {
             if bi == ai || killed.contains(&be) {
                 continue;
             }
@@ -2689,10 +2698,10 @@ pub fn predation_step(
         }
         if let Some((_, bi)) = best {
             engaged.insert(ae); // a real lunge: something was in reach
-            let (be, bpos, _battack, _, bsig, bdef, bven, bclimb, _, b_def_intent) = snap[bi];
+            let (be, bpos, _, _, bsig, bdef, bven, bclimb, _, b_def_intent, b_kg) = snap[bi];
             // herd safety: prey surrounded by KIN is harder to pick off (vigilance) -> being social pays
             let mut kin = 0.0f32;
-            for (e2, p2, _, _, s2, _, _, _, _, _) in &snap {
+            for (e2, p2, _, _, s2, _, _, _, _, _, _) in &snap {
                 if *e2 != be && bpos.distance_squared(*p2) < rs2 && sig_dist(&bsig, s2) < SOCIAL_SIM {
                     kin += 1.0;
                 }
@@ -2701,10 +2710,14 @@ pub fn predation_step(
             // success = attacker combat vs prey EFFECTIVE defense (combat + armor + active BRACE), minus required
             // edge PREDATION_BIAS, reduced by herd safety AND prey climb agility (arboreal escape).
             let eff_def = bdef + BRACE_DEF * b_def_intent;
-            let adv = abite - eff_def;
+            // MASS RATIO is the predator/prey axis, log so it is scale-free: twice the prey's mass is the
+            // same edge whether the pair weighs grams or tonnes, and the term is symmetric (a mouse attacking
+            // an elephant is penalised exactly as the elephant is favoured). This is what real food webs are
+            // organised by, and it is the asymmetry the same-population identity above cannot supply.
+            let adv = abite + SIZE_COMBAT * (a_kg / b_kg.max(1e-6)).max(1e-6).ln() - eff_def;
             let success = predation_success(adv, prey_kin, bclimb);
             adv_acc += adv;
-            armor_acc += bdef - _battack; // ARMOR_DEF * prey armour, recovered from the packed defense
+            armor_acc += bdef; // ARMOR_DEF * prey armour
             brace_acc += BRACE_DEF * b_def_intent;
             kin_acc += prey_kin;
             climb_acc += bclimb;
@@ -2891,12 +2904,20 @@ pub fn live_step(
             (e, t.translation, pg.clone(), st.mass, rot.map(|r| r.age), tree.map(|t| t.edible), ferment.map(|f| f.toxic), seed.map(|s| s.0.clone()), carrion.is_some())
         })
         .collect();
-    // creature snapshot for social/kin need + threat sense: (entity, pos, signature, combat, body_radius).
-    // combat = bite + size, so a creature senses a bigger-combat neighbor as predator (flee).
+    // creature snapshot for social/kin need + threat/prey sense: (entity, pos, signature, LOG BODY MASS,
+    // body_radius). Log mass, because predation is decided on the mass RATIO (see predation_step), so a log
+    // difference is the axis danger actually runs along and THREAT_MARGIN reads as a ratio: 0.4 = e^0.4 =
+    // ~1.5x heavier. Keying the sense off bite+size while predation keys off mass would teach the brain a
+    // model of danger the world does not honour.
     let cre_snap: Vec<(Entity, Vec3, [f32; 10], f32, f32)> = cq
         .iter()
         .filter(|(_, _, _, _, _, a, _, _, _, _)| a.0)
-        .map(|(e, t, _, _, _, _, g, _, _, _)| (e, t.translation, signature(g), g.bite + SIZE_COMBAT * g.size, body_radius(g)))
+        .map(|(e, t, _, _, _, _, g, _, _, _)| {
+            let kg = crate::chem::creature_mass_kg(
+                g.morph.map(|m| m.mass).unwrap_or_else(|| crate::morph::Morphometrics::of(&g.body).mass),
+            ) as f32;
+            (e, t.translation, signature(g), kg.max(1e-6).ln(), body_radius(g))
+        })
         .collect();
     // voice snapshot for the hearing sense: (entity, pos, emit_pitch=1-size, loudness=last-tick call). Emission
     // is computed INSIDE the parallel loop below, so listeners read LAST tick's call from Brain.voice (1-tick
@@ -3049,7 +3070,7 @@ pub fn live_step(
         // a neighbor THREAT_MARGIN above my combat is a predator to flee, one that far below is prey to chase.
         // The prey half is what makes hunting steerable at all; without it the directional eyes see only `foods`
         // and attack fires blind (see GLOBAL_INPUTS note in genome.rs).
-        let my_combat = genome.bite + SIZE_COMBAT * genome.size;
+        let my_combat = (body_kg as f32).max(1e-6).ln(); // log mass: same axis predation_step decides on
         let mut threat_d2 = f32::INFINITY;
         let mut threat_pos = Vec3::ZERO;
         let mut prey_d2 = f32::INFINITY;

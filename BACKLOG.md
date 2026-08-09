@@ -165,6 +165,38 @@ pholmq/TSN (GPL-2.0) @ commit 49fd49c (pinned in `orrery.rs` + `stars.rs` commen
       `threat_*` over creatures BELOW my combat, found in the same O(n) snapshot pass (no new scan cost).
       Appended last -> old saved nets pad to 0.0 and behave identically; `plast` pads to 0.2 so lifetime
       learning can find the channel without waiting on mutation.
+- [x] **Hunting was FOUR stacked defects, none of them balance constants (2026-08-09)**. Each was invisible
+      until the one before it was fixed, and the last two were only findable because the success term got
+      instrumented (`HUNT adv [armor brace] kin climb p` in the continuous log, `predation_success()`
+      extracted pure + unit-tested). In order:
+      1. Predators had no sensory channel for prey (above).
+      2. Target selection picked the NEAREST body in reach, not the weakest -> every lunge was a random draw
+         against the population mean.
+      3. `R_DEFEND` paid a flat 0.8 whenever a braced prey survived. Since ~99.95% of attacks fail anyway it
+         paid on nearly every engagement regardless of whether the brace mattered: net learning signal was
+         +0.800 defender vs -0.299 attacker (`R_WASTE` on the same 99.95%), teaching never-attack /
+         always-brace thousands of times per interval. Fixed by rewarding risk ACTUALLY AVERTED
+         (`R_DEFEND * (p_without_brace - p_with_brace)`).
+      4. `BRACE_DEF` 2.0 vs `ARMOR_DEF` 1.1: an instantaneous posture out-defended grown, permanently-carried
+         armour. `BRACE_DEF < ARMOR_DEF` is an INVARIANT, not a tuned value.
+      Net effect: adv -1.40 -> -0.67, p 0.0005 -> 0.0025, kills ~15 -> ~100/interval, carn 0.02 -> 0.03,
+      straightness 0.40 -> 0.46. Population stable throughout (~1300-1470, ratio 0.94-0.95).
+- [x] **Pricing a defense does NOT suppress it — confirmed twice, do not try a third time.** Charging
+      isometric energy for bracing (brace into `effort2`) left brace ~unchanged, pushed armour UP to
+      compensate, worsened adv, and cost 70 population -> reverted. Same result already recorded for armour
+      at the `[~] Armor` entry below. Avoiding death outweighs any marginal energy cost, so a defense gene
+      pegs high regardless of price. What DOES work: fix the reinforcement that rewards it (defect 3) or the
+      magnitude it grants (defect 4).
+- [ ] **Carnivory still 0.02-0.03: the world has no SIZE ASYMMETRY.** With predator and prey drawn from one
+      population the mean matchup is a fair fight against an equal, so adv stays negative by exactly the
+      prey's armour + brace. `PREDATION_BIAS` 2.2 caps even a perfectly fair fight at sigmoid(-2.2) ~= 0.10,
+      and `kin` sits pegged at 0.95 so `SOCIAL_SAFETY` halves whatever survives that. Making fair fights
+      winnable would just produce cannibalism (guarded by
+      `sim::tests::predation_needs_a_real_combat_edge_not_a_fair_fight`). Real predators are larger than what
+      they eat; that body-size structure is the missing piece, and it is a bigger change than any of the four
+      above. NOTE: `kin` pegged at 0.95 is the free-defense pattern again, and it likely DOUBLE-COUNTS now
+      that the predator picks its target: real herd safety is risk DILUTION (predator takes one of N), which
+      target selection already models, rather than making each individual harder to kill.
 - [ ] **Seasons are invisible to biology** — the migration blocker. Seasons are real and phase-locked to the
       astronomical year (864,000 ticks), but mean creature lifespan is ~2200 ticks, so a creature lives
       1/390th of a season. This is a REGRESSION, not a design choice: `sphere.rs:425` records the cadence

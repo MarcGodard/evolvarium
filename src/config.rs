@@ -103,7 +103,11 @@ pub const OVEREAT_G: f32 = 0.2; // growth-load gained per unit energy eaten whil
 pub const HEIGHT_COST: f32 = 0.7; // energy/sec upkeep per unit height (tall reaches trees but costs more)
 // Body size (mass): bigger creature stores more energy + hits harder in combat, but costs more to run +
 // maintain. Small = nimble + cheap; large = tank. Physical axis visualizer shows as scale.
-pub const SIZE_COMBAT: f32 = 0.5;  // added to bite as effective combat power in predation (mass wins fights)
+// Weight on the LOG MASS RATIO in predation (see predation_step). Was "size gene added to bite", which put
+// the same term on both sides of the matchup and made predation unwinnable by construction. Now it prices
+// the one asymmetry real food webs run on: 0.5 * ln(2) = 0.35 edge for twice the prey's mass, and exactly
+// -0.35 for half. Scale-free, so it reads the same for grams or tonnes.
+pub const SIZE_COMBAT: f32 = 0.5;
 pub const SIZE_MOVE: f32 = 1.2;    // move cost mult scales (1 + this*size) (more mass to push)
 // Swim (aquatic): in water/wet lowland a swimmer moves faster + cheaper (exploits river + productive
 // moist shoreline -> "fish" niche); on dry high ground its fins are liability (move penalty).

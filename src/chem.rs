@@ -763,7 +763,7 @@ mod tests {
         // created or destroyed at any leg, and `living` must be carried explicitly or the leak shows up.
         let mut b = Biosphere::new();
         let start = b.total();
-        let mut living = 0.0f64;
+        let mut living = 0.0f64; // tracks matter moved into biomass, then into litter
 
         for _ in 0..200 {
             living += b.draw_for_growth(7, PLANT_COMP, 0.05);
@@ -772,7 +772,6 @@ mod tests {
         assert_conserved(start, b.total() + PLANT_COMP * living, "growth");
 
         b.deposit_litter(7, living, PLANT_COMP);
-        living = 0.0;
         assert_conserved(start, b.total(), "death");
 
         for _ in 0..500 {
@@ -868,7 +867,7 @@ mod tests {
         // soil go negative, which would mint matter out of a rounding error.
         let mut b = Biosphere::new();
         let start = b.total();
-        let mut living = 0.0f64;
+        let mut living = 0.0f64; // tracks matter moved into biomass, then into litter
         for _ in 0..10_000 {
             living += b.draw_for_growth(0, PLANT_COMP, 10.0);
         }
@@ -891,7 +890,7 @@ mod tests {
         // the headline behavioral claim: growth in one patch STOPS at a budget rather than running forever.
         // This is what replaces PLANT_CAP as the thing bounding flora.
         let mut b = Biosphere::new();
-        let mut living = 0.0f64;
+        let mut living = 0.0f64; // tracks matter moved into biomass, then into litter
         for _ in 0..100_000 {
             let got = b.draw_for_growth(0, PLANT_COMP, 1.0);
             if got <= 0.0 {
