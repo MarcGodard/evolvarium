@@ -3593,8 +3593,31 @@ pub fn live_step(
         // last tick by predation_step (kill/braced-survival/whiff) -> reinforces attack/defend outputs. Cleared
         // every tick below (even when not learning) so it can't accumulate unbounded.
         if gen.learn {
-            let approach = if !gen.diet && brain.prev_dist.is_finite() && cur_dist.is_finite() {
-                (brain.prev_dist - cur_dist).clamp(-1.0, 1.0) * R_APPROACH
+            // Approach shaping, gated by whether THIS creature can actually use the food it is nearing.
+            //
+            // It used to be switched off entirely in diet mode, which is the default, on the grounds that
+            // rewarding approach to any food fights dietary selectivity. That objection is right but the cure
+            // removed the only signal that teaches an animal to move TOWARD food at all: what remained was
+            // eating (which only fires after arriving) and combat. A sparse terminal reward is the hard case
+            // for learning, and it shows up as foraging that wanders instead of navigating.
+            //
+            // Scaling by usable fraction keeps the selectivity the objection was protecting: nearing food
+            // this gut cannot process pays nothing, so the creature learns to approach ITS food.
+            let approach = if brain.prev_dist.is_finite() && cur_dist.is_finite() {
+                let usable = if gen.diet {
+                    best.map_or(0.0, |(i, _)| {
+                        let pg = &foods[i].2;
+                        let want: f32 = genome.uptake.iter().sum();
+                        if want > 1e-6 {
+                            (0..NUTRIENTS).map(|k| pg.nutrients[k] * genome.uptake[k]).sum::<f32>() / want
+                        } else {
+                            0.0
+                        }
+                    })
+                } else {
+                    1.0 // legacy --no-diet: one food type, nothing to be selective about
+                };
+                (brain.prev_dist - cur_dist).clamp(-1.0, 1.0) * R_APPROACH * usable
             } else {
                 0.0
             };
