@@ -2604,6 +2604,22 @@ pub fn plant_step(
 
 // predation (M5): creatures attack + eat each other. attack combat = bite + size; defense = attack + armor.
 // NN-driven: brain attack output past ATTACK_INTENT_THRESH commits a hunt.
+/// Diet specialisation curves, CONCAVE on both sides so an omnivore keeps most of both.
+///
+/// The linear pair (herbivory = 1 - carnivory, gut = floor + carn*carnivory) put a deep fitness VALLEY
+/// between the two diets: moving toward meat cost grazing income, the dominant food, one-for-one, to buy a
+/// multiple on flesh that is ~2% of the diet. No lineage could climb out of the herbivore peak, and the
+/// specialist count measured exactly ZERO carnivores in ~1400 creatures while kills ran ~110 per interval.
+/// Real omnivores are common (bears, pigs, corvids); forbidding the intermediate forbids the path to the
+/// far peak. At carnivory 0.5 a creature now keeps 71% of grazing and gets 74% meat extraction.
+pub fn herbivory_of(carnivory: f32) -> f32 {
+    (1.0 - carnivory).clamp(0.0, 1.0).sqrt()
+}
+
+pub fn meat_gut_of(carnivory: f32) -> f32 {
+    (PROTEIN_FLOOR + PROTEIN_CARN * carnivory.clamp(0.0, 1.0).sqrt()).min(1.0)
+}
+
 /// Predation success probability, extracted pure so the law is testable and each factor is separable.
 /// `adv` = attacker combat - prey EFFECTIVE defense (prey combat + armour + active brace). Note adv is
 /// centered on ZERO, not on a positive edge: predator and prey come from one population, so the mean
@@ -2781,7 +2797,7 @@ pub fn predation_step(
             // are finally the same trait.
             let fat_content = (fat_w / meat_kg.max(1e-6)).clamp(0.0, 1.0);
             let venom = (ven_w / meat_kg.max(1e-6)).clamp(0.0, 1.0);
-            let gut = (PROTEIN_FLOOR + PROTEIN_CARN * gen_e.carnivory).min(1.0);
+            let gut = meat_gut_of(gen_e.carnivory);
             // SAME energy density as scavenging the same flesh fresh (see the carrion branch in live_step):
             // a kilo of meat is a kilo of meat however it was obtained. Killing it yourself buys freshness
             // and first claim, not extra calories. This is what let PREDATION_GAIN be deleted: a flat
@@ -3606,7 +3622,7 @@ pub fn live_step(
                         // protein as metabolic toxic load (ammonia) -> obligate carnivore on lean kills starves +
                         // poisons itself. Fatty prey (or plant carbs) avoids it. `gut` (carnivory) scales extraction.
                         let fat_content = pg.quality.clamp(0.0, 1.0); // prey fatness carried on the carrion
-                        let gut = (PROTEIN_FLOOR + PROTEIN_CARN * genome.carnivory).min(1.0);
+                        let gut = meat_gut_of(genome.carnivory);
                         let carb_buffer = (energy.sugar / SUGAR_CAP).clamp(0.0, 1.0); // carbs to build fat from protein
                         let meat_e = EAT_GAIN * MEAT_BONUS * meat * gut; // total extractable IF fully usable
                         let fat_part = meat_e * fat_content; // fat = direct energy, no carbs needed
@@ -3691,7 +3707,7 @@ pub fn live_step(
         // grazers thrive; big costly bodies need richer food) -> emergent carrying cap.
         if out[4] > EAT_GATE && energy.total() < GRAZE_FULL {
             let gdir = np.normalize_or_zero();
-            let herbivory = 1.0 - genome.carnivory; // herbivore gut digests the carpet; a carnivore can't
+            let herbivory = herbivory_of(genome.carnivory); // concave: an omnivore keeps most of the carpet
             // crowding penalty: shared trickle thins where grazers pack in (density-dependent carrying cap).
             let crowd_factor = 1.0 / (1.0 + (crowd[grid_cell(np)] - 1.0).max(0.0) / GRAZE_CROWD_K);
             let hab = crate::sphere::plant_habitability(gdir);
@@ -4156,10 +4172,16 @@ pub fn generation_step(
             // scored every creature younger than the age gate as motionless, so still% tracked the BIRTH RATE
             // rather than stillness and rose whenever the population grew.
             let (mut path_sum, mut net_sum, mut straight_sum, mut moved, mut mature) = (0.0f32, 0.0f32, 0.0f32, 0u32, 0u32);
+            let mut carn_spec = 0usize;
             for (t, en, fit, _h, _a, g, _b, diet, l) in cq.iter() {
                 if diet.age > 200 {
                     mature += 1;
                     carn += g.carnivory;
+                    if g.carnivory > 0.5 {
+                        carn_spec += 1; // SPECIALISTS, because a mean hides a guild: a small predator
+                        // lineage inside a herbivore majority reads as the same low mean as no predators
+                        // at all, and those are the two outcomes worth telling apart.
+                    }
                     e_in += en.taken / diet.age as f32;
                     e_out += en.spent / diet.age as f32;
                     let net = l.start.distance(t.translation);
@@ -4214,7 +4236,7 @@ pub fn generation_step(
             let (h_adv, h_armor, h_brace) = (hmean(&gen.adv_sum), hmean(&gen.armor_sum), hmean(&gen.brace_sum));
             let (h_kin, h_climb, h_succ) = (hmean(&gen.kin_sum), hmean(&gen.climb_sum), hmean(&gen.succ_sum));
             info!(
-                "t {:>6} | pop {:>3} | kg {:.3} | path {:.1} net {:.1} straight {:.2} still {:.0}% foodCV {:.2} | E in {:.3} out {:.3} ratio {:.2} | noP-births {} atk {} kills {} carn {:.2} | HUNT adv {:.3} [armor {:.3} brace {:.3}] kin {:.2} climb {:.2} p {:.5} | energy {:.1} [f{:.1}/s{:.1}/F{:.1}] adp {:.2} | mast {:.2} brd {:.1} | life-fit {:.1} | age {:.0} | sens {:.1} | bite {:.2} | rig {:.2} | temp {:.2} lng {:.2} met {:.2} endo {:.2}[c{:.2}/{} t{:.2}/{} w{:.2}/{}] par {:.2} lat {:.2} | swim {:.2} alp {:.2} aq {} hi {} | def {:.2} nut {:.2} qual {:.2} wet {:.2} | plants {} | soil {:.2} | rain {:.2} fire {:.3} | wear {:.3} bare {} | CHEM {} | {}",
+                "t {:>6} | pop {:>3} | kg {:.3} | path {:.1} net {:.1} straight {:.2} still {:.0}% foodCV {:.2} | E in {:.3} out {:.3} ratio {:.2} | noP-births {} atk {} kills {} carn {:.2} spec {} | HUNT adv {:.3} [armor {:.3} brace {:.3}] kin {:.2} climb {:.2} p {:.5} | energy {:.1} [f{:.1}/s{:.1}/F{:.1}] adp {:.2} | mast {:.2} brd {:.1} | life-fit {:.1} | age {:.0} | sens {:.1} | bite {:.2} | rig {:.2} | temp {:.2} lng {:.2} met {:.2} endo {:.2}[c{:.2}/{} t{:.2}/{} w{:.2}/{}] par {:.2} lat {:.2} | swim {:.2} alp {:.2} aq {} hi {} | def {:.2} nut {:.2} qual {:.2} wet {:.2} | plants {} | soil {:.2} | rain {:.2} fire {:.3} | wear {:.3} bare {} | CHEM {} | {}",
                 // MEAN BODY MASS in real kg, not the size GENE. The two diverged ~87x unnoticed because only
                 // the gene was ever logged, and every Kleiber/thermoregulation term keys off the kg.
                 gen.tick, pop, cont_fauna_kg / pop.max(1) as f64,
@@ -4230,6 +4252,7 @@ pub fn generation_step(
                 atk_n,
                 gen.kills.swap(0, std::sync::atomic::Ordering::Relaxed),
                 carn / mature.max(1) as f32,
+                carn_spec,
                 h_adv, h_armor, h_brace, h_kin, h_climb, h_succ,
                 e / n, fa / n, su / n, ft / n, adp / n, mast / n, brd / n, f / n, age / n, sens / n, bite / n, rig / n, temp / n, lng / n, met / n, endo / n,
                 endo_c / nc.max(1) as f32, nc, endo_t / nt.max(1) as f32, nt, endo_w / nw.max(1) as f32, nw,
@@ -4442,6 +4465,27 @@ fn wrap_angle(a: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // An omnivore must be a VIABLE intermediate, not a creature that is bad at both. A linear tradeoff makes
+    // the midpoint strictly worse than either end at its own job, which is a fitness valley evolution cannot
+    // cross: measured zero carnivory specialists in ~1400 creatures. Guards the concavity.
+    #[test]
+    fn omnivory_is_a_viable_middle_not_a_fitness_valley() {
+        let (h0, h5, h1) = (herbivory_of(0.0), herbivory_of(0.5), herbivory_of(1.0));
+        let (g0, g5, g1) = (meat_gut_of(0.0), meat_gut_of(0.5), meat_gut_of(1.0));
+
+        // the ends stay specialists: pure herbivore grazes best and digests meat worst, and the reverse
+        assert!((h0 - 1.0).abs() < 1e-6 && h1 < 1e-6, "herbivory ends must be 1 and 0");
+        assert!(g1 > 0.99 && g0 < 0.2, "gut ends must span nearly the whole range");
+
+        // the middle keeps MOST of both, which is what makes the path across passable
+        assert!(h5 > 0.65, "omnivore keeps only {h5} of grazing: still a valley");
+        assert!(g5 > 0.65, "omnivore gets only {g5} of meat value: still a valley");
+
+        // concave, not linear: the midpoint beats the straight line on both axes
+        assert!(h5 > (h0 + h1) / 2.0, "herbivory must be concave");
+        assert!(g5 > (g0 + g1) / 2.0, "meat gut must be concave");
+    }
 
     // Pins WHY carnivory would not lift off 0.02. The measured world sits near adv=0 because predator and prey
     // are one population, and an equal matchup is already near-hopeless; only a real size/bite edge pays. If a

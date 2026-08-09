@@ -508,8 +508,14 @@ pub const TOX_LOAD_HAZARD: f32 = 0.0008; // death/sec per unit toxic load (acute
 // prey with no carbs yields little energy AND dumps unconvertible protein as toxic load (ammonia) ->
 // obligate carnivore on lean kills starves + poisons itself; fatty prey or plant carbs avoid it. `gut` =
 // carnivory scales overall meat extraction (herbivore gut handles meat poorly).
-pub const PROTEIN_FLOOR: f32 = 0.35; // meat-extraction fraction pure herbivore (carnivory 0) still manages
-pub const PROTEIN_CARN: f32 = 0.65;  // extra meat-extraction fraction at full carnivory (-> full at 1.0)
+// Meat extraction: FLOOR is what a pure herbivore gut (carnivory 0) manages, CARN the extra at full
+// carnivory. Was 0.35/0.65, so a herbivore already got a third of a carnivore's meat value for free and the
+// gene bought only ~3x on a food source that is a rounding error in the diet: no reason to specialise, and
+// carnivory sat at 0.02-0.03 while kills climbed. 0.10/0.90 makes the gut a real 9x axis. A ruminant fed
+// meat genuinely extracts very little from it (and gets sick, which the ammonia term already models), so
+// the generous floor was the unphysical part.
+pub const PROTEIN_FLOOR: f32 = 0.10;
+pub const PROTEIN_CARN: f32 = 0.90;
 pub const PROTEIN_TOX: f32 = 0.06;   // toxic load per unit UNCONVERTIBLE protein (lean meat eaten without carbs)
 // pelt (hair/fur): insulation. Cuts COLD side of thermal mismatch; adds HEAT-side cost in hot places,
 // drags in water, costs little basal upkeep.
