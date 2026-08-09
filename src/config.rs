@@ -191,7 +191,11 @@ pub const PREDATION_BIAS: f32 = 2.2; // combat-edge required: equal-combat succe
 // speed, paid in fuel + fatigue. All single dials for tuning fight-vs-flight balance.
 pub const ATTACK_INTENT_THRESH: f32 = 0.5; // out[2] above this = creature hunting this tick
 pub const ATTACK_COST: f32 = 1.2; // energy/sec at full attack intent, paid whether attack lands or misses
-pub const BRACE_DEF: f32 = 2.0; // prey effective-defense bonus at full brace (compare ARMOR_DEF 2.5)
+// Prey effective-defense bonus at full brace. Must stay BELOW ARMOR_DEF: bracing is an instantaneous
+// posture, armour is a grown, permanently-carried, permanently-paid-for structure, so a flinch outranking
+// plate is backwards. At 2.0 vs armour 1.1 it was the single largest term in the predation deficit
+// (measured brace 1.07 of a 1.25 adv gap) and it made predation arithmetically unwinnable.
+pub const BRACE_DEF: f32 = 0.6;
 pub const BRACE_DRAG: f32 = 0.7; // fraction of move speed lost at full brace (immobilize cost)
 pub const SPRINT_BOOST: f32 = 0.6; // max burst-speed mult added at full sprint
 pub const SPRINT_COST: f32 = 1.5; // extra energy/sec at full sprint
