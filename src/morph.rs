@@ -454,19 +454,30 @@ impl BodyGraph {
                 e.joint.motor = (e.joint.motor + rng.normal() * 0.12).clamp(0.0, 1.0);
             }
         }
-        // structural: add a new appendage (node + reflected edge off the torso)
-        if rng.f32() < 0.04 && self.nodes.len() < MAX_NODES && self.edges.len() < MAX_EDGES {
-            let idx = self.nodes.len();
-            let base = &self.nodes[0];
-            self.nodes.push(PartGene {
-                shape: if rng.f32() < 0.5 { ShapeKind::Segment } else { ShapeKind::Plate },
-                length: rng.range(0.4, 1.2),
-                radius: rng.range(0.1, 0.35),
-                taper: rng.range(0.3, 0.9),
-                r: base.r,
-                g: base.g,
-                b: base.b,
-            });
+        // structural: add a new appendage (edge off the torso, with a fresh node template when there is room).
+        //
+        // Gated on EDGE room only. Gating it on node room too was a one-way ratchet: node templates only ever
+        // accumulate, so once a body reached MAX_NODES it could never gain an edge again while the removal
+        // below kept firing at 3% forever. Bodies then shed limbs on their own with no selection involved,
+        // which measured as ~30% mean body-mass loss over 40 generations of pure drift (see drift_probe).
+        // Reusing a template when full is the graph's own design: one PartGene is meant to back many edges.
+        if rng.f32() < 0.04 && self.edges.len() < MAX_EDGES {
+            let idx = if self.nodes.len() < MAX_NODES {
+                let (r, g, b) = (self.nodes[0].r, self.nodes[0].g, self.nodes[0].b);
+                self.nodes.push(PartGene {
+                    shape: if rng.f32() < 0.5 { ShapeKind::Segment } else { ShapeKind::Plate },
+                    length: rng.range(0.4, 1.2),
+                    radius: rng.range(0.1, 0.35),
+                    taper: rng.range(0.3, 0.9),
+                    r,
+                    g,
+                    b,
+                });
+                self.nodes.len() - 1
+            } else {
+                // reuse an existing template, never the root (index 0 is the torso)
+                (1 + (rng.f32() * (self.nodes.len() - 1) as f32) as usize).min(self.nodes.len() - 1)
+            };
             self.edges.push(EdgeGene {
                 from: 0,
                 to: idx,
@@ -955,17 +966,21 @@ mod tests {
 
 #[cfg(test)]
 mod drift_probe {
-    // DIAGNOSTIC, not a gate: run with `cargo test drift -- --ignored --nocapture`.
+    // DIAGNOSTIC, not a gate: run with `cargo test neutral -- --ignored --nocapture`.
     //
-    // Mutation with NO selection at all. An unselected operator should leave trait means where it found
-    // them; anything that moves is the operator talking, not ecology. As of writing this reports mean body
-    // mass falling ~30% over 40 generations, driven by DEVELOPED part count dropping (6.25 -> 5.30) while
-    // graph node count RISES (3.48 -> 4.98). So structural mutation is adding nodes that never develop and
-    // detaching subtrees that used to, i.e. bodies quietly lose limbs on their own. Widening the taper/scale
-    // clamps was tried and is NOT the cause (mass moved 1.36 -> 1.43, trait means barely budged).
+    // Mutation with NO selection at all. An unselected operator should leave trait means where it found them;
+    // anything that moves is the operator talking, not ecology. Matters because every Kleiber and
+    // thermoregulation term keys off body kg, so a mass the operator invented is a metabolism nobody chose.
     //
-    // Matters because every Kleiber and thermoregulation term keys off body kg, so a mass the operator
-    // invented is a metabolism the world never chose.
+    // FOUND AND FIXED with this probe: structural add was gated on node room AND edge room while removal was
+    // gated on neither, so a body at MAX_NODES could only ever lose edges. Developed part count fell 6.25 ->
+    // 5.30 over 40 generations of pure drift; it now holds and rises slightly.
+    //
+    // STILL FALLING, and believed benign: the per-node means (len/rad/taper) drop because structural adds
+    // initialise new appendages SMALLER than the population mean, so they dilute the average rather than
+    // shrink anything. Root-node stats are printed alongside precisely to tell those apart, and the root
+    // moves ~5% over 40 generations, within noise for a 60-genome sample. rng::normal was audited for bias
+    // and is clean (see rng::bias_probe), which rules out the one cause that would hit every trait at once.
     #[test]
     #[ignore]
     fn neutral_mutation_should_not_move_body_mass() {
@@ -986,6 +1001,15 @@ mod drift_probe {
                         cnt += 1.0;
                     }
                 }
+                // root-only stats separate REAL drift on an existing node from DILUTION by newly added
+                // nodes, which are initialised smaller than the population mean.
+                let (mut rl, mut rr, mut rt) = (0.0f32, 0.0f32, 0.0f32);
+                for g in pop.iter() {
+                    rl += g.body.nodes[0].length;
+                    rr += g.body.nodes[0].radius;
+                    rt += g.body.nodes[0].taper;
+                }
+                println!("        root: len {:.3} rad {:.3} taper {:.3}", rl / n, rr / n, rt / n);
                 println!(
                     "gen {gen:>3}: mass {mass:.4} ({:.3} kg) | nodes {nodes:.2} parts {parts:.2} | len {:.3} rad {:.3} taper {:.3}",
                     crate::chem::creature_mass_kg(mass),

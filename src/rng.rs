@@ -89,3 +89,24 @@ mod tests {
         assert!((mean - 0.5).abs() < 0.03, "mean {mean} not ~0.5");
     }
 }
+
+#[cfg(test)]
+mod bias_probe {
+    // Box-Muller must be zero-mean. A biased normal() would drag EVERY additive-Gaussian trait in the same
+    // direction, which is exactly the signature seen in morph drift (length, radius, taper all falling).
+    #[test]
+    fn normal_is_zero_mean_and_unit_variance() {
+        let mut rng = super::Rng::seed(3);
+        let n = 200_000;
+        let (mut sum, mut sq) = (0.0f64, 0.0f64);
+        for _ in 0..n {
+            let v = rng.normal() as f64;
+            sum += v;
+            sq += v * v;
+        }
+        let mean = sum / n as f64;
+        let var = sq / n as f64 - mean * mean;
+        assert!(mean.abs() < 0.02, "normal() mean {mean} should be ~0");
+        assert!((var - 1.0).abs() < 0.05, "normal() variance {var} should be ~1");
+    }
+}

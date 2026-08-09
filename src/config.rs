@@ -52,7 +52,11 @@ pub const CONT_LOG_TICKS: u32 = 600; // continuous-mode stats log interval (fine
 
 // Per-niche rescue (niche.rs): floors + hall-of-fame banks keep each habitat alive (aquatic/aerial/highland/
 // cold/warm/land). Replaces the global CREATURE_MIN floor for continuous mode. DAY_TICKS=2400, GEN_TICKS=4800.
-pub const NICHE_FLOOR: usize = 40;         // per-niche min pop; below -> rescue from bank. Scaled ~7x with NICHE_CAP for the ~1000-pop world (emergency backstop; never triggers at healthy density).
+// Per-niche min pop; below -> rescue from bank. EMERGENCY BACKSTOP: it is supposed to catch a crash, never
+// to run at healthy density. Cut 40 -> 8 because intake_scale moved the food-limited equilibrium to ~200:
+// 6 niches x 40 = 240 exceeded the whole population, so every niche sat permanently under its floor and the
+// world ran on continuous life support. A floor above the equilibrium is not a backstop, it is a pump.
+pub const NICHE_FLOOR: usize = 8;
 pub const NICHE_BANK_CAP: usize = 8;       // hall-of-fame size per niche (best genomes kept for revival)
 pub const NICHE_BANK_TICKS: u32 = 1200;    // rebuild banks every half-day from fittest living per niche
 pub const NICHE_RESCUE_COOLDOWN: u32 = 600; // min ticks between rescues of the SAME niche (ease in, not burst)
