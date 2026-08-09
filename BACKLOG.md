@@ -321,12 +321,42 @@ Roadmap: fundamentals -> living ocean -> parasites. Scale decision: 1 world unit
       1.73 -> 0.24 kg. Fat storage now scales with real body mass, so storage goes as M^1 against metabolism
       at M^0.75 and fasting endurance ~ M^0.25 becomes the force selecting FOR size. Deleted `SIZE_ENERGY`.
 
+### Energy budget made coherent, then found to be the wrong suspect (2026-08-09)
+
+Every law in the creature budget now keys off the SAME body mass on consistent exponents: metabolism
+`M^0.75` (Kleiber), intake `M^0.75`, locomotion `M^0.75`, fat storage `M^1` so fasting endurance is
+`M^0.25`. No brain output is free any more either: turning was ungated AND uncharged (a cold or starving
+creature could pivot forever, which is the observed spin-in-place death), and vertical altitude gain was
+free while walking uphill was charged.
+
+- [x] **Behaviour is measured, not inferred**: `path`, `net` (displacement from birthplace), `straight`
+      (net/path) and `still %` in the continuous log. `Locomotion` already carried `start` and `path` and
+      nothing ever read them. First numbers: path ~16, net ~4.3, straight 0.32-0.43, still 2-9%. Creatures
+      are local FORAGERS, not spinners and not migrators.
+- [x] **Energy budget is measured**: `Energy.taken`/`spent` per life -> `E in`, `out`, `ratio`. Also
+      `foodCV` (plant patchiness per habitable grid cell) and `noP-births` (births refused for want of
+      matter).
+- [x] **Two of my own hypotheses refuted by those instruments**, both recorded so they are not retried:
+      food is strongly CLUMPED (`foodCV` 2.40), not uniform, so travel was never unprofitable for lack of
+      patchiness; and the income/expenditure ratio is an EMERGENT equilibrium of a density-dependent system,
+      not a knob. Raising `EAT_GAIN` 19 -> 26 moved the ratio 0.94 -> 0.94 and population 58 -> 50, and was
+      reverted.
+- [x] **The actual limiter: matter, not energy.** `ASSIMILATION` 0.2 was applied uniformly to C, N and P,
+      but animal tissue carries ~6.7x the N and ~10x the P of plant tissue per kg, so phosphorus demanded
+      50 kg of plant per kg of animal against a real ~10:1. Split into `ASSIMILATION` (carbon, the energy
+      trophic step) and `NUTRIENT_RETENTION` 0.70 (N and P, which animals conserve hard because those limit
+      them too). N now 9.5:1, P 14:1, P still tightest.
+
 ### Open in this phase
 - [ ] Aerial and highland niches are still not self-sustaining (89 rescues each in a 22-gen run, vs 24 cold
       and 46 land). Highland is only 4.17% of the surface (`niche::habitat_probe`), so a uniform floor is
       probably the wrong shape for it.
-- [ ] Fauna standing stock is ~0.1% of flora where real ecosystems run ~1%: the world is under-stocked by
-      roughly 10x in biomass even with the pyramid upright.
+- [ ] **Creatures live ~1 day against a 360-day year** (`BIO_ACCEL` 2000), so seasonal migration is
+      structurally unreachable: an animal cannot follow a season it never sees, and no affordable run even
+      covers one year (a 22-gen run is 12% of a year). Needs either much longer lifespans relative to the
+      day, or a shorter year. The year is tied to the real Tychos calendar, so this is a user call.
+- [ ] Fauna standing stock was ~0.1% of flora where real ecosystems run ~1%. The assimilation split above is
+      the fix under test; re-measure before closing.
 - [ ] Legacy `Soil` grid still runs UNCONSERVED alongside the `Biosphere`, feeding plant regrowth and
       `SOIL_NUTRI`. Phase 1 lists it for deletion.
 - [ ] Body temperature as STATE (`thermo::net_heat_watts`/`step_body_temp`) is written and unit-tested but
