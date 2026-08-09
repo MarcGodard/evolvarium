@@ -569,12 +569,23 @@ impl BodyMeshCache {
     }
 }
 
-// Overall world-scale of a generative body. Body-graph units (~2-3 tall) -> ~1.5 world units, modulated by
-// the size gene so big-genome creatures read bigger. Juvenile growth multiplies this (size_creatures).
-fn body_scale(g: &Genome) -> f32 {
-    BODY_RENDER * g.size_scale() // mouse..dino (genome::size_scale is the single size lever)
+// Overall world-scale of a generative body: a pure unit conversion, NOT a size lever.
+//
+// build_body_mesh works from the part graph, so the mesh ALREADY carries the body's true geometry, and
+// morph.mass (the volume the whole sim runs on: Kleiber, locomotion, predation mass ratio, the matter
+// ledger) is the volume of that same graph. Multiplying by the size gene on top made rendered size a
+// SEPARATE quantity from physical size: two identical bodies rendered 13x apart while weighing the same,
+// and a heavy body could render small if its size gene was low. What you saw was not what the sim used, so
+// no visual read of predator vs prey could be trusted.
+//
+// Dropping the multiplier makes apparent size track real mass (mesh extent ~ mass^(1/3)), which is what
+// makes the measured 3.8x body-mass spread visible as actual big and small creatures.
+fn body_scale(_g: &Genome) -> f32 {
+    BODY_RENDER
 }
-const BODY_RENDER: f32 = 0.34; // graph-units -> world-units normalization (mid-size ~ matches old 0.5*(0.7+0.6*0.4))
+// graph-units -> world-units. 0.34 -> 0.71 keeps mid-size creatures their current apparent size now that
+// size_scale (~2.1 at the mid gene value) no longer multiplies in.
+const BODY_RENDER: f32 = 0.71;
 
 // Shared eye mesh (emissive eye spheres are the one part NOT in the generative body graph).
 #[derive(Resource)]
