@@ -1900,7 +1900,6 @@ pub fn grass_step(
     if gen.headless {
         return;
     }
-    let season = (crate::sphere::t_years(gen.tick) * std::f32::consts::TAU).sin();
     let count = q.iter().count();
     let tick = gen.tick;
     let seed = gen.seed;
@@ -1930,7 +1929,7 @@ pub fn grass_step(
             }
             // mortality off plant-capable soil: dry/wet mismatch, poor site (rock/desert/cold), or submerged.
             let water = gw_r.get(ppos);
-            let m = (crate::sphere::moisture(pdir) + 0.2 * season + WET_GAIN * water).clamp(0.0, 1.0);
+            let m = (crate::sphere::moisture(pdir) + 0.2 * crate::sphere::season_wetness(tick, pdir) + WET_GAIN * water).clamp(0.0, 1.0);
             let stress = (m - g.wet).abs();
             let mut hab = grass_hab(pdir, Some(gw_r)); // rain-lifted: desert turf lives while wet, dies as it dries
             if crate::sphere::rockiness(pdir) > 0.12 {
@@ -2113,7 +2112,7 @@ pub fn plant_step(
         None => (PLANT_MIN, PLANT_CAP, TREE_CAP),
     };
     // season drifts on global tick clock (advances both modes; generation frozen in continuous)
-    let season = (crate::sphere::t_years(gen.tick) * std::f32::consts::TAU).sin(); // -1 dry .. +1 wet
+    let season_tick = gen.tick;
     let mut plant_count = q.iter().filter(|(.., t)| t.is_none()).count();
     let tree_count = q.iter().filter(|(.., t)| t.is_some()).count();
     // coarse start-of-tick repro gates. Serial gated each birth by `count + births.len() < cap` (and
@@ -2214,7 +2213,7 @@ pub fn plant_step(
                 // soil response shapes growth speed + final SIZE (survival stays moisture-immune): rich + ideally
                 // moist ground grows bigger trees. Still MATURES at g.maturity so food/spread unchanged.
                 let clim = crate::sphere::moisture(pdir) * (1.0 - CLIMATE_VEG) + climate_r.get(ppos) * CLIMATE_VEG;
-                let m = (clim + 0.2 * season + WET_GAIN * water).clamp(0.0, 1.0);
+                let m = (clim + 0.2 * crate::sphere::season_wetness(season_tick, pdir) + WET_GAIN * water).clamp(0.0, 1.0);
                 let moist_q = (1.0 - (m - TREE_WET_OPT).abs() / TREE_WET_TOL).clamp(0.0, 1.0);
                 // Soil quality is moisture-only now. Nutrient scarcity used to be double-counted here (a
                 // growth multiplier AND a size cap); under conservation it acts once, by limiting the draw.
@@ -2278,7 +2277,7 @@ pub fn plant_step(
             // mortality from moisture mismatch / poor site / drown / desiccate / temp. Effective moisture = slow
             // CLIMATE moisture (drifts -> deserts/rainforests) + season + rain-fed ground water.
             let clim = crate::sphere::moisture(pdir) * (1.0 - CLIMATE_VEG) + climate_r.get(ppos) * CLIMATE_VEG;
-            let m = (clim + 0.2 * season + WET_GAIN * water).clamp(0.0, 1.0);
+            let m = (clim + 0.2 * crate::sphere::season_wetness(season_tick, pdir) + WET_GAIN * water).clamp(0.0, 1.0);
             // succulence buffers DROUGHT only (water-storers survive drier than their `wet`); soggy side unbuffered.
             let dry_deficit = (g.wet - m).max(0.0);
             let stress = ((m - g.wet).abs() - SUCC_BUFFER * g.succulence * dry_deficit).max(0.0);

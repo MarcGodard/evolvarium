@@ -29,6 +29,37 @@ pub const MOON_ORBIT: f32 = 6.0 * PLANET_R; // orbit radius (Earth ~60 R; compre
 pub const SUN_DIST: f32 = 60.0 * PLANET_R; // sun far (directional light); billboard sized to match moon angular size
 pub const SUN_R: f32 = SUN_DIST / MOON_ORBIT * MOON_R; // billboard radius -> same on-sky size as moon
 pub const DAY_TICKS: u32 = 2400; // ticks per planet rotation (one day). Same cadence as old flat day.
+// Period of the BIOLOGICAL wet/dry season, decoupled from the astronomical year (sky keeps the true Tychos
+// orbit, see t_years). 96,000 = 40 days = ~34 creature lifetimes.
+//
+// TRIED 9600 (~a third of a cycle inside one lifetime) to make within-lifetime migration reachable, and it
+// MEASURABLY BACKFIRED: mean body mass halved 0.163 -> 0.074 kg, population fell 1748 -> 1463, path
+// straightness fell 0.45 -> 0.32. Fast environmental oscillation selects for small fast breeders, which is a
+// real ecological result and the exact opposite of the size structure predation needs.
+//
+// The reasoning behind 9600 was inverted. Migrating animals do not live a FRACTION of a season, they live
+// MANY: a wildebeest lives ~20 years and migrates annually. So migration wants lifespan >> season, not
+// season >> lifespan. Since a season must also be much longer than a day (2400 ticks) to be coherent,
+// within-lifetime migration needs lifespans of tens of thousands of ticks against today's ~2800. That is a
+// LIFESPAN change, not a season-cadence one, and it is the real open blocker.
+//
+// At this period the season is near-static within a life, so what the anti-phasing buys is a stable
+// latitudinal wet/dry gradient that slowly reverses: range shift across generations rather than individual
+// migration. That is what the world can currently support.
+pub const BIO_SEASON_TICKS: u32 = 96_000;
+
+/// Seasonal moisture swing at `dir`, -1 dry .. +1 wet. ANTI-PHASED BY HEMISPHERE: northern wet season is the
+/// southern dry season, as real axial tilt makes it.
+///
+/// The anti-phasing is the whole point. The season term this replaced was globally uniform, so the entire
+/// planet dried and wetted in lockstep and there was nowhere better to walk to: migration had no spatial
+/// gradient to follow and could not pay however long a creature lived. Weighted by sin(latitude), so the
+/// swing vanishes at the equator (wet year round) and peaks toward the poles, which is also how insolation
+/// seasonality scales.
+pub fn season_wetness(tick: u32, dir: Vec3) -> f32 {
+    let phase = (tick % BIO_SEASON_TICKS) as f32 / BIO_SEASON_TICKS as f32 * std::f32::consts::TAU;
+    phase.sin() * dir_to_lonlat(dir).1.sin()
+}
 pub const AXIAL_TILT: f32 = 0.41; // ~23.5 deg radians (matches TSN Earth -23.439): seasons + keeps poles cold
 // Calendar: mean year = orrery::MEAN_YEAR_DAYS = 360 d = MONTHS_PER_YEAR x MONTH_DAYS. Actual year length
 // breathes with Sirius distance (orrery::year_len_days, ~332..390); the calendar GRID uses the clean mean so
@@ -589,6 +620,40 @@ pub fn climate_target(d: Vec3, tick: u32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Migration needs somewhere BETTER to go. Pins the two properties that make that true: the hemispheres
+    // are in opposite seasons at any moment, and the swing is large inside one creature lifetime (~2800
+    // ticks). A globally uniform season satisfies neither, which is why seasonal behaviour was unreachable
+    // rather than merely unevolved.
+    #[test]
+    fn seasons_are_antiphased_across_hemispheres_and_swing_within_a_lifetime() {
+        let north = lonlat_to_pos(0.0, 0.9, 0.0).normalize();
+        let south = lonlat_to_pos(0.0, -0.9, 0.0).normalize();
+
+        // opposite hemispheres, opposite seasons, at every phase sampled
+        for k in 0..8 {
+            let t = k * BIO_SEASON_TICKS / 8;
+            let (n, s) = (season_wetness(t, north), season_wetness(t, south));
+            assert!((n + s).abs() < 1e-5, "hemispheres must mirror: north {n} south {s} at tick {t}");
+        }
+
+        // a wet north becomes a dry north half a cycle later, so staying put stops paying
+        let peak = BIO_SEASON_TICKS / 4;
+        assert!(season_wetness(peak, north) > 0.5, "north should peak wet");
+        assert!(season_wetness(peak + BIO_SEASON_TICKS / 2, north) < -0.5, "and peak dry half a cycle on");
+
+        // the equator has no dry season to flee
+        let equator = lonlat_to_pos(0.0, 0.0, 0.0).normalize();
+        assert!(season_wetness(peak, equator).abs() < 1e-5, "equator stays wet year round");
+
+        // Season must stay SLOW relative to a life. A cycle short enough to experience within one lifetime
+        // selects for small fast breeders and destroys body size (measured: mass halved at 9600 ticks). This
+        // guards the period against being shortened again in pursuit of within-lifetime migration, which
+        // needs longer LIFESPANS instead.
+        let life = 2800;
+        let swing = (season_wetness(peak, north) - season_wetness(peak + life, north)).abs();
+        assert!(swing < 0.1, "season swings {swing} within one lifetime: too fast, selects for r-strategists");
+    }
 
     // Diagnostic (run: cargo test report_geography -- --nocapture): reports ocean/deep/mountain coverage to
     // tune SEA_LEVEL to ~50% ocean. Median elevation = SEA_LEVEL giving exactly 50% ocean.

@@ -197,7 +197,28 @@ pholmq/TSN (GPL-2.0) @ commit 49fd49c (pinned in `orrery.rs` + `stars.rs` commen
       above. NOTE: `kin` pegged at 0.95 is the free-defense pattern again, and it likely DOUBLE-COUNTS now
       that the predator picks its target: real herd safety is risk DILUTION (predator takes one of N), which
       target selection already models, rather than making each individual harder to kill.
-- [ ] **Seasons are invisible to biology** — the migration blocker. Seasons are real and phase-locked to the
+- [ ] **MIGRATION IS A LIFESPAN PROBLEM, not a season-cadence one (measured 2026-08-09).** The reasoning in
+      the entry below was INVERTED and the fix it proposed does not work. Migrating animals do not live a
+      fraction of a season, they live MANY: a wildebeest lives ~20 years and migrates annually, so migration
+      wants lifespan >> season. Shortening the season to fit inside a lifetime (9600 ticks, ~1/3 cycle per
+      life) measurably BACKFIRED: mean body mass halved 0.163 -> 0.074 kg, pop 1748 -> 1463, straightness
+      0.45 -> 0.32. Fast environmental oscillation selects for small fast breeders, the opposite of the size
+      structure predation needs. Since a season must also be >> one day (2400 ticks) to be coherent,
+      within-lifetime migration needs lifespans in the TENS OF THOUSANDS of ticks against today's ~2800.
+      `sphere::tests::seasons_are_antiphased_...` now asserts the season stays SLOW relative to a life, so
+      shortening it again fails loudly. Open question for the user: 10-20x longer lifespans changes evolution
+      throughput and population dynamics across the whole sim.
+- [x] **Seasons were globally UNIFORM, so migration had no gradient to follow (2026-08-09).** Separate from
+      the cadence question and independently wrong: the season term was one scalar added identically
+      everywhere, so the whole planet dried and wetted in lockstep and there was nowhere better to walk to.
+      No lifespan would have fixed that. `sphere::season_wetness(tick, dir)` is now ANTI-PHASED BY HEMISPHERE
+      as real axial tilt makes it (northern wet season = southern dry season), weighted by sin(latitude) so
+      the swing vanishes at the equator and peaks poleward. At the slow period this buys a stable latitudinal
+      wet/dry gradient that slowly reverses: range shift across generations rather than individual migration.
+      Costs ~19% population (1748 -> 1413) as one hemisphere carries real dry stress; size structure and
+      straightness preserved.
+- [ ] **Seasons are invisible to biology** (SUPERSEDED by the two entries above; kept for the diagnosis)
+      — Seasons are real and phase-locked to the
       astronomical year (864,000 ticks), but mean creature lifespan is ~2200 ticks, so a creature lives
       1/390th of a season. This is a REGRESSION, not a design choice: `sphere.rs:425` records the cadence
       "was a ~7.7-day wobble, now one ~360-day year". Lengthening the year was right for the SKY and quietly
