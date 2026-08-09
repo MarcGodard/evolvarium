@@ -355,8 +355,19 @@ free while walking uphill was charged.
       structurally unreachable: an animal cannot follow a season it never sees, and no affordable run even
       covers one year (a 22-gen run is 12% of a year). Needs either much longer lifespans relative to the
       day, or a shorter year. The year is tied to the real Tychos calendar, so this is a user call.
-- [ ] Fauna standing stock was ~0.1% of flora where real ecosystems run ~1%. The assimilation split above is
-      the fix under test; re-measure before closing.
+- [x] **Fauna standing stock fixed by the assimilation split** (verified, seed 1, 22 gens): population
+      47 -> 1180 -> 2112 with approach shaping, fauna 0.001 -> 0.013 kg/m2, fauna/flora 0.1% -> 3.3% against
+      a real 1-10% band, and the rescue subsidy from 20x the standing population down to ~1x. Flora fell
+      0.97 -> 0.40 because animals finally graze for real.
+- [x] **Approach shaping restored** (gated by usable fraction): population 1180 -> 2112, distance walked
+      34 -> 45, displacement from birth 7.5 -> 9.8. Teaching creatures to navigate toward food they can
+      digest roughly doubled the world's animal population.
+- [ ] `still %` rose 15% -> 31% with approach shaping even as travel increased. Either creatures that reach
+      a rich patch correctly stay put, or a third of the population never moves at all. The metric counts
+      lifetime path <= 0.5, so it cannot tell those apart; needs splitting before it can be trusted.
+- [ ] Energy ratio sits at 0.92 and `noP-births` still fires 36-65 per interval. At ~2000 creatures both are
+      small relative rates consistent with a healthy density-dependent equilibrium, but neither has been
+      checked on a second seed.
 - [ ] Legacy `Soil` grid still runs UNCONSERVED alongside the `Biosphere`, feeding plant regrowth and
       `SOIL_NUTRI`. Phase 1 lists it for deletion.
 - [ ] Body temperature as STATE (`thermo::net_heat_watts`/`step_body_temp`) is written and unit-tested but
