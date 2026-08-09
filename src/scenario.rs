@@ -40,7 +40,7 @@ pub struct CreatureSpec {
     #[serde(default)]
     pub genome: Map<String, Value>, // free-form Genome overrides merged onto random base (ANY gene)
     #[serde(default)]
-    pub reflex: Option<String>, // named brain prior: approach-food | flee-predator | rest-at-night | wander
+    pub reflex: Option<String>, // named brain prior: approach-food | flee-predator | chase-prey | rest-at-night | wander
 }
 
 #[derive(Deserialize)]
@@ -206,6 +206,9 @@ fn reflex_brain(name: &str, sensors: &[Sensor]) -> Option<Net> {
     let mut ih: Vec<Vec<f32>> = (0..n_hidden).map(|_| vec![0.0; n_in + 1]).collect();
     let mut ho: Vec<Vec<f32>> = (0..crate::genome::OUTPUTS).map(|_| vec![0.0; n_hidden + 1]).collect();
     let (i_daylight, i_threat_d, i_threat_b) = (base + 1, base + 6, base + 7);
+    // prey globals are appended LAST (after the memory block), so they index off the end of GLOBAL_INPUTS
+    // rather than a fixed offset: adding another global shifts these two and nothing above them.
+    let (i_prey_d, i_prey_b) = (base + crate::genome::GLOBAL_INPUTS - 2, base + crate::genome::GLOBAL_INPUTS - 1);
     match name {
         "approach-food" => {
             // h0 = food proximity (sum sensor inv-dist); h1 = steering (food left vs right)
@@ -229,6 +232,19 @@ fn reflex_brain(name: &str, sensors: &[Sensor]) -> Option<Net> {
             ih[0][i_daylight] = 1.0; // h0 = daylight
             ho[0][0] = 2.0; // active by day
             ho[0][n_hidden] = -0.5; // rest (low thrust) at night
+        }
+        "chase-prey" => {
+            // Mirror of flee-predator, on the prey globals. Predatory drive is largely INNATE in real
+            // animals (a kitten stalks before it has ever eaten meat), so it belongs in the prior set rather
+            // than being left for mutation to rediscover: the prey columns pad to zero on load, so a seed
+            // with no prior has no hunting behaviour to select on at all.
+            ih[0][i_prey_d] = 2.0; // h0 = prey proximity
+            ih[1][i_prey_b] = 1.0; // h1 = prey bearing
+            ho[0][0] = 3.0; // close on it
+            ho[0][n_hidden] = -0.4; // idle when nothing worth chasing
+            ho[1][1] = 2.5; // steer TOWARD prey bearing (flee-predator uses -2.5)
+            ho[2][0] = 4.0; // attack rises with proximity: lunge only in reach, not across the field
+            ho[2][n_hidden] = -2.0; // and stay below ATTACK_INTENT_THRESH when nothing is close
         }
         "wander" => {
             ho[0][n_hidden] = 0.2; // steady low cruise, no target
@@ -685,4 +701,34 @@ pub fn scenario_step(
         Err(e) => error!("scenario result serialize failed: {}", e),
     }
     exit.write(AppExit::Success);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ATTACK_INTENT_THRESH;
+    use crate::genome::{forward, GLOBAL_INPUTS, SIG_PER_SENSOR};
+
+    // The prey globals index off the END of GLOBAL_INPUTS, so this also catches a future global being
+    // appended without the reflex following it: the prior would silently wire itself to the wrong column.
+    #[test]
+    fn chase_prey_reflex_closes_and_lunges_only_when_prey_is_near() {
+        let sensors = vec![Sensor { angle: -0.3, range: 20.0 }, Sensor { angle: 0.3, range: 20.0 }];
+        let net = reflex_brain("chase-prey", &sensors).expect("chase-prey prior exists");
+        let base = sensors.len() * SIG_PER_SENSOR;
+        let (i_prey_d, i_prey_b) = (base + GLOBAL_INPUTS - 2, base + GLOBAL_INPUTS - 1);
+
+        let idle = vec![0.0f32; n_inputs(sensors.len())];
+        let (_, out_idle) = forward(&net, &idle);
+
+        let mut near = idle.clone();
+        near[i_prey_d] = 0.9; // prey within reach
+        near[i_prey_b] = 0.5; // off to the right
+        let (_, out_near) = forward(&net, &near);
+
+        assert!(out_near[0] > out_idle[0], "must close on visible prey");
+        assert!(out_near[1] > 0.0, "must steer toward prey on the right, got {}", out_near[1]);
+        assert!(out_near[2] > ATTACK_INTENT_THRESH, "must clear the hunt threshold when prey is in reach");
+        assert!(out_idle[2] < ATTACK_INTENT_THRESH, "must not lunge at empty ground");
+    }
 }
