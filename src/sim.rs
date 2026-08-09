@@ -2593,7 +2593,7 @@ pub fn plant_step(
     tree_bites.0.clear(); // consumed this tick
 }
 
-// predation (M5): creatures attack + eat each other. attack = bite + size; defense = size + armor (bite is a weapon, it does not defend).
+// predation (M5): creatures attack + eat each other. attack combat = bite + size; defense = attack + armor.
 // NN-driven: brain attack output past ATTACK_INTENT_THRESH commits a hunt.
 pub fn predation_step(
     gen: Res<GenState>,
@@ -2611,17 +2611,15 @@ pub fn predation_step(
         .iter()
         .filter(|(_, _, _, _, a, _, _)| a.0)
         .map(|(e, t, en, _, _, g, b)| {
-            // Bite is a WEAPON, not armour. It used to count toward defence as well as attack, so defence was
-            // strictly attack + armour and therefore always exceeded attack by the armour term: measured
-            // attackers averaged 0.61 combat units BELOW prey defence, giving a 0.08% kill rate against the
-            // ~10% PREDATION_BIAS was tuned for. Worse, investing in teeth paid identically on offence and
-            // defence, so no predator/prey axis could exist and carnivory sat at 0.04.
-            //
-            // Defence is now bulk plus armour. Size still counts for both, which is right: a big animal is
-            // both harder to kill and better at killing.
+            // Defence deliberately includes the creature's own attack value, so it always exceeds attack by
+            // the armour term. TRIED making bite offence-only (defence = size + armour) on the grounds that a
+            // bite is a weapon, not armour, and REVERTED: armour then became the sole defensive gene,
+            // selection drove it up, and total defence recovered. Kills fell 52-60 -> 13-23 at equal
+            // population and carnivory fell 0.04 -> 0.02, the opposite of the intent. Giving prey one cheap
+            // lever to pull is worse than giving them none. The real blocker is that armour is too cheap,
+            // not that bite defends.
             let attack = g.bite + SIZE_COMBAT * g.size;
-            let defense = SIZE_COMBAT * g.size + ARMOR_DEF * g.armor;
-            (e, t.translation, attack, en.total(), signature(g), defense, g.venom, g.climb, b.attack, b.defend)
+            (e, t.translation, attack, en.total(), signature(g), attack + ARMOR_DEF * g.armor, g.venom, g.climb, b.attack, b.defend)
         })
         .collect();
     if snap.len() < 2 {
