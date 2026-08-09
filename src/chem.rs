@@ -285,11 +285,23 @@ pub fn npp_ceiling_per_tick() -> f64 {
 /// radius, eat/attack reach, camera framing) and belongs in a visual pass, not here. Revisit it then.
 pub const BODY_MASS_PER_MORPH: f64 = 1.5;
 
-/// Share of ingested matter that becomes new animal tissue rather than being respired and excreted. Real net
-/// production efficiency runs ~1-10% for endotherms and up to ~40% for ectotherms; 0.2 sits in the middle for
-/// a mixed population. This one number IS the trophic step, so raising it toward 1.0 would let animals
-/// approach the biomass of their food supply, which is exactly the inverted pyramid this world had.
+/// Share of ingested CARBON that becomes new animal tissue rather than being respired. This is the energy
+/// trophic step: real net production efficiency runs ~1-10% for endotherms and up to ~40% for ectotherms,
+/// and 0.2 sits mid-range for a mixed population. Raising it toward 1.0 would let animals approach the
+/// biomass of their food, which is the inverted pyramid this world started with.
 pub const ASSIMILATION: f64 = 0.2;
+
+/// Retention of ingested NITROGEN and PHOSPHORUS, which is NOT the carbon figure. An animal respires most of
+/// the carbon it eats but conserves scarce nutrients hard, because N and P limit it just as they limit the
+/// plants; real dietary absorption of both runs 60-90%.
+///
+/// Applying the carbon number to all three elements was quietly setting the trophic ratio, and setting it
+/// wrong. Animal tissue carries ~6.7x the N and ~10x the P of plant tissue per kg, so at a flat 0.2 a
+/// herbivore had to eat 33 kg of plant per kg of body for nitrogen and 50 kg for phosphorus, against a real
+/// trophic transfer nearer 10:1. That is why Biosphere.fauna_pool sat pinned at zero with births failing for
+/// want of phosphorus, and why fauna standing stock came out ~10x below the ~1% of plant biomass that real
+/// ecosystems carry. The energy step is unchanged; only the nutrient bookkeeping is corrected.
+pub const NUTRIENT_RETENTION: f64 = 0.70;
 
 /// Live mass in kg of a body with the given `Morphometrics.mass` shape proxy.
 pub fn creature_mass_kg(morph_volume: f32) -> f64 {
@@ -557,7 +569,8 @@ impl Biosphere {
         // maintenance and excreted. Real net production efficiency is ~1-10% for endotherms and up to ~40%
         // for ectotherms. This split is the trophic step: it is WHY each level supports so much less biomass
         // than the one below it, and it is what keeps the pyramid upright without a hard cap.
-        let kept = eaten * ASSIMILATION;
+        // Per-element, not one number: carbon is mostly respired, N and P are conserved.
+        let kept = Elements::new(eaten.c * ASSIMILATION, eaten.n * NUTRIENT_RETENTION, eaten.p * NUTRIENT_RETENTION);
         let lost = eaten - kept;
         self.fauna_pool += kept;
         self.air.c += lost.c; // respiration
@@ -929,6 +942,22 @@ mod tests {
                  NPP_PER_M2_DAY * PLANT_COMP.c / SOIL_ORG_C_PER_M2"
             );
         }
+    }
+
+    // How many kg of plant a herbivore must eat to build 1 kg of itself, per element. Real trophic transfer
+    // is roughly 10:1 by biomass; a flat carbon-rate assimilation put phosphorus at 50:1, which starved
+    // reproduction of matter while energy was fine. Guards the split from being collapsed back to one number.
+    #[test]
+    fn trophic_matter_cost_is_ecologically_plausible() {
+        let per_kg = |need: f64, in_plant: f64, retention: f64| need / (in_plant * retention);
+        let n = per_kg(ANIMAL_COMP.n, PLANT_COMP.n, NUTRIENT_RETENTION);
+        let p = per_kg(ANIMAL_COMP.p, PLANT_COMP.p, NUTRIENT_RETENTION);
+        let c = per_kg(ANIMAL_COMP.c, PLANT_COMP.c, ASSIMILATION);
+        for (name, v) in [("N", n), ("P", p), ("C", c)] {
+            assert!((3.0..=20.0).contains(&v), "{name} needs {v:.1} kg plant per kg animal, outside a plausible 3-20:1");
+        }
+        // and phosphorus must stay the tightest of the three, as it is in real freshwater and grassland systems
+        assert!(p >= n, "P {p:.1} should bind at least as hard as N {n:.1}");
     }
 
     #[test]

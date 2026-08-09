@@ -22,6 +22,9 @@ fn grid_uv(pos: Vec3) -> (f32, f32) {
 
 #[derive(Resource)]
 pub struct GenState {
+    // Births refused for want of assimilated matter since the last log. The fauna pool sits pinned near zero
+    // while soil P is plentiful, so this counts how hard that gate is actually biting. Diagnostic only.
+    pub births_blocked: std::sync::atomic::AtomicU32,
     pub generation: u32,
     pub ticks_left: u32,
     pub headless: bool,
@@ -3772,6 +3775,7 @@ pub fn live_step(
             child.morph.map(|m| m.mass).unwrap_or_else(|| crate::morph::Morphometrics::of(&child.body).mass),
         );
         if !bio.draw_fauna(crate::chem::ANIMAL_COMP * body_kg) {
+            gen.births_blocked.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             continue;
         }
         spawn_creature(&mut commands, child, pos, &mut rng, birth_e);
@@ -4000,7 +4004,7 @@ pub fn generation_step(
             let avg_qual: f32 = pq.iter().map(|(g, _)| g.quality).sum::<f32>() / plant_n as f32;
             let avg_wet: f32 = pq.iter().map(|(g, _)| g.wet).sum::<f32>() / plant_n as f32;
             info!(
-                "t {:>6} | pop {:>3} | kg {:.3} | path {:.1} net {:.1} straight {:.2} still {:.0}% foodCV {:.2} | E in {:.3} out {:.3} ratio {:.2} | energy {:.1} [f{:.1}/s{:.1}/F{:.1}] adp {:.2} | mast {:.2} brd {:.1} | life-fit {:.1} | age {:.0} | sens {:.1} | bite {:.2} | rig {:.2} | temp {:.2} lng {:.2} met {:.2} endo {:.2}[c{:.2}/{} t{:.2}/{} w{:.2}/{}] par {:.2} lat {:.2} | swim {:.2} alp {:.2} aq {} hi {} | def {:.2} nut {:.2} qual {:.2} wet {:.2} | plants {} | soil {:.2} | rain {:.2} fire {:.3} | wear {:.3} bare {} | CHEM {} | {}",
+                "t {:>6} | pop {:>3} | kg {:.3} | path {:.1} net {:.1} straight {:.2} still {:.0}% foodCV {:.2} | E in {:.3} out {:.3} ratio {:.2} | noP-births {} | energy {:.1} [f{:.1}/s{:.1}/F{:.1}] adp {:.2} | mast {:.2} brd {:.1} | life-fit {:.1} | age {:.0} | sens {:.1} | bite {:.2} | rig {:.2} | temp {:.2} lng {:.2} met {:.2} endo {:.2}[c{:.2}/{} t{:.2}/{} w{:.2}/{}] par {:.2} lat {:.2} | swim {:.2} alp {:.2} aq {} hi {} | def {:.2} nut {:.2} qual {:.2} wet {:.2} | plants {} | soil {:.2} | rain {:.2} fire {:.3} | wear {:.3} bare {} | CHEM {} | {}",
                 // MEAN BODY MASS in real kg, not the size GENE. The two diverged ~87x unnoticed because only
                 // the gene was ever logged, and every Kleiber/thermoregulation term keys off the kg.
                 gen.tick, pop, cont_fauna_kg / pop.max(1) as f64,
@@ -4012,6 +4016,7 @@ pub fn generation_step(
                 e_in / moved.max(1) as f32,
                 e_out / moved.max(1) as f32,
                 e_in / e_out.max(1e-6),
+                gen.births_blocked.swap(0, std::sync::atomic::Ordering::Relaxed),
                 e / n, fa / n, su / n, ft / n, adp / n, mast / n, brd / n, f / n, age / n, sens / n, bite / n, rig / n, temp / n, lng / n, met / n, endo / n,
                 endo_c / nc.max(1) as f32, nc, endo_t / nt.max(1) as f32, nt, endo_w / nw.max(1) as f32, nw,
                 par / n, abslat / n, sw / n, alp / n, aq, hi, avg_def, avg_nut, avg_qual, avg_wet, plant_n, fields.soil.avg(), fields.weather.rain, fields.fire.avg(), fields.wear.avg(), fields.wear.cell.iter().filter(|&&w| w > WEAR_GRASS_CULL).count(),
