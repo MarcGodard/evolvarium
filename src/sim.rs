@@ -32,9 +32,9 @@ pub struct GenState {
     /// fails": carnivory selected down to 0.04 could be either, and the fix differs completely.
     pub attacks: std::sync::atomic::AtomicU32,
     /// Predation success TERM breakdown, summed over engagements since the last log, fixed-point x1000
-    /// (i64: adv is routinely negative). An equal matchup already scores only sigmoid(-PREDATION_BIAS) ~= 0.10
-    /// and measurement puts real success ~200x below that, so the gap has to be attributed to a named factor
-    /// rather than guessed at: hence adv (combat edge) and the three multipliers logged separately.
+    /// (i64: adv is routinely negative). The gap between a matchup's nominal odds and measured success has
+    /// to be attributed to a NAMED factor rather than guessed at, so adv and the three multipliers are
+    /// logged separately. Finding brace at 81% of the deficit is what this instrumentation was for.
     pub adv_sum: std::sync::atomic::AtomicI64,
     pub armor_sum: std::sync::atomic::AtomicI64, // armour's share of prey defense
     pub brace_sum: std::sync::atomic::AtomicI64, // active-brace share
@@ -2623,10 +2623,10 @@ pub fn meat_gut_of(carnivory: f32) -> f32 {
 /// Predation success probability, extracted pure so the law is testable and each factor is separable.
 /// `adv` = attacker combat - prey EFFECTIVE defense (prey combat + armour + active brace). Note adv is
 /// centered on ZERO, not on a positive edge: predator and prey come from one population, so the mean
-/// matchup is negative by exactly the prey's armour + brace. PREDATION_BIAS then costs another
-/// sigmoid step, which is why an equal, unarmoured, unbraced matchup still only scores ~0.10.
+/// matchup is negative by exactly the prey's armour + brace, which IS the anti-cannibalism guard: equals
+/// sit near sigmoid(-8) without any extra penalty being imposed on top.
 pub fn predation_success(adv: f32, prey_kin: f32, prey_climb: f32) -> f32 {
-    sigmoid(BITE_K * adv - PREDATION_BIAS) * (1.0 - SOCIAL_SAFETY * prey_kin) * (1.0 - CLIMB_EVADE * prey_climb)
+    sigmoid(BITE_K * adv) * (1.0 - SOCIAL_SAFETY * prey_kin) * (1.0 - CLIMB_EVADE * prey_climb)
 }
 
 pub fn predation_step(
@@ -2729,7 +2729,7 @@ pub fn predation_step(
             }
             let prey_kin = (kin / SOCIAL_TARGET).min(1.0);
             // success = attacker combat vs prey EFFECTIVE defense (combat + armor + active BRACE), minus required
-            // edge PREDATION_BIAS, reduced by herd safety AND prey climb agility (arboreal escape).
+            // reduced by herd safety AND prey climb agility (arboreal escape).
             // MASS RATIO is the predator/prey axis, log so it is scale-free: twice the prey's mass is the
             // same edge whether the pair weighs grams or tonnes, and the term is symmetric (a mouse attacking
             // an elephant is penalised exactly as the elephant is favoured). This is what real food webs are
@@ -4491,18 +4491,22 @@ mod tests {
     // are one population, and an equal matchup is already near-hopeless; only a real size/bite edge pays. If a
     // future change makes equal matchups winnable, predation becomes cannibalism and this test should fail.
     #[test]
-    fn predation_needs_a_real_combat_edge_not_a_fair_fight() {
-        let fair = predation_success(0.0, 0.0, 0.0);
-        assert!(fair < 0.12, "equal matchup should be a poor bet, got {fair}");
+    fn predation_needs_a_real_size_edge_not_a_fair_fight() {
+        // adv for two creatures of the SAME mass, carrying measured typical armour and brace. Equals must
+        // stay near-inedible on armour and brace ALONE: that is the anti-cannibalism guard, and it is why
+        // PREDATION_BIAS could be deleted rather than merely lowered.
+        let (armour, brace) = (ARMOR_DEF * 0.7, BRACE_DEF * 0.5);
+        let peer_adv = 0.15 - armour - brace;
+        let fair = predation_success(peer_adv, 0.0, 0.0);
+        assert!(fair < 0.05, "an equal must be a poor meal, got {fair}");
 
-        // an armoured, braced, herded, arboreal prey is effectively unkillable by an equal
-        let defended = predation_success(-(ARMOR_DEF + BRACE_DEF), 1.0, 1.0);
-        assert!(defended < 1e-3, "stacked defense should shut predation down, got {defended}");
-
-        // a genuine edge (bite + size advantage) has to be worth evolving toward
-        let edge = predation_success(1.0, 0.0, 0.0);
-        assert!(edge > 0.99 * 0.5, "a full combat edge should pay, got {edge}");
-        assert!(edge > fair * 5.0, "edge must dominate a fair fight");
+        // a genuine SIZE advantage must pay, or no predator lineage can ever form. Three times the prey's
+        // mass, which a real food web supplies easily; the old bias needed sevenfold merely to break even.
+        let mass_edge = SIZE_COMBAT * 3.0f32.ln();
+        let hunter_adv = 0.15 + mass_edge - armour / (1.0 + mass_edge) - brace;
+        let hunt = predation_success(hunter_adv, 0.5, 0.0);
+        assert!(hunt > 0.05, "a 3x-heavier hunter scores only {hunt}: predation still unreachable");
+        assert!(hunt > fair * 10.0, "size edge must dominate a fair fight");
     }
 
     // representative elevations (signed bathymetry, waterline at 0): peak, hill, dry coast, shallow sea, abyss.

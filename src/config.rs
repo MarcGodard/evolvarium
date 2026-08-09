@@ -182,11 +182,12 @@ pub const EAT_GAIN: f32 = 19.0;
 pub const MEAT_BONUS: f32 = 1.6; // meat (carrion) richer + longer-lasting than plant food
 pub const ATTACK_RADIUS: f32 = 1.6; // must be adjacent to attack
 // (old PREDATION_HUNGER gate removed in M6: attack now NN-gated by ATTACK_INTENT_THRESH, not hunger)
-// Predation needs real combat EDGE, not just proximity. Success = sigmoid(BITE_K*(adv) - BIAS) where adv
-// = attacker combat - prey combat. Equal combat (uniform pop) -> success ~= sigmoid(-BIAS) = low, so
-// creatures can't cannibalize their own kind into boom-bust crash; genuine carnivore (high bite + size
-// vs smaller prey) still wins. Turns predation from pop-wide churn into a real niche.
-pub const PREDATION_BIAS: f32 = 2.2; // combat-edge required: equal-combat success = sigmoid(-2.2) ~= 0.10
+// PREDATION_BIAS DELETED. It existed so equals could not cannibalise each other back when defence was
+// `attack + armour`, where an equal matchup sat at adv 0 and needed a fiat penalty to be survivable. With
+// mass ratio as the axis, two same-mass creatures already sit at adv ~= -1.0 on armour and brace alone
+// (sigmoid(-8) ~= 3e-4), so the guard was doing its job twice. Doing it twice set the bar at a SEVENFOLD
+// mass advantage merely to break even, which no size-uniform population can ever supply, so predation was
+// unreachable by arithmetic rather than by ecology.
 // --- combat outputs (M6): NN-driven attack + active defense + sprint (brain out[2]/out[3]/out[5]) ---
 // Attack is brain's choice now (no hunger gate). Committing costs energy land-or-miss, whiff earns
 // learned penalty -> pointless aggression selected against (this + cost replace old well-fed skip).
