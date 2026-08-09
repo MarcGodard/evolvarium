@@ -22,17 +22,22 @@ pub const MIN_SENSORS: usize = 1;
 pub const MAX_SENSORS: usize = 8;
 pub const SIG_PER_SENSOR: usize = 2; // each sensor reports [inv-dist, food type/readiness]
 // Global (non-sensor) brain inputs, appended after per-sensor signals. Column order:
-// [energy, daylight, fatigue, bias, toxic_load, shade, threat_dist, threat_bearing, wet, mag_lat, compass, altitude, hear_loud, hear_bearing, ambient_loud, mem*MEM_CELLS]
+// [energy, daylight, fatigue, bias, toxic_load, shade, threat_dist, threat_bearing, wet, mag_lat, compass, altitude, hear_loud, hear_bearing, ambient_loud, mem*MEM_CELLS, prey_dist, prey_bearing]
 // energy+daylight+fatigue -> diurnal/nocturnal rest; toxic_load -> avoid poison; shade -> seek canopy in heat;
 // threat_dist/bearing -> flee bigger predator; wet -> in water; mag_lat+compass -> magnetic nav (gated by
 // `magneto` gene); altitude -> own height aloft (fliers manage climb/descend); hear_loud+hear_bearing ->
 // OMNIDIRECTIONAL acoustic sense (loudest freq-matched caller, works in dark/behind terrain; gated by `hearing`
 // acuity); ambient_loud -> environmental NOISE (rain/storm incoming, nearby fire, water) = indicator + masks
 // hear_loud (a call must beat the noise floor). GOTCHA: M4 widened 4 -> 9; magneto added 2 -> 11; flight added 1
-// -> 12; hearing added 2 -> 14; ambient added 1 -> 15; memory added MEM_CELLS (read-back of last tick's writes).
+// -> 12; hearing added 2 -> 14; ambient added 1 -> 15; memory added MEM_CELLS (read-back of last tick's writes);
+// prey added 2. prey_dist/prey_bearing MIRROR threat_*: threat reports creatures ABOVE your combat, prey reports
+// creatures BELOW it. Without the prey pair the directional eyes scanned only `foods`, so a hunter had no input
+// correlating with "something killable is that way" and predation_step degenerated to a lottery (hold attack
+// high, hope a body drifts inside ATTACK_RADIUS). That is why carnivory sat at 0.02 through every
+// bite/armour/attack-cost pass: those knobs move the ODDS of the lottery, never the strategy.
 // NEW globals always appended LAST so pad_ih_inputs (inserts
 // before bias) aligns old saved nets correctly. Old saved nets zero-padded for new columns on load, see ensure_net_shape.
-pub const GLOBAL_INPUTS: usize = 15 + MEM_CELLS;
+pub const GLOBAL_INPUTS: usize = 17 + MEM_CELLS;
 pub const CONE_HALF: f32 = 0.7; // sensor FOV half-angle (rad)
 const RANGE_MIN: f32 = 4.0;
 const RANGE_MAX: f32 = 48.0; // long-range vision possible (big world); energy cost = trade-off (see sim SENSE_COST)

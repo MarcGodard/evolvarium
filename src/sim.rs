@@ -2645,14 +2645,24 @@ pub fn predation_step(
             continue;
         }
         committed.insert(ae);
+        // Target the WEAKEST body in reach, not the nearest. Nearest-target made every lunge a random draw
+        // against the population mean, and since predator and prey come from the SAME population, mean
+        // eff_def = my own combat + the prey's armour + its brace, so mean `abite - eff_def` is NEGATIVE
+        // before PREDATION_BIAS even applies. That is a matchup no amount of bite/armour tuning can win:
+        // measured 0.04% success over ~40k engagements. Real predators cull the vulnerable rather than
+        // whatever is closest, and picking the softest target is what turns an outlier bite into a diet.
+        // Brace counts here (a braced animal reads as defensive), so a hunter skips the one standing ground.
         let mut best: Option<(f32, usize)> = None;
-        for (bi, &(be, bpos, _, _, _, _, _, _, _, _)) in snap.iter().enumerate() {
+        for (bi, &(be, bpos, _, _, _, bdef, _, _, _, b_def_intent)) in snap.iter().enumerate() {
             if bi == ai || killed.contains(&be) {
                 continue;
             }
-            let d2 = apos.distance_squared(bpos);
-            if d2 < r2 && best.is_none_or(|(bd, _)| d2 < bd) {
-                best = Some((d2, bi));
+            if apos.distance_squared(bpos) >= r2 {
+                continue;
+            }
+            let eff_def = bdef + BRACE_DEF * b_def_intent;
+            if best.is_none_or(|(bd, _)| eff_def < bd) {
+                best = Some((eff_def, bi));
             }
         }
         if let Some((_, bi)) = best {
@@ -2991,24 +3001,41 @@ pub fn live_step(
             0.0
         };
         let shade01 = tree_shade; // overhead canopy shade (brain input + heat relief)
-        // nearest THREAT: a bigger-combat creature nearby drives flee. O(n) over the snapshot.
+        // nearest THREAT and nearest PREY, one O(n) pass over the snapshot. Same relation read from both ends:
+        // a neighbor THREAT_MARGIN above my combat is a predator to flee, one that far below is prey to chase.
+        // The prey half is what makes hunting steerable at all; without it the directional eyes see only `foods`
+        // and attack fires blind (see GLOBAL_INPUTS note in genome.rs).
         let my_combat = genome.bite + SIZE_COMBAT * genome.size;
         let mut threat_d2 = f32::INFINITY;
         let mut threat_pos = Vec3::ZERO;
+        let mut prey_d2 = f32::INFINITY;
+        let mut prey_pos = Vec3::ZERO;
         for (e2, p2, _, c2, _) in &cre_snap {
-            if *e2 == entity || *c2 <= my_combat + THREAT_MARGIN {
+            if *e2 == entity {
                 continue;
             }
             let d2 = pos.distance_squared(*p2);
-            if d2 < threat_d2 {
-                threat_d2 = d2;
-                threat_pos = *p2;
+            if *c2 > my_combat + THREAT_MARGIN {
+                if d2 < threat_d2 {
+                    threat_d2 = d2;
+                    threat_pos = *p2;
+                }
+            } else if *c2 < my_combat - THREAT_MARGIN && d2 < prey_d2 {
+                prey_d2 = d2;
+                prey_pos = *p2;
             }
         }
+        let rel_bearing = |target: Vec3| {
+            let to = target - pos;
+            wrap_angle(to.dot(east).atan2(to.dot(north)) - head.0) / std::f32::consts::PI
+        };
         let (threat_dist, threat_bear) = if threat_d2 < THREAT_RADIUS * THREAT_RADIUS {
-            let to = threat_pos - pos;
-            let bearing = wrap_angle(to.dot(east).atan2(to.dot(north)) - head.0);
-            (1.0 / (1.0 + threat_d2.sqrt()), bearing / std::f32::consts::PI)
+            (1.0 / (1.0 + threat_d2.sqrt()), rel_bearing(threat_pos))
+        } else {
+            (0.0, 0.0)
+        };
+        let (prey_dist, prey_bear) = if prey_d2 < THREAT_RADIUS * THREAT_RADIUS {
+            (1.0 / (1.0 + prey_d2.sqrt()), rel_bearing(prey_pos))
         } else {
             (0.0, 0.0)
         };
@@ -3094,6 +3121,10 @@ pub fn live_step(
         for &m in &brain.memory {
             input.push(m);
         }
+        // prey globals (LAST, matching ensure_net_shape padding order). 0 when nothing weaker is in range, which
+        // is also the pad fill -> migrated pre-prey nets behave exactly as before.
+        input.push(prey_dist); // nearest weaker creature inv-distance -> close in
+        input.push(prey_bear); // bearing to it (-1..1) -> which way to chase
 
         // think (per-life learned brain, dynamic topology matching this genome's sensor count)
         let (h, out) = forward(&brain.net, &input);

@@ -510,8 +510,14 @@ pub const PELT_HEAT_COST: f32 = 0.6;   // energy/sec extra at full pelt in hotte
 pub const PELT_WATER_DRAG: f32 = 1.2;  // energy/sec extra at full pelt fully in water (waterlogged coat)
 pub const PELT_UPKEEP: f32 = 0.2;      // energy/sec basal at full pelt (growing + carrying a coat)
 // armor: lowers predation success against it (defense-only); costs move + basal upkeep.
-pub const ARMOR_DEF: f32 = 2.5;   // added to prey combat as DEFENSE-only at full armor (hard to kill)
-pub const ARMOR_MOVE: f32 = 0.8;  // move-cost mult add at full armor (heavy plates to push)
+// Added to prey combat as DEFENSE-only at full armor. 2.5 -> 1.1 because BITE_K is 8, so 2.5 put TWENTY into
+// the sigmoid exponent at full armor and 5 at quarter armor: that is not protection, it is invulnerability,
+// and it is why predation ran at 0.08% success. Real armour lowers predation risk without abolishing it
+// (armadillos and turtles are still eaten). Paired cost is ARMOR_MOVE 0.8, raised to 1.4: plates are heavy
+// and the previous ratio made armour cheap enough to be a dominant strategy, which is the arms race that
+// defeated the bite-offence-only attempt (see predation_step).
+pub const ARMOR_DEF: f32 = 1.1;
+pub const ARMOR_MOVE: f32 = 1.4;  // move-cost mult add at full armor (heavy plates to push)
 pub const ARMOR_BASAL: f32 = 0.5; // energy/sec basal at full armor
 // venom: toxic flesh deters predators -> predator eating venomous prey gains far less (sickening kill).
 pub const VENOM_DETER: f32 = 0.9;   // fraction of predation gain removed at full prey venom

@@ -155,6 +155,25 @@ pholmq/TSN (GPL-2.0) @ commit 49fd49c (pinned in `orrery.rs` + `stars.rs` commen
       (float like a duck) + swimmers. Refactor only, behavior identical.
 - [ ] **Balance-phase follow-ups** (visuals-first now): dive-hunting tuning, flier predator niche, flock/school
       cohesion at altitude, HUD flier count.
+- [x] **Predators could not SEE prey (2026-08-09)** — the root cause behind carnivory pinned at 0.02 through
+      every bite / armour / attack-cost tuning pass. The evolvable directional eyes scan `foods` only, and the
+      only creature-derived brain inputs were `threat_*` (creatures ABOVE your combat) and hearing (creatures
+      that happen to be calling). Nothing reported "something killable is that way", so `predation_step` was a
+      lottery: raise `attack`, hope a body drifts inside ATTACK_RADIUS=1.6. No approach phase existed because
+      there was nothing to approach toward. Selection cannot favour hunting when hunting is unsteerable, so
+      those knobs only ever moved the ODDS of the lottery. FIX: `prey_dist`/`prey_bearing` globals mirroring
+      `threat_*` over creatures BELOW my combat, found in the same O(n) snapshot pass (no new scan cost).
+      Appended last -> old saved nets pad to 0.0 and behave identically; `plast` pads to 0.2 so lifetime
+      learning can find the channel without waiting on mutation.
+- [ ] **Seasons are invisible to biology** — the migration blocker. Seasons are real and phase-locked to the
+      astronomical year (864,000 ticks), but mean creature lifespan is ~2200 ticks, so a creature lives
+      1/390th of a season. This is a REGRESSION, not a design choice: `sphere.rs:425` records the cadence
+      "was a ~7.7-day wobble, now one ~360-day year". Lengthening the year was right for the SKY and quietly
+      made seasonality unreachable for LIFE. Proposed fix: split the biological wet/dry season phase (3 call
+      sites in `sim.rs`, all `clim + 0.2 * season`) from `t_years`, so the Tychos sun keeps drawing correctly
+      while moisture runs on a cycle a creature can outlive. Same decoupling BIO_ACCEL already makes, so it
+      adds no new dishonesty. Temperature seasonality stays on the astronomical year (sub-solar latitude is
+      the sky), so this buys monsoon-style wet/dry migration, which is the canonical migration driver anyway.
 - [x] **FLAGSHIP: generative morphology + embodied evolution (Karl-Sims part-graph). P1+P2 DONE + MERGED to
       `main`** (DEFAULT_SEED = evolved-morph.json). Only P3 deferred (below). Plan:
       `~/.claude/plans/cuddly-coalescing-bachman.md`. Replaces the per-scalar
