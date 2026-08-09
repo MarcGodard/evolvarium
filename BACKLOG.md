@@ -362,9 +362,16 @@ free while walking uphill was charged.
 - [x] **Approach shaping restored** (gated by usable fraction): population 1180 -> 2112, distance walked
       34 -> 45, displacement from birth 7.5 -> 9.8. Teaching creatures to navigate toward food they can
       digest roughly doubled the world's animal population.
-- [ ] `still %` rose 15% -> 31% with approach shaping even as travel increased. Either creatures that reach
-      a rich patch correctly stay put, or a third of the population never moves at all. The metric counts
-      lifetime path <= 0.5, so it cannot tell those apart; needs splitting before it can be trusted.
+- [x] **`still %` was measuring the BIRTH RATE, not stillness** (fixed). Only creatures past the age-200 gate
+      counted as having moved, but the figure divided by the whole population, so every young creature scored
+      as motionless. The 15% -> 31% rise I read as creatures getting stuck was the opposite: more births.
+      Denominator is now the mature count, applied to still%, energy income and expenditure alike. Lesson:
+      when a metric moves in a surprising direction, suspect the metric before building a story on it.
+- [ ] **Population growth is SLOW on hard seeds and run length changes the conclusion.** Seed 5 reads 48 at
+      gen 16 and ~336 by gen 21, so a 16-gen run and a 22-gen run tell different stories about the same
+      build. Long runs are also being killed part way (not memory; ~14 GB free), so several results this
+      phase rest on partial logs. Prefer gens>=20 for any population claim, and check for the
+      "headless run done" line before trusting a number.
 - [ ] Energy ratio sits at 0.92 and `noP-births` still fires 36-65 per interval. At ~2000 creatures both are
       small relative rates consistent with a healthy density-dependent equilibrium, but neither has been
       checked on a second seed.
