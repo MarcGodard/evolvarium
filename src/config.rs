@@ -165,15 +165,16 @@ pub const GROUND_EPS: f32 = 0.4;        // altitude below this = "on the ground"
 // --- eating / arms race / predation (see 13, M5) ---
 pub const BITE_K: f32 = 8.0; // eat/combat decisiveness = sigmoid(BITE_K*(bite - defense))
 pub const BITE_COST: f32 = 0.7; // energy/sec maintenance cost of bite strength (linear)
-// Energy per (mass * nutrient): the food-mass-to-joules conversion. Arbitrary units, so this is the one
-// genuinely free constant in the budget and the right place to absorb calibration; the COSTS are all law now
-// (Kleiber, M^0.75 intake and locomotion, mgh climbs) and must not be bent to fit.
+// Energy per (mass * nutrient): the food-mass-to-joules conversion, arbitrary units.
 //
-// 19 -> 26 because the measured budget said the average creature ran at a LOSS: income 0.173 vs expenditure
-// 0.191, ratio 0.94. It was surviving on birth energy and fat, then dying, which is why population fell as
-// each physically-correct cost was added. Break-even is not enough either: a creature must also bank
-// REPRO_COST per offspring, so the target is a ratio around 1.25-1.3, not 1.0.
-pub const EAT_GAIN: f32 = 26.0;
+// Tried 19 -> 26 to lift a measured income/expenditure ratio of 0.94, and the run REFUTED the reasoning:
+// ratio stayed 0.94, population stayed ~50, rescue stayed ~1283, and income actually fell. Two lessons kept
+// here so nobody retries it. First, the ratio is an emergent equilibrium of a density-dependent system, not
+// a knob: raise the yield and the population eats the difference until the marginal creature is back at
+// break-even. Second, and the real point, animal numbers are MATTER-limited, not energy-limited. Births draw
+// assimilated C/N/P from Biosphere.fauna_pool, and that pool sits pinned at ~0.00 while soil mineral P sits
+// at ~2190, so reproduction fails for want of phosphorus no matter how much energy a creature banks.
+pub const EAT_GAIN: f32 = 19.0;
 pub const MEAT_BONUS: f32 = 1.6; // meat (carrion) richer + longer-lasting than plant food
 pub const ATTACK_RADIUS: f32 = 1.6; // must be adjacent to attack
 pub const PREDATION_GAIN: f32 = 16.0; // energy predator gains from kill (moderate: big windfall fuels boom-bust)
