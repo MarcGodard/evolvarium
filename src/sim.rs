@@ -25,6 +25,12 @@ pub struct GenState {
     // Births refused for want of assimilated matter since the last log. The fauna pool sits pinned near zero
     // while soil P is plentiful, so this counts how hard that gate is actually biting. Diagnostic only.
     pub births_blocked: std::sync::atomic::AtomicU32,
+    /// Successful kills since the last log. Hunting is half the stated goal for creature behaviour and was
+    /// never measured: nothing said whether predation happens at all, or whether carnivory is a dead gene.
+    pub kills: std::sync::atomic::AtomicU32,
+    /// Attacks COMMITTED since the last log. Paired with `kills` it separates "nobody hunts" from "hunting
+    /// fails": carnivory selected down to 0.04 could be either, and the fix differs completely.
+    pub attacks: std::sync::atomic::AtomicU32,
     pub generation: u32,
     pub ticks_left: u32,
     pub headless: bool,
@@ -2656,6 +2662,7 @@ pub fn predation_step(
                 * (1.0 - CLIMB_EVADE * bclimb);
             if rng.f32() < success {
                 killed.insert(be);
+                gen.kills.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 // venomous prey is a sickening kill -> the predator gains far less (the venom deterrent)
                 *gains.entry(ae).or_insert(0.0) += PREDATION_GAIN * (1.0 - VENOM_DETER * bven);
             } else if b_def_intent > 0.5 {
@@ -2663,6 +2670,7 @@ pub fn predation_step(
             }
         }
     }
+    gen.attacks.fetch_add(committed.len() as u32, std::sync::atomic::Ordering::Relaxed);
     if committed.is_empty() {
         return; // nobody chose to attack -> no kills, no combat rewards to assign
     }
@@ -3992,7 +4000,7 @@ pub fn generation_step(
             } else {
                 0.0
             };
-            let (mut e_in, mut e_out) = (0.0f32, 0.0f32);
+            let (mut e_in, mut e_out, mut carn) = (0.0f32, 0.0f32, 0.0f32);
             // `mature` is the denominator for every behaviour figure below. Dividing by total pop instead
             // scored every creature younger than the age gate as motionless, so still% tracked the BIRTH RATE
             // rather than stillness and rose whenever the population grew.
@@ -4000,6 +4008,7 @@ pub fn generation_step(
             for (t, en, fit, _h, _a, g, _b, diet, l) in cq.iter() {
                 if diet.age > 200 {
                     mature += 1;
+                    carn += g.carnivory;
                     e_in += en.taken / diet.age as f32;
                     e_out += en.spent / diet.age as f32;
                     let net = l.start.distance(t.translation);
@@ -4047,7 +4056,7 @@ pub fn generation_step(
             let avg_qual: f32 = pq.iter().map(|(g, _)| g.quality).sum::<f32>() / plant_n as f32;
             let avg_wet: f32 = pq.iter().map(|(g, _)| g.wet).sum::<f32>() / plant_n as f32;
             info!(
-                "t {:>6} | pop {:>3} | kg {:.3} | path {:.1} net {:.1} straight {:.2} still {:.0}% foodCV {:.2} | E in {:.3} out {:.3} ratio {:.2} | noP-births {} | energy {:.1} [f{:.1}/s{:.1}/F{:.1}] adp {:.2} | mast {:.2} brd {:.1} | life-fit {:.1} | age {:.0} | sens {:.1} | bite {:.2} | rig {:.2} | temp {:.2} lng {:.2} met {:.2} endo {:.2}[c{:.2}/{} t{:.2}/{} w{:.2}/{}] par {:.2} lat {:.2} | swim {:.2} alp {:.2} aq {} hi {} | def {:.2} nut {:.2} qual {:.2} wet {:.2} | plants {} | soil {:.2} | rain {:.2} fire {:.3} | wear {:.3} bare {} | CHEM {} | {}",
+                "t {:>6} | pop {:>3} | kg {:.3} | path {:.1} net {:.1} straight {:.2} still {:.0}% foodCV {:.2} | E in {:.3} out {:.3} ratio {:.2} | noP-births {} atk {} kills {} carn {:.2} | energy {:.1} [f{:.1}/s{:.1}/F{:.1}] adp {:.2} | mast {:.2} brd {:.1} | life-fit {:.1} | age {:.0} | sens {:.1} | bite {:.2} | rig {:.2} | temp {:.2} lng {:.2} met {:.2} endo {:.2}[c{:.2}/{} t{:.2}/{} w{:.2}/{}] par {:.2} lat {:.2} | swim {:.2} alp {:.2} aq {} hi {} | def {:.2} nut {:.2} qual {:.2} wet {:.2} | plants {} | soil {:.2} | rain {:.2} fire {:.3} | wear {:.3} bare {} | CHEM {} | {}",
                 // MEAN BODY MASS in real kg, not the size GENE. The two diverged ~87x unnoticed because only
                 // the gene was ever logged, and every Kleiber/thermoregulation term keys off the kg.
                 gen.tick, pop, cont_fauna_kg / pop.max(1) as f64,
@@ -4060,6 +4069,9 @@ pub fn generation_step(
                 e_out / mature.max(1) as f32,
                 e_in / e_out.max(1e-6),
                 gen.births_blocked.swap(0, std::sync::atomic::Ordering::Relaxed),
+                gen.attacks.swap(0, std::sync::atomic::Ordering::Relaxed),
+                gen.kills.swap(0, std::sync::atomic::Ordering::Relaxed),
+                carn / mature.max(1) as f32,
                 e / n, fa / n, su / n, ft / n, adp / n, mast / n, brd / n, f / n, age / n, sens / n, bite / n, rig / n, temp / n, lng / n, met / n, endo / n,
                 endo_c / nc.max(1) as f32, nc, endo_t / nt.max(1) as f32, nt, endo_w / nw.max(1) as f32, nw,
                 par / n, abslat / n, sw / n, alp / n, aq, hi, avg_def, avg_nut, avg_qual, avg_wet, plant_n, fields.soil.avg(), fields.weather.rain, fields.fire.avg(), fields.wear.avg(), fields.wear.cell.iter().filter(|&&w| w > WEAR_GRASS_CULL).count(),
