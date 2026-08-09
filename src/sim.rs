@@ -1257,7 +1257,7 @@ pub fn restore_full_world(
             g,
             brain,
             diet,
-            Energy { fast: c.energy[0], sugar: c.energy[1], fat: c.energy[2] },
+            Energy { fast: c.energy[0], sugar: c.energy[1], fat: c.energy[2], taken: 0.0, spent: 0.0 },
             Fitness(c.fitness),
             Heading(c.heading),
             Alive(true),
@@ -3928,9 +3928,33 @@ pub fn generation_step(
             // far (ratio -> 1), a forager wanders (high path, low ratio), and a creature spinning on the
             // spot registers almost no path at all. Without this the only evidence about behaviour was
             // watching one creature in the window.
+            // FOOD PATCHINESS as coefficient of variation of plants per grid cell, counting only cells that
+            // can host plants at all so ocean does not fake a high number. CV ~0 means food is spread evenly
+            // and a forager gains nothing by travelling; travel only pays when food is clumped. This is the
+            // measurement that says whether "go somewhere" can ever beat "graze here".
+            let mut cell_counts = vec![0u32; crate::config::SOIL_RES * crate::config::SOIL_RES];
+            for (_, _, tf, ..) in pf.iter() {
+                cell_counts[grid_cell(tf.translation)] += 1;
+            }
+            let live: Vec<f32> = cell_counts
+                .iter()
+                .enumerate()
+                .filter(|(c, _)| crate::sphere::plant_habitability(grid_cell_surface(*c).normalize_or_zero()) > 0.05)
+                .map(|(_, &n)| n as f32)
+                .collect();
+            let food_cv = if live.len() > 1 {
+                let mean = live.iter().sum::<f32>() / live.len() as f32;
+                let var = live.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / live.len() as f32;
+                if mean > 1e-6 { var.sqrt() / mean } else { 0.0 }
+            } else {
+                0.0
+            };
+            let (mut e_in, mut e_out) = (0.0f32, 0.0f32);
             let (mut path_sum, mut net_sum, mut straight_sum, mut moved) = (0.0f32, 0.0f32, 0.0f32, 0u32);
             for (t, en, fit, _h, _a, g, _b, diet, l) in cq.iter() {
                 if diet.age > 200 {
+                    e_in += en.taken / diet.age as f32;
+                    e_out += en.spent / diet.age as f32;
                     let net = l.start.distance(t.translation);
                     path_sum += l.path;
                     net_sum += net;
@@ -3976,7 +4000,7 @@ pub fn generation_step(
             let avg_qual: f32 = pq.iter().map(|(g, _)| g.quality).sum::<f32>() / plant_n as f32;
             let avg_wet: f32 = pq.iter().map(|(g, _)| g.wet).sum::<f32>() / plant_n as f32;
             info!(
-                "t {:>6} | pop {:>3} | kg {:.3} | path {:.1} net {:.1} straight {:.2} still {:.0}% | energy {:.1} [f{:.1}/s{:.1}/F{:.1}] adp {:.2} | mast {:.2} brd {:.1} | life-fit {:.1} | age {:.0} | sens {:.1} | bite {:.2} | rig {:.2} | temp {:.2} lng {:.2} met {:.2} endo {:.2}[c{:.2}/{} t{:.2}/{} w{:.2}/{}] par {:.2} lat {:.2} | swim {:.2} alp {:.2} aq {} hi {} | def {:.2} nut {:.2} qual {:.2} wet {:.2} | plants {} | soil {:.2} | rain {:.2} fire {:.3} | wear {:.3} bare {} | CHEM {} | {}",
+                "t {:>6} | pop {:>3} | kg {:.3} | path {:.1} net {:.1} straight {:.2} still {:.0}% foodCV {:.2} | E in {:.3} out {:.3} ratio {:.2} | energy {:.1} [f{:.1}/s{:.1}/F{:.1}] adp {:.2} | mast {:.2} brd {:.1} | life-fit {:.1} | age {:.0} | sens {:.1} | bite {:.2} | rig {:.2} | temp {:.2} lng {:.2} met {:.2} endo {:.2}[c{:.2}/{} t{:.2}/{} w{:.2}/{}] par {:.2} lat {:.2} | swim {:.2} alp {:.2} aq {} hi {} | def {:.2} nut {:.2} qual {:.2} wet {:.2} | plants {} | soil {:.2} | rain {:.2} fire {:.3} | wear {:.3} bare {} | CHEM {} | {}",
                 // MEAN BODY MASS in real kg, not the size GENE. The two diverged ~87x unnoticed because only
                 // the gene was ever logged, and every Kleiber/thermoregulation term keys off the kg.
                 gen.tick, pop, cont_fauna_kg / pop.max(1) as f64,
@@ -3984,6 +4008,10 @@ pub fn generation_step(
                 net_sum / moved.max(1) as f32,
                 straight_sum / moved.max(1) as f32,
                 100.0 * (1.0 - moved as f32 / pop.max(1) as f32),
+                food_cv,
+                e_in / moved.max(1) as f32,
+                e_out / moved.max(1) as f32,
+                e_in / e_out.max(1e-6),
                 e / n, fa / n, su / n, ft / n, adp / n, mast / n, brd / n, f / n, age / n, sens / n, bite / n, rig / n, temp / n, lng / n, met / n, endo / n,
                 endo_c / nc.max(1) as f32, nc, endo_t / nt.max(1) as f32, nt, endo_w / nw.max(1) as f32, nw,
                 par / n, abslat / n, sw / n, alp / n, aq, hi, avg_def, avg_nut, avg_qual, avg_wet, plant_n, fields.soil.avg(), fields.weather.rain, fields.fire.avg(), fields.wear.avg(), fields.wear.cell.iter().filter(|&&w| w > WEAR_GRASS_CULL).count(),

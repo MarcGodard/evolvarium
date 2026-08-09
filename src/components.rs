@@ -63,6 +63,12 @@ pub struct Energy {
     pub fast: f32,
     pub sugar: f32,
     pub fat: f32,
+    // Per-life running totals, DIAGNOSTIC only: nothing reads them for behaviour. Every cost added to the
+    // model so far pushed population down, which says expenditure outran income, but nothing measured either
+    // side. Logging in/out per creature turns food-level calibration into one measurement instead of one
+    // headless run per guess.
+    pub taken: f32,
+    pub spent: f32,
 }
 
 // Start split of total energy across stores (sums to 1.0). Lean: most sugar (staple), small fast buffer,
@@ -78,12 +84,13 @@ impl Energy {
 
     // Build stores from total budget (spawn/birth/gen-reset).
     pub fn from_total(t: f32) -> Self {
-        Energy { fast: t * SPLIT_FAST, sugar: t * SPLIT_SUGAR, fat: t * SPLIT_FAT }
+        Energy { fast: t * SPLIT_FAST, sugar: t * SPLIT_SUGAR, fat: t * SPLIT_FAT, taken: 0.0, spent: 0.0 }
     }
 
     // Drain `cost` fast->sugar->fat. Returns shortfall (uncovered -> starving).
     pub fn burn(&mut self, cost: f32) -> f32 {
         let mut c = cost.max(0.0);
+        self.spent += c;
         let f = self.fast.min(c);
         self.fast -= f;
         c -= f;
@@ -106,6 +113,7 @@ impl Energy {
         let room = (cap - self.fast).max(0.0);
         let take = amt.min(room);
         self.fast += take;
+        self.taken += take;
         amt - take
     }
 
@@ -114,6 +122,7 @@ impl Energy {
         let room = (cap - self.fat).max(0.0);
         let take = amt.min(room);
         self.fat += take;
+        self.taken += take;
         amt - take
     }
 
@@ -123,6 +132,7 @@ impl Energy {
         let room = (sugar_cap - self.sugar).max(0.0);
         let take = amt.min(room);
         self.sugar += take;
+        self.taken += take; // add_fat below records the overflow share itself
         let over = amt - take;
         if over > 0.0 {
             let wasted_fat = self.add_fat(over * STORE_LOSS, fat_cap);
@@ -206,7 +216,7 @@ mod tests {
 
     #[test]
     fn burn_drains_fast_then_sugar_then_fat() {
-        let mut e = Energy { fast: 2.0, sugar: 3.0, fat: 5.0 };
+        let mut e = Energy { fast: 2.0, sugar: 3.0, fat: 5.0, taken: 0.0, spent: 0.0 };
         // burn 4 -> empties fast(2), takes 2 from sugar
         let short = e.burn(4.0);
         assert_eq!(short, 0.0);
@@ -221,7 +231,7 @@ mod tests {
 
     #[test]
     fn sugar_overflow_converts_to_fat_at_loss() {
-        let mut e = Energy { fast: 0.0, sugar: 0.0, fat: 0.0 };
+        let mut e = Energy { fast: 0.0, sugar: 0.0, fat: 0.0, taken: 0.0, spent: 0.0 };
         // sugar_cap 10, fat_cap 100: add 14 -> 10 sugar, 4 overflow -> 4*STORE_LOSS to fat, no waste
         let wasted = e.add_sugar(14.0, 10.0, 100.0);
         assert!((e.sugar - 10.0).abs() < 1e-6);
@@ -231,7 +241,7 @@ mod tests {
 
     #[test]
     fn full_stores_waste_excess() {
-        let mut e = Energy { fast: 0.0, sugar: 10.0, fat: 2.0 };
+        let mut e = Energy { fast: 0.0, sugar: 10.0, fat: 2.0, taken: 0.0, spent: 0.0 };
         // sugar full (cap 10), fat cap 2 (full) -> all 6 wasted back as intake-equivalent
         let wasted = e.add_sugar(6.0, 10.0, 2.0);
         assert!((wasted - 6.0).abs() < 1e-6);
