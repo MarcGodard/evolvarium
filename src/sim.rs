@@ -2709,15 +2709,23 @@ pub fn predation_step(
             let prey_kin = (kin / SOCIAL_TARGET).min(1.0);
             // success = attacker combat vs prey EFFECTIVE defense (combat + armor + active BRACE), minus required
             // edge PREDATION_BIAS, reduced by herd safety AND prey climb agility (arboreal escape).
-            let eff_def = bdef + BRACE_DEF * b_def_intent;
             // MASS RATIO is the predator/prey axis, log so it is scale-free: twice the prey's mass is the
             // same edge whether the pair weighs grams or tonnes, and the term is symmetric (a mouse attacking
             // an elephant is penalised exactly as the elephant is favoured). This is what real food webs are
             // organised by, and it is the asymmetry the same-population identity above cannot supply.
-            let adv = abite + SIZE_COMBAT * (a_kg / b_kg.max(1e-6)).max(1e-6).ln() - eff_def;
+            let mass_edge = SIZE_COMBAT * (a_kg / b_kg.max(1e-6)).max(1e-6).ln();
+            // Armour is defeated by overwhelming SIZE: a shell stops a fox and not a bear, because plate
+            // resists a bite of comparable force and bite force scales with the biter. Without this, armour
+            // is protection no predator can ever out-evolve, so it becomes the one cheap universal lever and
+            // arms-races to saturation (measured 0.63 -> 0.77 contribution while bite collapsed 0.70 -> 0.15,
+            // offence having nothing left to win on). Diminishing rather than capped, so armour keeps its
+            // full value against equals and simply stops being a defence against something far larger.
+            let armour_eff = bdef / (1.0 + mass_edge.max(0.0));
+            let eff_def = armour_eff + BRACE_DEF * b_def_intent;
+            let adv = abite + mass_edge - eff_def;
             let success = predation_success(adv, prey_kin, bclimb);
             adv_acc += adv;
-            armor_acc += bdef; // ARMOR_DEF * prey armour
+            armor_acc += armour_eff; // armour AS IT LANDED, after the size-defeats-plate discount
             brace_acc += BRACE_DEF * b_def_intent;
             kin_acc += prey_kin;
             climb_acc += bclimb;
