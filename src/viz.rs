@@ -1128,54 +1128,6 @@ pub struct SeaweedMesh(pub Handle<Mesh>);
 #[derive(Resource)]
 pub struct SeaweedMaterial(pub Handle<StandardMaterial>);
 
-// Build one grass tuft as clump of BLADES: each blade tall thin pointed strip tapering to tip, arcing
-// over (curved, not flat sliver), spread over small footprint + fanned around clump. Unit height (1.0) so
-// caller scales real length per soil. Double-sided material renders both faces.
-pub fn grass_tuft_mesh() -> Mesh {
-    const BLADES: usize = 11;
-    let w = 0.022; // blade half-width at base (thin)
-    let mut positions: Vec<[f32; 3]> = Vec::new();
-    let mut normals: Vec<[f32; 3]> = Vec::new();
-    let mut uvs: Vec<[f32; 2]> = Vec::new();
-    let mut indices: Vec<u32> = Vec::new();
-    for k in 0..BLADES {
-        let t = k as f32;
-        let a = t * 2.39996; // golden angle: even blade heading spread around clump
-        let (sa, ca) = a.sin_cos();
-        let r = 0.04 + 0.16 * ((t * 1.7).sin().abs()); // root offset from clump center (footprint)
-        let (ox, oz) = (r * ca, r * sa);
-        let h = 0.7 + 0.45 * ((t * 0.9).cos().abs()); // per-blade height variation
-        let curve = 0.18 * h; // tip arcs over in blade local +z -> bent blade, not flat spike
-        // blade profile local (x width, y up, z bend): base -> mid -> pointed tip
-        let prof = [
-            [-w, 0.0, 0.0],
-            [w, 0.0, 0.0],
-            [-w * 0.55, 0.55 * h, curve * 0.45],
-            [w * 0.55, 0.55 * h, curve * 0.45],
-            [0.0, h, curve], // tip (a point)
-        ];
-        let base = positions.len() as u32;
-        for (vi, p) in prof.iter().enumerate() {
-            // rotate blade about Y by heading `a`, then offset to its clump root
-            let x = p[0] * ca + p[2] * sa + ox;
-            let z = -p[0] * sa + p[2] * ca + oz;
-            positions.push([x, p[1], z]);
-            normals.push([0.0, 1.0, 0.0]); // up-facing -> blades catch overhead sun (bright green)
-            uvs.push([if vi % 2 == 0 { 0.0 } else { 1.0 }, p[1] / h.max(0.001)]);
-        }
-        // two body quads + pointed tip triangle
-        indices.extend_from_slice(&[
-            base, base + 1, base + 3, base, base + 3, base + 2, // lower quad
-            base + 2, base + 3, base + 4, // tip triangle
-        ]);
-    }
-    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
-    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
-    mesh.insert_indices(Indices::U32(indices));
-    mesh
-}
 
 // Clump of BROAD blades/fronds rooted at y=0, arcing to pointed tip (~unit height). One generator reused
 // for fern/reed/kelp/rosette forms (size_plants stretches each differently). Up-facing normals catch

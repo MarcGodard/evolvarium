@@ -33,7 +33,7 @@ fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
 const BLADE_SEGS: usize = 3;
 
 // Grass tuft: `blades` curved tapering blades fanned around a small footprint, unit height (~1.0 max) so
-// the caller scales length per soil (same contract as viz::grass_tuft_mesh).
+// the caller scales length per soil.
 //
 // VERTEX COUNT = blades * 7 (BLADE_SEGS=3). Instanced up to GRASS_CAP (8000), so keep blades <= 16
 // (112 verts). blades=14 is the tuned default look.
