@@ -3060,6 +3060,11 @@ pub fn live_step(
         let power_frac = (energy.power() / MOVE_POWER_REF).clamp(0.0, 1.0);
         let thrust = out[0] * power_frac;
         let turn = out[1];
+        // Total mechanical effort: going forward AND swinging the body round both cost. Turning used to be
+        // free, so "spin in place" was a zero-cost policy that selection had no way to punish. TURN_EFFORT
+        // is the rotational share; well under 1 because pivoting accelerates the body's rotational inertia
+        // rather than hauling its whole mass across ground.
+        let effort2 = thrust * thrust + (TURN_EFFORT * turn) * (TURN_EFFORT * turn);
         // stash combat intents for predation_step (runs later this tick): attack drives hunting, defend/brace
         // raises defense there at the cost of mobility (applied here).
         brain.attack = out[2];
@@ -3104,8 +3109,15 @@ pub fn live_step(
             * (1.0 - 0.5 * metab_f)
             * (1.0 + SPRINT_BOOST * sprint); // sprint: burst speed for chase/flee
 
-        // act: turn, then take a great-circle step along the heading over the planet surface
-        head.0 = wrap_angle(head.0 + turn * TURN_SPEED * dt);
+        // act: turn, then take a great-circle step along the heading over the planet surface.
+        //
+        // Turning is LOCOMOTION and obeys the same limits as going forward. It used to be ungated while
+        // forward motion was multiplied by activity, available power and fatigue, so a torpid or starving
+        // creature could pivot at full rate while unable to travel: the observed failure was an animal
+        // spinning on the spot until it died. A body too cold or too spent to walk cannot whip itself around
+        // either.
+        let turn_authority = activity * power_frac * (1.0 - FATIGUE_DRAG * diet.fatigue);
+        head.0 = wrap_angle(head.0 + turn * TURN_SPEED * turn_authority * dt);
         let (nd, nh) = crate::sphere::step(pos, head.0, move_thrust * speed * dt);
         head.0 = nh; // heading parallel-transported into the new tangent frame
         let h1 = crate::sphere::elevation(nd);
@@ -3117,7 +3129,14 @@ pub fn live_step(
         // brain climbs/descends, then neutral buoyancy relaxes toward cruise -> a neutral brain hovers aloft /
         // mid-water (visible birds + fish); landing to eat = a sustained descend that overcomes buoyancy.
         let cruise = FLIGHT_CRUISE * ceil;
-        loco.alt += rise * climb_rate * dt;
+        // Gaining altitude is work against gravity, same as walking uphill, so it pays the SAME rate. Only
+        // terrain dh was charged, which left the whole sky free: a flier could climb to its ceiling for
+        // nothing and then coast there on the buoyancy relaxation below. Descent refunds like a glide.
+        let d_alt = rise * climb_rate * dt;
+        loco.alt += d_alt;
+        if d_alt > 0.0 {
+            energy.burn(CLIMB_COST * d_alt);
+        }
         loco.alt += (cruise - loco.alt) * FLIGHT_BUOYANCY * dt;
         loco.alt = loco.alt.clamp(0.0, ceil);
         let np = crate::sphere::surface_pos(nd, CREATURE_Y + loco.alt); // ride terrain + vertical offset (sky / water column)
@@ -3214,7 +3233,7 @@ pub fn live_step(
         );
         energy.burn((BASAL_COST * (1.0 - 0.6 * metab_f) // frugal metabolism lowers the cost of living
             + WATT_TO_ENERGY * (basal_w + thermo_w) as f32 // real metabolic + thermoregulatory load
-            + MOVE_COST * (1.0 + SIZE_MOVE * genome.size + ARMOR_MOVE * genome.armor + LIMB_MOVE_COST * genome.limbs) * crate::thermo::locomotion_scale(body_kg) as f32 * thrust * thrust // plates + legs to drive, whole cost on the same M^0.75 allometry as intake
+            + MOVE_COST * (1.0 + SIZE_MOVE * genome.size + ARMOR_MOVE * genome.armor + LIMB_MOVE_COST * genome.limbs) * crate::thermo::locomotion_scale(body_kg) as f32 * effort2 // plates + legs to drive, whole cost on the same M^0.75 allometry as intake
             + BITE_COST * genome.bite
             + ROCK_MOVE_COST * rock * thrust.abs() * (1.0 - ALPINE_RELIEF * genome.alpine) // alpine climbers cross rock cheaply
             + ALPINE_FLAT_COST * genome.alpine * (1.0 - rock) // heavy mountain build wastes energy on flat ground
@@ -3904,7 +3923,22 @@ pub fn generation_step(
             let mut hi = 0u32; // count of highland creatures (alpine > 0.5) -> mountain niche size
             let mut abslat = 0.0; // mean |latitude| of the population (0 equator .. ~1.57 pole) -> spread check
             let mut cont_fauna_kg = 0.0f64; // animal standing stock for the CHEM ledger
-            for (t, en, fit, _h, _a, g, _b, diet, _l) in cq.iter() {
+            // BEHAVIOUR, not genes. path = distance actually walked, net = displacement from birthplace.
+            // Their ratio separates the three cases the gene stats cannot: a migrator travels far and ends
+            // far (ratio -> 1), a forager wanders (high path, low ratio), and a creature spinning on the
+            // spot registers almost no path at all. Without this the only evidence about behaviour was
+            // watching one creature in the window.
+            let (mut path_sum, mut net_sum, mut straight_sum, mut moved) = (0.0f32, 0.0f32, 0.0f32, 0u32);
+            for (t, en, fit, _h, _a, g, _b, diet, l) in cq.iter() {
+                if diet.age > 200 {
+                    let net = l.start.distance(t.translation);
+                    path_sum += l.path;
+                    net_sum += net;
+                    if l.path > 0.5 {
+                        straight_sum += net / l.path;
+                        moved += 1;
+                    }
+                }
                 cont_fauna_kg += crate::chem::creature_mass_kg(
                     g.morph.map(|m| m.mass).unwrap_or_else(|| crate::morph::Morphometrics::of(&g.body).mass),
                 );
@@ -3942,10 +3976,14 @@ pub fn generation_step(
             let avg_qual: f32 = pq.iter().map(|(g, _)| g.quality).sum::<f32>() / plant_n as f32;
             let avg_wet: f32 = pq.iter().map(|(g, _)| g.wet).sum::<f32>() / plant_n as f32;
             info!(
-                "t {:>6} | pop {:>3} | kg {:.3} | energy {:.1} [f{:.1}/s{:.1}/F{:.1}] adp {:.2} | mast {:.2} brd {:.1} | life-fit {:.1} | age {:.0} | sens {:.1} | bite {:.2} | rig {:.2} | temp {:.2} lng {:.2} met {:.2} endo {:.2}[c{:.2}/{} t{:.2}/{} w{:.2}/{}] par {:.2} lat {:.2} | swim {:.2} alp {:.2} aq {} hi {} | def {:.2} nut {:.2} qual {:.2} wet {:.2} | plants {} | soil {:.2} | rain {:.2} fire {:.3} | wear {:.3} bare {} | CHEM {} | {}",
+                "t {:>6} | pop {:>3} | kg {:.3} | path {:.1} net {:.1} straight {:.2} still {:.0}% | energy {:.1} [f{:.1}/s{:.1}/F{:.1}] adp {:.2} | mast {:.2} brd {:.1} | life-fit {:.1} | age {:.0} | sens {:.1} | bite {:.2} | rig {:.2} | temp {:.2} lng {:.2} met {:.2} endo {:.2}[c{:.2}/{} t{:.2}/{} w{:.2}/{}] par {:.2} lat {:.2} | swim {:.2} alp {:.2} aq {} hi {} | def {:.2} nut {:.2} qual {:.2} wet {:.2} | plants {} | soil {:.2} | rain {:.2} fire {:.3} | wear {:.3} bare {} | CHEM {} | {}",
                 // MEAN BODY MASS in real kg, not the size GENE. The two diverged ~87x unnoticed because only
                 // the gene was ever logged, and every Kleiber/thermoregulation term keys off the kg.
                 gen.tick, pop, cont_fauna_kg / pop.max(1) as f64,
+                path_sum / moved.max(1) as f32,
+                net_sum / moved.max(1) as f32,
+                straight_sum / moved.max(1) as f32,
+                100.0 * (1.0 - moved as f32 / pop.max(1) as f32),
                 e / n, fa / n, su / n, ft / n, adp / n, mast / n, brd / n, f / n, age / n, sens / n, bite / n, rig / n, temp / n, lng / n, met / n, endo / n,
                 endo_c / nc.max(1) as f32, nc, endo_t / nt.max(1) as f32, nt, endo_w / nw.max(1) as f32, nw,
                 par / n, abslat / n, sw / n, alp / n, aq, hi, avg_def, avg_nut, avg_qual, avg_wet, plant_n, fields.soil.avg(), fields.weather.rain, fields.fire.avg(), fields.wear.avg(), fields.wear.cell.iter().filter(|&&w| w > WEAR_GRASS_CULL).count(),

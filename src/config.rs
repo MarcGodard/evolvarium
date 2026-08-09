@@ -81,6 +81,7 @@ pub const START_ENERGY: f32 = 30.0;
 pub const BASAL_COST: f32 = 0.5; // energy/sec just to live. Low so fed creature can coast/rest + competent forager is net-positive -> continuous persistence. Bad foragers still starve = selection.
 pub const STARVE_FLOOR: f32 = 1.0; // energy below = STARVING (~3% of START_ENERGY). Pinned below for STARVE_TICKS straight = death (kills grass-trickle zombies clinging at ~0 energy).
 pub const STARVE_TICKS: u16 = 240; // consecutive starving ticks before death (~4s at 60/s): grace for forager bridging meals, lethal for one that never recovers.
+pub const TURN_EFFORT: f32 = 0.35; // rotational share of locomotion effort (see sim effort2). Turning was FREE, which made spin-in-place a costless policy selection could not punish.
 pub const MOVE_COST: f32 = 6.0; // move cost scales thrust^2 (sprinting dear, gentle motion cheap)
 pub const MOVE_SPEED: f32 = 9.0; // units/sec at full thrust
 pub const TURN_SPEED: f32 = 3.0; // rad/sec at full turn
