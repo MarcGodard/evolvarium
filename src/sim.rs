@@ -3741,7 +3741,18 @@ pub fn live_step(
             if crate::sphere::is_ocean(gdir) {
                 let e01 = crate::sphere::elevation01(gdir);
                 let depth = ((crate::sphere::SEA_LEVEL - e01) / crate::sphere::SEA_LEVEL).clamp(0.0, 1.0);
-                let band = 0.5 + 0.5 * depth; // richer the deeper/more-submerged
+                // PHOTIC ZONE. Kelp photosynthesises, so its productivity follows LIGHT, and light dies
+                // with depth. The old form (0.5 + 0.5*depth) made the ABYSS the richest water on the
+                // planet, which is backwards: the real deep ocean is a desert precisely because no light
+                // reaches it, and marine production concentrates on sunlit shelves.
+                //
+                // This was not a cosmetic error. Deep water being both the safest and the most abundant
+                // food made swimming a free lunch: the population went 95% aquatic (swim 0.80, aq 1373 vs
+                // land 15 of ~2000) and over 40 generations predation DECLINED to 4-8 kills per interval,
+                // because nothing can compete with an unlimited safe pasture. Squared falloff approximates
+                // exponential light attenuation without inventing a photic-depth constant.
+                let light_here = 1.0 - depth;
+                let band = light_here * light_here;
                 let gain = SEAWEED_GRAZE * graze_scale * band * herbivory * genome.uptake[SEAWEED_FORAGE_IDX] * dt * crowd_factor;
                 energy.add_sugar(gain, SUGAR_CAP, fat_max);
                 let r = &mut diet.reserves[SEAWEED_FORAGE_IDX]; // kelp forage nutrient, gut-matched like grass above
