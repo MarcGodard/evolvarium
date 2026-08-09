@@ -31,6 +31,16 @@ pub struct GenState {
     /// Attacks COMMITTED since the last log. Paired with `kills` it separates "nobody hunts" from "hunting
     /// fails": carnivory selected down to 0.04 could be either, and the fix differs completely.
     pub attacks: std::sync::atomic::AtomicU32,
+    /// Predation success TERM breakdown, summed over engagements since the last log, fixed-point x1000
+    /// (i64: adv is routinely negative). An equal matchup already scores only sigmoid(-PREDATION_BIAS) ~= 0.10
+    /// and measurement puts real success ~200x below that, so the gap has to be attributed to a named factor
+    /// rather than guessed at: hence adv (combat edge) and the three multipliers logged separately.
+    pub adv_sum: std::sync::atomic::AtomicI64,
+    pub armor_sum: std::sync::atomic::AtomicI64, // armour's share of prey defense
+    pub brace_sum: std::sync::atomic::AtomicI64, // active-brace share
+    pub kin_sum: std::sync::atomic::AtomicI64,   // herd-safety factor
+    pub climb_sum: std::sync::atomic::AtomicI64, // arboreal-evasion factor
+    pub succ_sum: std::sync::atomic::AtomicI64,  // resulting probability
     pub generation: u32,
     pub ticks_left: u32,
     pub headless: bool,
@@ -2595,6 +2605,15 @@ pub fn plant_step(
 
 // predation (M5): creatures attack + eat each other. attack combat = bite + size; defense = attack + armor.
 // NN-driven: brain attack output past ATTACK_INTENT_THRESH commits a hunt.
+/// Predation success probability, extracted pure so the law is testable and each factor is separable.
+/// `adv` = attacker combat - prey EFFECTIVE defense (prey combat + armour + active brace). Note adv is
+/// centered on ZERO, not on a positive edge: predator and prey come from one population, so the mean
+/// matchup is negative by exactly the prey's armour + brace. PREDATION_BIAS then costs another
+/// sigmoid step, which is why an equal, unarmoured, unbraced matchup still only scores ~0.10.
+pub fn predation_success(adv: f32, prey_kin: f32, prey_climb: f32) -> f32 {
+    sigmoid(BITE_K * adv - PREDATION_BIAS) * (1.0 - SOCIAL_SAFETY * prey_kin) * (1.0 - CLIMB_EVADE * prey_climb)
+}
+
 pub fn predation_step(
     gen: Res<GenState>,
     mut rng: ResMut<Rng>,
@@ -2629,10 +2648,13 @@ pub fn predation_step(
     let mut gains: HashMap<Entity, f32> = HashMap::new();
     let mut committed: HashSet<Entity> = HashSet::new(); // attackers that chose to hunt this tick (intent > thresh)
     let mut defended: HashSet<Entity> = HashSet::new(); // prey that braced and repelled an attack
+    let mut def_credit: HashMap<Entity, f32> = HashMap::new(); // per-prey risk averted BY the brace
     // Attackers that actually found something within reach. `committed` is only INTENT, so it counts a
     // creature standing alone in a field with its attack output high; charging energy on that basis taxed a
     // disposition rather than an act. Measured 58k commits per interval against 13-17 kills.
     let mut engaged: HashSet<Entity> = HashSet::new();
+    let (mut adv_acc, mut armor_acc, mut brace_acc) = (0.0f32, 0.0f32, 0.0f32);
+    let (mut kin_acc, mut climb_acc, mut succ_acc) = (0.0f32, 0.0f32, 0.0f32);
     let r2 = ATTACK_RADIUS * ATTACK_RADIUS;
     let rs2 = SOCIAL_RADIUS * SOCIAL_RADIUS;
     for (ai, &(ae, apos, abite, _aenergy, _asig, _, _, _, a_atk_intent, _)) in snap.iter().enumerate() {
@@ -2679,20 +2701,40 @@ pub fn predation_step(
             // success = attacker combat vs prey EFFECTIVE defense (combat + armor + active BRACE), minus required
             // edge PREDATION_BIAS, reduced by herd safety AND prey climb agility (arboreal escape).
             let eff_def = bdef + BRACE_DEF * b_def_intent;
-            let success = sigmoid(BITE_K * (abite - eff_def) - PREDATION_BIAS)
-                * (1.0 - SOCIAL_SAFETY * prey_kin)
-                * (1.0 - CLIMB_EVADE * bclimb);
+            let adv = abite - eff_def;
+            let success = predation_success(adv, prey_kin, bclimb);
+            adv_acc += adv;
+            armor_acc += bdef - _battack; // ARMOR_DEF * prey armour, recovered from the packed defense
+            brace_acc += BRACE_DEF * b_def_intent;
+            kin_acc += prey_kin;
+            climb_acc += bclimb;
+            succ_acc += success;
             if rng.f32() < success {
                 killed.insert(be);
                 gen.kills.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 // venomous prey is a sickening kill -> the predator gains far less (the venom deterrent)
                 *gains.entry(ae).or_insert(0.0) += PREDATION_GAIN * (1.0 - VENOM_DETER * bven);
             } else if b_def_intent > 0.5 {
-                defended.insert(be); // attack repelled while actively bracing -> reward that defense
+                // Reward the RISK ACTUALLY AVERTED, not mere survival. A flat reward for "braced and lived"
+                // paid out on ~99.95% of engagements, because almost every attack fails anyway: expected
+                // signal was +0.8 per engagement for the defender against -0.299 for the attacker, so every
+                // encounter taught never-attack / always-brace regardless of whether the brace did anything.
+                // That runaway, not any constant, is what pinned mean brace at 0.59 and adv at -1.4.
+                let averted = predation_success(adv + BRACE_DEF * b_def_intent, prey_kin, bclimb) - success;
+                defended.insert(be);
+                def_credit.insert(be, averted.max(0.0));
             }
         }
     }
     gen.attacks.fetch_add(engaged.len() as u32, std::sync::atomic::Ordering::Relaxed);
+    let fx = |v: f32| (v * 1000.0) as i64;
+    let rel = std::sync::atomic::Ordering::Relaxed;
+    gen.adv_sum.fetch_add(fx(adv_acc), rel);
+    gen.armor_sum.fetch_add(fx(armor_acc), rel);
+    gen.brace_sum.fetch_add(fx(brace_acc), rel);
+    gen.kin_sum.fetch_add(fx(kin_acc), rel);
+    gen.climb_sum.fetch_add(fx(climb_acc), rel);
+    gen.succ_sum.fetch_add(fx(succ_acc), rel);
     if committed.is_empty() {
         return; // nobody chose to attack -> no kills, no combat rewards to assign
     }
@@ -2709,7 +2751,9 @@ pub fn predation_step(
             brain.fight_reward += R_WASTE; // committed but landed nothing -> discourage pointless aggression
         }
         if defended.contains(&e) {
-            brain.fight_reward += R_DEFEND; // braced + survived an attack -> reinforce the defend output
+            // scaled by risk averted (0 when the prey was never in danger), so bracing is reinforced only
+            // where it changed the outcome
+            brain.fight_reward += R_DEFEND * def_credit.get(&e).copied().unwrap_or(0.0);
         }
         if killed.contains(&e) {
             alive.0 = false;
@@ -4103,8 +4147,15 @@ pub fn generation_step(
             let avg_nut: f32 = pq.iter().map(|(g, _)| g.nutrient).sum::<f32>() / plant_n as f32;
             let avg_qual: f32 = pq.iter().map(|(g, _)| g.quality).sum::<f32>() / plant_n as f32;
             let avg_wet: f32 = pq.iter().map(|(g, _)| g.wet).sum::<f32>() / plant_n as f32;
+            // hunt diagnostics: drain the term sums and divide by engagements (atk), so each factor reads as a
+            // per-engagement mean. atk must be captured BEFORE the info! arg list, which swaps the counter.
+            let rel = std::sync::atomic::Ordering::Relaxed;
+            let atk_n = gen.attacks.swap(0, rel);
+            let hmean = |a: &std::sync::atomic::AtomicI64| a.swap(0, rel) as f32 / 1000.0 / atk_n.max(1) as f32;
+            let (h_adv, h_armor, h_brace) = (hmean(&gen.adv_sum), hmean(&gen.armor_sum), hmean(&gen.brace_sum));
+            let (h_kin, h_climb, h_succ) = (hmean(&gen.kin_sum), hmean(&gen.climb_sum), hmean(&gen.succ_sum));
             info!(
-                "t {:>6} | pop {:>3} | kg {:.3} | path {:.1} net {:.1} straight {:.2} still {:.0}% foodCV {:.2} | E in {:.3} out {:.3} ratio {:.2} | noP-births {} atk {} kills {} carn {:.2} | energy {:.1} [f{:.1}/s{:.1}/F{:.1}] adp {:.2} | mast {:.2} brd {:.1} | life-fit {:.1} | age {:.0} | sens {:.1} | bite {:.2} | rig {:.2} | temp {:.2} lng {:.2} met {:.2} endo {:.2}[c{:.2}/{} t{:.2}/{} w{:.2}/{}] par {:.2} lat {:.2} | swim {:.2} alp {:.2} aq {} hi {} | def {:.2} nut {:.2} qual {:.2} wet {:.2} | plants {} | soil {:.2} | rain {:.2} fire {:.3} | wear {:.3} bare {} | CHEM {} | {}",
+                "t {:>6} | pop {:>3} | kg {:.3} | path {:.1} net {:.1} straight {:.2} still {:.0}% foodCV {:.2} | E in {:.3} out {:.3} ratio {:.2} | noP-births {} atk {} kills {} carn {:.2} | HUNT adv {:.3} [armor {:.3} brace {:.3}] kin {:.2} climb {:.2} p {:.5} | energy {:.1} [f{:.1}/s{:.1}/F{:.1}] adp {:.2} | mast {:.2} brd {:.1} | life-fit {:.1} | age {:.0} | sens {:.1} | bite {:.2} | rig {:.2} | temp {:.2} lng {:.2} met {:.2} endo {:.2}[c{:.2}/{} t{:.2}/{} w{:.2}/{}] par {:.2} lat {:.2} | swim {:.2} alp {:.2} aq {} hi {} | def {:.2} nut {:.2} qual {:.2} wet {:.2} | plants {} | soil {:.2} | rain {:.2} fire {:.3} | wear {:.3} bare {} | CHEM {} | {}",
                 // MEAN BODY MASS in real kg, not the size GENE. The two diverged ~87x unnoticed because only
                 // the gene was ever logged, and every Kleiber/thermoregulation term keys off the kg.
                 gen.tick, pop, cont_fauna_kg / pop.max(1) as f64,
@@ -4117,9 +4168,10 @@ pub fn generation_step(
                 e_out / mature.max(1) as f32,
                 e_in / e_out.max(1e-6),
                 gen.births_blocked.swap(0, std::sync::atomic::Ordering::Relaxed),
-                gen.attacks.swap(0, std::sync::atomic::Ordering::Relaxed),
+                atk_n,
                 gen.kills.swap(0, std::sync::atomic::Ordering::Relaxed),
                 carn / mature.max(1) as f32,
+                h_adv, h_armor, h_brace, h_kin, h_climb, h_succ,
                 e / n, fa / n, su / n, ft / n, adp / n, mast / n, brd / n, f / n, age / n, sens / n, bite / n, rig / n, temp / n, lng / n, met / n, endo / n,
                 endo_c / nc.max(1) as f32, nc, endo_t / nt.max(1) as f32, nt, endo_w / nw.max(1) as f32, nw,
                 par / n, abslat / n, sw / n, alp / n, aq, hi, avg_def, avg_nut, avg_qual, avg_wet, plant_n, fields.soil.avg(), fields.weather.rain, fields.fire.avg(), fields.wear.avg(), fields.wear.cell.iter().filter(|&&w| w > WEAR_GRASS_CULL).count(),
@@ -4331,6 +4383,24 @@ fn wrap_angle(a: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Pins WHY carnivory would not lift off 0.02. The measured world sits near adv=0 because predator and prey
+    // are one population, and an equal matchup is already near-hopeless; only a real size/bite edge pays. If a
+    // future change makes equal matchups winnable, predation becomes cannibalism and this test should fail.
+    #[test]
+    fn predation_needs_a_real_combat_edge_not_a_fair_fight() {
+        let fair = predation_success(0.0, 0.0, 0.0);
+        assert!(fair < 0.12, "equal matchup should be a poor bet, got {fair}");
+
+        // an armoured, braced, herded, arboreal prey is effectively unkillable by an equal
+        let defended = predation_success(-(ARMOR_DEF + BRACE_DEF), 1.0, 1.0);
+        assert!(defended < 1e-3, "stacked defense should shut predation down, got {defended}");
+
+        // a genuine edge (bite + size advantage) has to be worth evolving toward
+        let edge = predation_success(1.0, 0.0, 0.0);
+        assert!(edge > 0.99 * 0.5, "a full combat edge should pay, got {edge}");
+        assert!(edge > fair * 5.0, "edge must dominate a fair fight");
+    }
 
     // representative elevations (signed bathymetry, waterline at 0): peak, hill, dry coast, shallow sea, abyss.
     const LAND_ELEVS: [f32; 3] = [8.0, 2.0, 0.0];

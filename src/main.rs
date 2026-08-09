@@ -211,7 +211,7 @@ fn main() {
     app.init_resource::<sim::Weather>(); // rainfall intensity (storm onset + decay)
     app.init_resource::<sim::TreeBites>(); // per-tick fruit-tree grazing accumulator
     app.init_resource::<sim::SeedBank>(); // dormancy seed bank: buried seeds germinate later (plant_step)
-    app.insert_resource(sim::GenState { births_blocked: Default::default(), kills: Default::default(), attacks: Default::default(),
+    app.insert_resource(sim::GenState { births_blocked: Default::default(), kills: Default::default(), attacks: Default::default(), adv_sum: Default::default(), armor_sum: Default::default(), brace_sum: Default::default(), kin_sum: Default::default(), climb_sum: Default::default(), succ_sum: Default::default(),
         generation: 0,
         ticks_left: sim::GEN_TICKS,
         headless,
@@ -260,7 +260,7 @@ fn main() {
         // warm-up) so cohort can BREED + evolve + test self-sustaining (like plant arm grows toward
         // target). Global reseed floor gated off in scenario mode (live_step). Plant-only stays
         // continuous-off (grazers don't reseed). generation = WARMUP_GENS so live_continuous fires at once.
-        app.insert_resource(sim::GenState { births_blocked: Default::default(), kills: Default::default(), attacks: Default::default(),
+        app.insert_resource(sim::GenState { births_blocked: Default::default(), kills: Default::default(), attacks: Default::default(), adv_sum: Default::default(), armor_sum: Default::default(), brace_sum: Default::default(), kin_sum: Default::default(), climb_sum: Default::default(), succ_sum: Default::default(),
             generation: if has_creatures { sim::WARMUP_GENS } else { 0 },
             ticks_left: sim::GEN_TICKS,
             headless: true,
