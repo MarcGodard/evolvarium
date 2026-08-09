@@ -3993,9 +3993,13 @@ pub fn generation_step(
                 0.0
             };
             let (mut e_in, mut e_out) = (0.0f32, 0.0f32);
-            let (mut path_sum, mut net_sum, mut straight_sum, mut moved) = (0.0f32, 0.0f32, 0.0f32, 0u32);
+            // `mature` is the denominator for every behaviour figure below. Dividing by total pop instead
+            // scored every creature younger than the age gate as motionless, so still% tracked the BIRTH RATE
+            // rather than stillness and rose whenever the population grew.
+            let (mut path_sum, mut net_sum, mut straight_sum, mut moved, mut mature) = (0.0f32, 0.0f32, 0.0f32, 0u32, 0u32);
             for (t, en, fit, _h, _a, g, _b, diet, l) in cq.iter() {
                 if diet.age > 200 {
+                    mature += 1;
                     e_in += en.taken / diet.age as f32;
                     e_out += en.spent / diet.age as f32;
                     let net = l.start.distance(t.translation);
@@ -4050,10 +4054,10 @@ pub fn generation_step(
                 path_sum / moved.max(1) as f32,
                 net_sum / moved.max(1) as f32,
                 straight_sum / moved.max(1) as f32,
-                100.0 * (1.0 - moved as f32 / pop.max(1) as f32),
+                100.0 * (1.0 - moved as f32 / mature.max(1) as f32),
                 food_cv,
-                e_in / moved.max(1) as f32,
-                e_out / moved.max(1) as f32,
+                e_in / mature.max(1) as f32,
+                e_out / mature.max(1) as f32,
                 e_in / e_out.max(1e-6),
                 gen.births_blocked.swap(0, std::sync::atomic::Ordering::Relaxed),
                 e / n, fa / n, su / n, ft / n, adp / n, mast / n, brd / n, f / n, age / n, sens / n, bite / n, rig / n, temp / n, lng / n, met / n, endo / n,
