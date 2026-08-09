@@ -367,11 +367,17 @@ free while walking uphill was charged.
       as motionless. The 15% -> 31% rise I read as creatures getting stuck was the opposite: more births.
       Denominator is now the mature count, applied to still%, energy income and expenditure alike. Lesson:
       when a metric moves in a surprising direction, suspect the metric before building a story on it.
-- [ ] **Population growth is SLOW on hard seeds and run length changes the conclusion.** Seed 5 reads 48 at
-      gen 16 and ~336 by gen 21, so a 16-gen run and a 22-gen run tell different stories about the same
-      build. Long runs are also being killed part way (not memory; ~14 GB free), so several results this
-      phase rest on partial logs. Prefer gens>=20 for any population claim, and check for the
-      "headless run done" line before trusting a number.
+- [x] **Both seeds now bootstrap** after the leak fix + primed pool (complete runs, tick 105600):
+      seed 1 = 2112, seed 5 = 336. Previously seed 5 flatlined at 42 with its plants ungrazed, so the
+      bistable trap is gone; what remains is a ~6x spread between an easy and a hard world, which is a
+      difference of degree rather than one world being dead.
+- [x] **No mature creature is motionless**: with the denominator fixed, `still` reads 0%. The whole 31%
+      figure was the arithmetic bug.
+- [ ] **Run length changes the conclusion, so use gens>=20 for population claims.** Seed 1 reads 210 at
+      gen 16 and 2112 at gen 22; seed 5 reads 48 and 336. Populations are still climbing steeply at gen 16.
+      COMPLETION CHECK: continuous mode ends with "continuous headless done at tick N (pop M)", NOT the
+      generational "headless run done" line. Grepping for the wrong one made several complete runs look
+      truncated and had me hedging results that were sound.
 - [ ] Energy ratio sits at 0.92 and `noP-births` still fires 36-65 per interval. At ~2000 creatures both are
       small relative rates consistent with a healthy density-dependent equilibrium, but neither has been
       checked on a second seed.
