@@ -3708,11 +3708,14 @@ pub fn live_step(
         if out[4] > EAT_GATE && energy.total() < GRAZE_FULL {
             let gdir = np.normalize_or_zero();
             let herbivory = herbivory_of(genome.carnivory); // concave: an omnivore keeps most of the carpet
+            // Kleiber on the STAPLE: a bigger mouth and gut crop more forage per second (M^0.75), the same
+            // law already applied to eating food items. Without it, size cost metabolism and bought nothing.
+            let graze_scale = crate::thermo::intake_scale(body_kg) as f32;
             // crowding penalty: shared trickle thins where grazers pack in (density-dependent carrying cap).
             let crowd_factor = 1.0 / (1.0 + (crowd[grid_cell(np)] - 1.0).max(0.0) / GRAZE_CROWD_K);
             let hab = crate::sphere::plant_habitability(gdir);
             if !crate::sphere::is_ocean(gdir) && hab > GRASS_HAB_MIN {
-                let gain = GRASS_GRAZE * hab * herbivory * genome.uptake[GRASS_FORAGE_IDX] * dt * crowd_factor; // grass: grazer staple where it's grassy
+                let gain = GRASS_GRAZE * graze_scale * hab * herbivory * genome.uptake[GRASS_FORAGE_IDX] * dt * crowd_factor; // grass: grazer staple where it's grassy
                 energy.add_sugar(gain, SUGAR_CAP, fat_max);
                 // refill grass FORAGE nutrient x gut tuning: grazer with uptake on grass axis stays fed; mismatched
                 // gut gets energy but still starves of deficiency (no free lunch).
@@ -3728,7 +3731,7 @@ pub fn live_step(
                 let e01 = crate::sphere::elevation01(gdir);
                 let depth = ((crate::sphere::SEA_LEVEL - e01) / crate::sphere::SEA_LEVEL).clamp(0.0, 1.0);
                 let band = 0.5 + 0.5 * depth; // richer the deeper/more-submerged
-                let gain = SEAWEED_GRAZE * band * herbivory * genome.uptake[SEAWEED_FORAGE_IDX] * dt * crowd_factor;
+                let gain = SEAWEED_GRAZE * graze_scale * band * herbivory * genome.uptake[SEAWEED_FORAGE_IDX] * dt * crowd_factor;
                 energy.add_sugar(gain, SUGAR_CAP, fat_max);
                 let r = &mut diet.reserves[SEAWEED_FORAGE_IDX]; // kelp forage nutrient, gut-matched like grass above
                 *r = (*r + GRAZE_NUTRIENT * genome.uptake[SEAWEED_FORAGE_IDX] * herbivory * band * dt).min(RESERVE_CAP);
