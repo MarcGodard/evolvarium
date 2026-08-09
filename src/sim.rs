@@ -2593,7 +2593,7 @@ pub fn plant_step(
     tree_bites.0.clear(); // consumed this tick
 }
 
-// predation (M5): creatures attack + eat each other. attack combat = bite + size; defense = attack + armor.
+// predation (M5): creatures attack + eat each other. attack = bite + size; defense = size + armor (bite is a weapon, it does not defend).
 // NN-driven: brain attack output past ATTACK_INTENT_THRESH commits a hunt.
 pub fn predation_step(
     gen: Res<GenState>,
@@ -2611,8 +2611,17 @@ pub fn predation_step(
         .iter()
         .filter(|(_, _, _, _, a, _, _)| a.0)
         .map(|(e, t, en, _, _, g, b)| {
+            // Bite is a WEAPON, not armour. It used to count toward defence as well as attack, so defence was
+            // strictly attack + armour and therefore always exceeded attack by the armour term: measured
+            // attackers averaged 0.61 combat units BELOW prey defence, giving a 0.08% kill rate against the
+            // ~10% PREDATION_BIAS was tuned for. Worse, investing in teeth paid identically on offence and
+            // defence, so no predator/prey axis could exist and carnivory sat at 0.04.
+            //
+            // Defence is now bulk plus armour. Size still counts for both, which is right: a big animal is
+            // both harder to kill and better at killing.
             let attack = g.bite + SIZE_COMBAT * g.size;
-            (e, t.translation, attack, en.total(), signature(g), attack + ARMOR_DEF * g.armor, g.venom, g.climb, b.attack, b.defend)
+            let defense = SIZE_COMBAT * g.size + ARMOR_DEF * g.armor;
+            (e, t.translation, attack, en.total(), signature(g), defense, g.venom, g.climb, b.attack, b.defend)
         })
         .collect();
     if snap.len() < 2 {
@@ -2622,6 +2631,10 @@ pub fn predation_step(
     let mut gains: HashMap<Entity, f32> = HashMap::new();
     let mut committed: HashSet<Entity> = HashSet::new(); // attackers that chose to hunt this tick (intent > thresh)
     let mut defended: HashSet<Entity> = HashSet::new(); // prey that braced and repelled an attack
+    // Attackers that actually found something within reach. `committed` is only INTENT, so it counts a
+    // creature standing alone in a field with its attack output high; charging energy on that basis taxed a
+    // disposition rather than an act. Measured 58k commits per interval against 13-17 kills.
+    let mut engaged: HashSet<Entity> = HashSet::new();
     let r2 = ATTACK_RADIUS * ATTACK_RADIUS;
     let rs2 = SOCIAL_RADIUS * SOCIAL_RADIUS;
     for (ai, &(ae, apos, abite, _aenergy, _asig, _, _, _, a_atk_intent, _)) in snap.iter().enumerate() {
@@ -2645,6 +2658,7 @@ pub fn predation_step(
             }
         }
         if let Some((_, bi)) = best {
+            engaged.insert(ae); // a real lunge: something was in reach
             let (be, bpos, _battack, _, bsig, bdef, bven, bclimb, _, b_def_intent) = snap[bi];
             // herd safety: prey surrounded by KIN is harder to pick off (vigilance) -> being social pays
             let mut kin = 0.0f32;
@@ -2670,12 +2684,15 @@ pub fn predation_step(
             }
         }
     }
-    gen.attacks.fetch_add(committed.len() as u32, std::sync::atomic::Ordering::Relaxed);
+    gen.attacks.fetch_add(engaged.len() as u32, std::sync::atomic::Ordering::Relaxed);
     if committed.is_empty() {
         return; // nobody chose to attack -> no kills, no combat rewards to assign
     }
     let continuous_live = gen.continuous && gen.generation >= WARMUP_GENS;
     for (e, t, mut energy, mut fit, mut alive, gen_e, mut brain) in &mut cq {
+        if engaged.contains(&e) {
+            energy.burn(ATTACK_COST * brain.attack * DT); // paid for the lunge itself, land or miss
+        }
         if let Some(g) = gains.get(&e) {
             energy.add_fat(*g, fat_cap_of(gen_e)); // a kill = meat -> fat store
             fit.0 += g * 0.3; // predation counts toward selection
@@ -3297,7 +3314,9 @@ pub fn live_step(
             + WATER_PRESSURE_COST * (1.0 - genome.swim) * (-h1 / crate::sphere::SEA_FLOOR_MAX).clamp(0.0, 1.0) // non-swimmers struggle in deep water (depth pressure)
             + FAT_UPKEEP * genome.adiposity * fat_frac // carrying fat costs upkeep (no free lunch)
             + SPRINT_COST * sprint // burst effort burns extra fuel
-            + ATTACK_COST * brain.attack // committing to an attack costs energy whether or not it lands (the stabilizer replacing the hunger gate)
+            // ATTACK_COST moved to predation_step: it is charged for a real lunge at a target in reach, not
+            // for ambient intent. Charging it here taxed every creature that merely HELD attack intent, with
+            // or without prey anywhere near, which is most of them most of the time.
             + HEAR_UPKEEP * genome.hearing // ears + auditory processing run all the time (no free hearing)
             + VOICE_COST * brain.voice // calling this tick burns fuel (out[7]) -> selection gates vocalizing
             + STRESS_COST * diet.fatigue)
