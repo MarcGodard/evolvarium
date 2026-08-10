@@ -3726,7 +3726,7 @@ pub fn live_step(
             let crowd_factor = 1.0 / (1.0 + (crowd[grid_cell(np)] - 1.0).max(0.0) / GRAZE_CROWD_K);
             let hab = crate::sphere::plant_habitability(gdir);
             if !crate::sphere::is_ocean(gdir) && hab > GRASS_HAB_MIN {
-                let gain = GRASS_GRAZE * graze_scale * hab * herbivory * genome.uptake[GRASS_FORAGE_IDX] * dt * crowd_factor; // grass: grazer staple where it's grassy
+                let gain = CARPET_GRAZE * graze_scale * hab * herbivory * genome.uptake[GRASS_FORAGE_IDX] * dt * crowd_factor; // grass: grazer staple where it's grassy
                 energy.add_sugar(gain, SUGAR_CAP, fat_max);
                 // refill grass FORAGE nutrient x gut tuning: grazer with uptake on grass axis stays fed; mismatched
                 // gut gets energy but still starves of deficiency (no free lunch).
@@ -3753,7 +3753,7 @@ pub fn live_step(
                 // exponential light attenuation without inventing a photic-depth constant.
                 let light_here = 1.0 - depth;
                 let band = light_here * light_here;
-                let gain = SEAWEED_GRAZE * graze_scale * band * herbivory * genome.uptake[SEAWEED_FORAGE_IDX] * dt * crowd_factor;
+                let gain = CARPET_GRAZE * graze_scale * band * herbivory * genome.uptake[SEAWEED_FORAGE_IDX] * dt * crowd_factor;
                 energy.add_sugar(gain, SUGAR_CAP, fat_max);
                 let r = &mut diet.reserves[SEAWEED_FORAGE_IDX]; // kelp forage nutrient, gut-matched like grass above
                 *r = (*r + GRAZE_NUTRIENT * genome.uptake[SEAWEED_FORAGE_IDX] * herbivory * band * dt).min(RESERVE_CAP);

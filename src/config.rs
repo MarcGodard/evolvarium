@@ -234,7 +234,12 @@ pub const PLANT_MIN_MASS: f32 = 0.15; // below this a grazed plant fully consume
 pub const GRASS_CAP: usize = 8000; // target tuft count for whole-planet cover (render only; size set at attach)
 pub const GRASS_START_MASS: f32 = 0.4;
 pub const GRASS_HAB_MIN: f32 = 0.25; // min plant_habitability to seed/keep grass = "soil capable of plants"
-// Energy/sec a REFERENCE-MASS (3.75 kg, see chem::creature_mass_kg) hungry grazer crops from grassy soil,
+// Energy/sec a REFERENCE-MASS (3.75 kg, see chem::creature_mass_kg) hungry grazer crops from the
+// PHOTOSYNTHETIC CARPET: grass on land, kelp inside the photic zone. ONE constant for both, because both
+// are the same trick under the same sun and there is no physical reason a square metre of kelp should
+// out-produce a square metre of grassland. SEAWEED_GRAZE was a separate value 2.16x this one, a historical
+// tuning from when aquatic grazers were net-marginal, and it long outlived its reason: combined with light
+// increasing with depth it made the sea a free lunch and drove the biosphere 95% aquatic.
 // x habitability x herbivory x thermo::intake_scale. Grazing carried NO mass term at all, so a mouse and an
 // elephant cropped identically while Kleiber basal and locomotion both scaled with mass: large bodies were
 // penalised by construction on the STAPLE food, which is why mass fell run after run and the population
@@ -243,13 +248,12 @@ pub const GRASS_HAB_MIN: f32 = 0.25; // min plant_habitability to seed/keep gras
 // 12 -> 197 recalibrates the LEVEL for the new per-reference-mass meaning: intake_scale(0.09 kg) = 0.061,
 // so an unchanged 12 would have cut the staple to 6% and starved the world. Shape is physics, level is
 // calibration; this changes only the level.
-pub const GRASS_GRAZE: f32 = 197.0;
+pub const CARPET_GRAZE: f32 = 197.0;
 
 // --- seaweed/kelp: OCEAN analog of grass. Own cap + lifecycle (seaweed_step); blankets submerged band
 // (above abyssal floor) -> reliable food carpet for swimmers (position-based ocean graze). ---
 pub const SEAWEED_CAP: usize = 3500; // target frond count across submerged band (ocean ~half the planet)
 pub const SEAWEED_START_MASS: f32 = 0.5;
-pub const SEAWEED_GRAZE: f32 = 426.0; // per REFERENCE MASS like GRASS_GRAZE; 26 -> 426 is the same recalibration // energy/sec HUNGRY SUBMERGED grazer nibbles from kelp band (x depth x herbivory). Raised 20->26 (balance harness): aquatic grazers were net-marginal -> couldn't sustain. Richer kelp feeding lets fish breed past floor.
 // Grazing FORAGE nutrient: grass + seaweed each carry ONE fixed nutrient axis, so grazer can TUNE gut
 // (uptake at that index) to live off carpet alone: specialty, not free lunch. Graze refills that reserve
 // x creature's uptake-match, so mismatched gut starves of deficiency even while energy is fine.
