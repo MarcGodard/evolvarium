@@ -165,6 +165,12 @@ design work:
 
 ## Conventions
 
+- **Everything is a trade-off, no free lunch.** Every gene, ability, or behavior needs an explicit cost on another
+  axis, that is what creates selection pressure, niches, and diversity. A purely-good trait just maxes out and
+  collapses variety (plant defense pegged at ~0.9 when its cost was too weak). Already in: bigger `bite` costs
+  upkeep, `defense`/`nutrient` slow growth, generalist diet has overhead, speed costs energy convexly. Before
+  shipping a mechanic, name its cost side; if it has none, add one. Same principle as the one-knob-opposite-signs
+  rule in spec doc 10.
 - Comments are written for an AI agent, never a human (this code is AI-built only). Caveman-lite: drop
   articles/filler/hedging, fragments OK. Keep only NON-obvious info an AI can't recover by reading the code:
   why a constant has its value, balance trade-offs, units/ranges (0..1, radians, ticks), cross-file coupling,
