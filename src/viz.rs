@@ -7,7 +7,7 @@ use bevy::prelude::*;
 use crate::components::{Alive, Creature, DietState, Energy, Fitness, Food, Grass, Heading, Locomotion, Rot, Seaweed, Seed, Tree};
 use crate::genome::{master_expression, Genome, NUTRIENTS};
 use crate::plant::{flower_color, form, plant_color, PlantGenome, PlantState};
-use crate::sim::{grid_cell_surface, Fire, GenState, GroundWater, EYE_MIN, EYE_SPAN, ROT_GONE};
+use crate::sim::{grid_cell_surface, Fire, GenState, GroundWater, ROT_GONE};
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
@@ -67,7 +67,7 @@ pub struct Ocean;
 
 // Atmosphere rim shell (additive blue limb halo). Orbit-view only; gated by atmosphere_visibility.
 #[derive(Component)]
-pub struct Atmosphere;
+pub struct Atmosphere(pub f32); // layer intensity weight (nested shells fake the limb's exponential falloff)
 
 
 // Planet globe entity. Casts shadow in BOTH camera modes (camera::update_planet_caster) -> planet
@@ -98,9 +98,10 @@ pub struct SkyPlanet {
 }
 // Auroral magnetic latitude (radians, ~66 deg): curtains sit at this |mag latitude|. Shared spawn + anim.
 pub const AURORA_LAT: f32 = 1.15;
-// Aurora base altitude above surface (world units; PLANET_R=80). Curtains rise CURTAIN_H tall from here
-// -> tops reach high like real aurora (~100..300 km).
-pub const AURORA_LIFT: f32 = 4.0;
+// Aurora base altitude above SEA level (world units; PLANET_R=80). Real aurora starts ~100 km up, far above
+// cloud tops; at +4 the curtains stood at hill height, BELOW the cloud deck (cloud_alt = +ELEV_MAX), so a
+// walker near the oval stood inside a glowing green column. Base now clears the cloud deck.
+pub const AURORA_LIFT: f32 = crate::sphere::ELEV_MAX + 4.0;
 // One dancing curtain segment of auroral oval. Many per pole, each own random phase/drift/hue -> band
 // ripples + glides + flickers, not one uniform ring. Animated by update_aurora_curtains.
 #[derive(Component)]
@@ -142,7 +143,7 @@ impl Plugin for VizPlugin {
                     (add_plant_visuals, size_plants, add_grass_visuals, add_seaweed_visuals, size_creatures, flap_wings),
                     (day_night_lighting, update_sun_glow, time_of_day, walk_day_drift, toggle_shadows, walk_ambient, update_daycycle, track_underwater, update_sky, toggle_underwater_tint, animate_ocean, update_globe_climate, update_sky_dome, update_aurora_curtains, rotate_sky_stars, position_sky_planets, fade_sky_stars, ocean_opacity),
                     (rain_visuals, lightning_visuals),
-                    (fire_visuals, fire_sheet_visuals, smoke_visuals),
+                    (fire_visuals, fire_sheet_visuals, smoke_visuals, orbit_flora_lod),
                     meteor_visuals,
                     update_clouds,
                     (track_tree_positions, spawn_logs_on_tree_death, age_logs),
@@ -174,7 +175,7 @@ const MM_RES: usize = 64; // globe lat bands (small: minimap is tiny)
 const MM_SIZE: f32 = 200.0; // viewport square, logical px
 const MM_MARGIN: f32 = 10.0;
 const MM_DIST: f32 = 215.0; // minimap cam distance from globe center (PLANET_R=80 -> whole globe framed)
-const MM_DENSITY_FULL: f32 = 5.0; // creatures-per-cell that reads as full "life" brightness
+const MM_DENSITY_FULL: f32 = 5.0; // creatures per LEGACY (~78 m^2) cell that reads as full "life" brightness
 const MM_SOIL_MAX: f32 = 2.5; // soil overlay normalizer (> FERT_CAP so death-spike fertility shows above baseline)
 
 #[derive(Resource)]
@@ -432,34 +433,39 @@ fn update_atmosphere(
     mode: Res<crate::camera::CameraMode>,
     gen: Res<GenState>,
     offset: Res<SunOffset>,
-    atmo: Query<&Mesh3d, With<Atmosphere>>,
+    atmo: Query<(&Mesh3d, &Atmosphere)>,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
     if *mode != crate::camera::CameraMode::Orbit {
         return;
     }
-    let Ok(m3) = atmo.single() else { return };
-    let Some(mut mesh) = meshes.get_mut(&m3.0) else { return };
-    let pos: Vec<[f32; 3]> = match mesh.attribute(Mesh::ATTRIBUTE_POSITION) {
-        Some(bevy::mesh::VertexAttributeValues::Float32x3(p)) => p.clone(),
-        _ => return,
-    };
     let vtick = (gen.tick as i64 + offset.0).max(0) as u32;
     let sun = crate::sphere::sun_dir(vtick);
     let day_blue = Vec3::new(0.35, 0.55, 1.0);
     let twilight = Vec3::new(0.9, 0.5, 0.55); // warm terminator sliver
-    let cols: Vec<[f32; 4]> = pos
-        .iter()
-        .map(|p| {
-            let lit = Vec3::from_array(*p).normalize_or_zero().dot(sun); // -1 night .. 1 sub-solar
-            let t = ((lit + 0.22) / 0.44).clamp(0.0, 1.0);
-            let day = t * t * (3.0 - 2.0 * t); // smoothstep across the terminator
-            let warm = (1.0 - (lit.abs() / 0.18)).clamp(0.0, 1.0); // bump at lit~0
-            let c = day_blue.lerp(twilight, warm * 0.6) * (0.1 + 0.95 * day); // airglow floor .. day bright
-            [c.x, c.y, c.z, 1.0]
-        })
-        .collect();
-    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, cols);
+    // every shell is the same ico(5) sphere scaled, so vertex i has the same DIRECTION on all of them: the
+    // sun-lit colour is computed once and only the layer weight differs per shell
+    let mut base: Option<Vec<Vec3>> = None;
+    for (m3, layer) in &atmo {
+        let Some(mut mesh) = meshes.get_mut(&m3.0) else { continue };
+        if base.is_none() {
+            let Some(bevy::mesh::VertexAttributeValues::Float32x3(p)) = mesh.attribute(Mesh::ATTRIBUTE_POSITION) else { continue };
+            base = Some(
+                p.iter()
+                    .map(|p| {
+                        let lit = Vec3::from_array(*p).normalize_or_zero().dot(sun); // -1 night .. 1 sub-solar
+                        let t = ((lit + 0.22) / 0.44).clamp(0.0, 1.0);
+                        let day = t * t * (3.0 - 2.0 * t); // smoothstep across the terminator
+                        let warm = (1.0 - (lit.abs() / 0.18)).clamp(0.0, 1.0); // bump at lit~0
+                        day_blue.lerp(twilight, warm * 0.6) * (0.1 + 0.95 * day) // airglow floor .. day bright
+                    })
+                    .collect(),
+            );
+        }
+        let w = layer.0;
+        let cols: Vec<[f32; 4]> = base.as_ref().unwrap().iter().map(|c| [c.x * w, c.y * w, c.z * w, 1.0]).collect();
+        mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, cols);
+    }
 }
 
 fn minimap_input(keys: Res<ButtonInput<KeyCode>>, mut mm: ResMut<Minimap>) {
@@ -488,7 +494,7 @@ fn minimap_rebuild(mut mm: ResMut<Minimap>, mut meshes: ResMut<Assets<Mesh>>, mu
 }
 
 // Live overlays: when a DYNAMIC field is active, rebuild the globe each frame from sim resources. Builds a
-// normalized 0..1 per-cell value grid (SOIL_RES^2), then recolors the globe by sampling it per vertex dir.
+// normalized 0..1 per-cell value grid (grid::field()), then recolors the globe by sampling it per vertex dir.
 fn minimap_dynamic(
     mm: Res<Minimap>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -502,7 +508,7 @@ fn minimap_dynamic(
     if field < MM_STATIC {
         return;
     }
-    let n = crate::config::SOIL_RES * crate::config::SOIL_RES;
+    let n = crate::grid::field().len();
     let vals: Vec<f32> = match field {
         4 => soil.cell.iter().map(|&f| (f / MM_SOIL_MAX).clamp(0.0, 1.0)).collect(), // fertility 0..MM_SOIL_MAX (past FERT_CAP so death spikes show)
         5 => gw.cell.iter().map(|&w| w.clamp(0.0, 1.0)).collect(),                                // groundwater already 0..1
@@ -513,7 +519,7 @@ fn minimap_dynamic(
             for t in creatures.iter() {
                 d[crate::sim::grid_cell(t.translation)] += 1.0;
             }
-            d.iter().map(|&c| (c / MM_DENSITY_FULL).min(1.0)).collect()
+            d.iter().enumerate().map(|(i, &c)| (c * crate::grid::legacy_area_ratio(i) / MM_DENSITY_FULL).min(1.0)).collect()
         }
     };
     if let Some(mut m) = meshes.get_mut(&mm.mesh) {
@@ -681,27 +687,40 @@ const MAX_BODY_BUILDS_PER_FRAME: usize = 6;
 
 // Spawn the emissive eye spheres as children of `parent`, anchored to the head surface (morph::eye_anchor),
 // NOT the whole-body bbox -> no floating ahead of a tapering body.
+// One eye per SENSOR gene, so what you see is what the genome senses with: each eye sits on the head
+// sphere at its sensor's genetic angle (0 forward; + = the creature's RIGHT, same clockwise convention as the
+// sim's bearing test) and is sized by that sensor's range (far-sighted = big eye). Forward-pointing sensors
+// give binocular hunter faces, wide angles give side-eyed grazers, a rear sensor puts an eye at the back of
+// the head. The `eyes` gene (photoreceptor investment, a detection bonus in sim) scales every eye a little.
 fn spawn_eyes(commands: &mut Commands, parent: Entity, g: &Genome, eye_mesh: &Handle<Mesh>, materials: &mut Assets<StandardMaterial>) {
     let pheno = crate::morph::develop(&g.body);
     let m = crate::morph::Morphometrics::from_phenotype(&pheno);
     let center_y = (m.bbox_min.y + m.bbox_max.y) * 0.5; // mesh shifts verts down by this
     let a = crate::morph::eye_anchor(&pheno);
-    let n_eyes = (EYE_MIN + EYE_SPAN * g.eyes).round().clamp(1.0, 6.0) as usize;
-    let eye_d = a.radius * (0.45 + 0.25 * g.head); // sized to head; sphere mesh radius 0.5 -> scale*0.5 = world r
     let eye_mat = materials.add(StandardMaterial {
         base_color: Color::srgb(0.97, 0.98, 1.0),
-        emissive: LinearRgba::rgb(0.5, 0.52, 0.6), // glow -> eyes read at distance
+        emissive: LinearRgba::rgb(0.18, 0.18, 0.2), // faint glow keeps eyes readable at dusk
+        perceptual_roughness: 0.15, // wet glint
         ..default()
     });
-    for k in 0..n_eyes {
-        let frac = if n_eyes <= 1 { 0.0 } else { (k as f32 / (n_eyes - 1) as f32) * 2.0 - 1.0 };
-        let row = if k >= 3 { 1.0 } else { 0.0 };
-        let ex = frac * a.half_w * 0.6;
-        let ey = (a.center.y - center_y) + a.radius * 0.35 - row * eye_d * 0.5;
-        let ez = a.center.z + a.radius * 0.85 + eye_d * 0.3; // proud of the head's front face
+    let pupil_mat = materials.add(StandardMaterial { base_color: Color::srgb(0.04, 0.03, 0.03), perceptual_roughness: 0.1, ..default() });
+    let head = Vec3::new(a.center.x, a.center.y - center_y, a.center.z);
+    for s in &g.sensors {
+        let range01 = ((s.range - 4.0) / 44.0).clamp(0.0, 1.0); // genome RANGE_MIN..RANGE_MAX
+        let eye_d = a.radius * (0.18 + 0.22 * range01) * (0.85 + 0.3 * g.eyes);
+        // outward direction on the head: yaw by the sensor angle (right = -X when facing +Z, +Y up), raised a
+        // little so eyes sit on the upper face rather than the jaw line
+        let out = Vec3::new(-s.angle.sin(), 0.35, s.angle.cos()).normalize();
+        let pos = head + out * (a.radius * 0.92);
+        let rot = Quat::from_rotation_arc(Vec3::Z, out); // pupil (+Z) looks along the sensor's axis
         let eye = commands
-            .spawn((Mesh3d(eye_mesh.clone()), MeshMaterial3d(eye_mat.clone()), Transform { translation: Vec3::new(ex, ey, ez), scale: Vec3::splat(eye_d), ..default() }))
+            .spawn((Mesh3d(eye_mesh.clone()), MeshMaterial3d(eye_mat.clone()), Transform { translation: pos, rotation: rot, scale: Vec3::splat(eye_d) }))
             .id();
+        // pupil: dark sphere set into the front of the eye (child, so it inherits the eye's scale + facing)
+        let pupil = commands
+            .spawn((Mesh3d(eye_mesh.clone()), MeshMaterial3d(pupil_mat.clone()), Transform { translation: Vec3::new(0.0, 0.0, 0.3), scale: Vec3::splat(0.5), ..default() }))
+            .id();
+        commands.entity(eye).add_child(pupil);
         commands.entity(parent).add_child(eye);
     }
 }
@@ -1717,10 +1736,19 @@ fn walk_ambient(
     mode: Res<crate::camera::CameraMode>,
     gen: Res<GenState>,
     offset: Res<SunOffset>,
+    time: Res<Time>,
     walkers: Query<&crate::camera::WalkCam>,
-    mut ambient: Query<&mut AmbientLight>,
+    mut cams: Query<(&mut AmbientLight, &mut bevy::camera::Exposure)>,
+    mut adapted: Local<Option<f32>>,
 ) {
+    let sun_ev = bevy::camera::Exposure::SUNLIGHT.ev100;
     if *mode != crate::camera::CameraMode::Walk {
+        // orbit/orrery: fixed daylight exposure so the night side reads as night from space
+        for (mut a, mut ex) in &mut cams {
+            ex.ev100 = sun_ev;
+            a.color = Color::WHITE; // the walk night tint must not follow the camera into orbit
+        }
+        *adapted = None;
         return;
     }
     let Ok(w) = walkers.single() else { return };
@@ -1733,8 +1761,50 @@ fn walk_ambient(
     const SKY_FILL_FRAC: f32 = 0.13;
     const NIGHT_FILL: f32 = 45.0; // moonlit floor: never fully black, or a night walk is unplayable
     let b = NIGHT_FILL + SKY_FILL_FRAC * SUN_ILLUM * day;
-    for mut a in &mut ambient {
+    // EYE ADAPTATION. A fixed SUNLIGHT exposure turned the moonlit floor (~1/1000 of noon) into solid black:
+    // nothing on the ground was visible all night. Exposure follows the scene light, but only PARTLY
+    // (ADAPT < 1), so night still reads darker and bluer than day (~1/7 noon brightness) instead of a dim noon.
+    const ADAPT: f32 = 0.72;
+    const NOON_LUX: f32 = NIGHT_FILL + SKY_FILL_FRAC * SUN_ILLUM + 0.6 * SUN_ILLUM; // fill + mean direct at noon
+    let scene = b + 0.6 * SUN_ILLUM * day;
+    let target = sun_ev - ADAPT * (NOON_LUX / scene).log2();
+    let ev = match *adapted {
+        None => target, // first walk frame (and every capture): start adapted, no fade-in
+        Some(cur) => cur + (target - cur) * (time.delta_secs() * 1.5).min(1.0), // ~1.5 stop/s, like a pupil
+    };
+    *adapted = Some(ev);
+    // moonlight is BLUE to the eye (Purkinje shift): fill cools toward night, neutral by day
+    let warm = day.sqrt();
+    let color = Color::srgb(0.55 + 0.45 * warm, 0.65 + 0.35 * warm, 1.0);
+    for (mut a, mut ex) in &mut cams {
         a.brightness = b;
+        a.color = color;
+        ex.ev100 = ev;
+    }
+}
+
+// Orbit LOD: from a zoomed-out orbit every grass tuft and herb reads as a dark speck and the land turns to
+// noise; the globe's vertex colours already carry vegetation (biome + grazing tint) at that scale. Small flora
+// hides past ORBIT_DETAIL_DIST (trees, creatures and structures stay), and comes back as the camera zooms in
+// or walks. Toggles only on a state flip; plants spawned while hidden are caught via Added<Mesh3d>.
+const ORBIT_DETAIL_DIST: f32 = 165.0;
+fn orbit_flora_lod(
+    mode: Res<crate::camera::CameraMode>,
+    cams: Query<&crate::camera::OrbitCam>,
+    mut hidden: Local<bool>,
+    mut flora: Query<(&mut Visibility, Ref<Mesh3d>), (With<crate::plant::PlantState>, Without<Tree>, Without<crate::components::Creature>)>,
+) {
+    let far = *mode == crate::camera::CameraMode::Orbit && cams.single().is_ok_and(|c| c.dist > ORBIT_DETAIL_DIST);
+    let flip = far != *hidden;
+    *hidden = far;
+    if !flip && !far {
+        return;
+    }
+    let want = if far { Visibility::Hidden } else { Visibility::Inherited };
+    for (mut v, m) in &mut flora {
+        if flip || m.is_added() {
+            *v = want;
+        }
     }
 }
 
@@ -2959,7 +3029,7 @@ fn update_aurora_curtains(
     let t = gen.tick as f32;
     let base_r = crate::sphere::PLANET_R + AURORA_LIFT;
     let substorm = ((t * 0.0009).sin() * 0.5 + 0.5).powf(3.0); // shared planet-wide activity surge
-    const CURTAIN_H: f32 = 16.0; // curtain height (mesh unit-tall; this scales it)
+    const CURTAIN_H: f32 = 11.0; // curtain height (mesh unit-tall; this scales it). Shorter now the base is high
     const FOLD_AMP: f32 = 0.10; // mag-latitude wave amplitude (radians) -> serpentine draperies
     for (c, mm, mut tf) in &mut q {
         let f = c.freq;
@@ -3012,9 +3082,11 @@ const GLOBE_RECOLOR_TICKS: u32 = 600; // ~10 sim-seconds between repaints (51k v
 fn update_globe_climate(
     gen: Res<GenState>,
     climate: Res<crate::sim::Climate>,
+    bio: Res<crate::chem::Biosphere>,
     planet: Query<&Mesh3d, With<Planet>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut next: Local<u32>,
+    mut tint_cache: Local<Vec<[f32; 3]>>, // static per-vertex ground mottling (3 fbm stacks each): computed once
 ) {
     if gen.tick < *next {
         return; // not time yet (also paints once at startup: tick 0 >= next 0)
@@ -3027,13 +3099,37 @@ fn update_globe_climate(
         Some(bevy::mesh::VertexAttributeValues::Float32x3(p)) => p.clone(),
         _ => return,
     };
+    if tint_cache.len() != positions.len() {
+        *tint_cache = positions
+            .iter()
+            .map(|p| {
+                let d = Vec3::new(p[0], p[1], p[2]).normalize_or_zero();
+                let m = crate::sphere::moisture(d);
+                crate::viz_ground::ground_tint(d, m, crate::sphere::base_temperature(d), crate::sphere::rockiness(d))
+            })
+            .collect();
+    }
+    // ground cover per cell (0..1 of saturation): herds crop the sward, and a grazed range should LOOK grazed
+    let cover: Vec<f32> = (0..bio.soil.len()).map(|c| bio.cover01(c)).collect();
+    let grid = crate::grid::field();
+    const DUN: [f32; 3] = [0.60, 0.52, 0.36]; // cropped, trampled grassland
     let colors: Vec<[f32; 4]> = positions
         .iter()
-        .map(|p| {
+        .zip(tint_cache.iter())
+        .map(|(p, t)| {
             // vertex pos = d * (R + elevation) -> normalize recovers surface direction
             let d = Vec3::new(p[0], p[1], p[2]).normalize_or_zero();
             let m = climate.sample(d);
-            let c = crate::sphere::biome_color_with_moisture(d, m);
+            let mut c = crate::sphere::biome_color_with_moisture(d, m);
+            // the initial build multiplies ground_tint in; repaints dropped it and the land went flat
+            c = [c[0] * t[0], c[1] * t[1], c[2] * t[2]];
+            if !crate::sphere::is_ocean(d) && crate::sphere::base_temperature(d) >= crate::config::FREEZE_TEMP {
+                // grazers hold a healthy sward near ~15-20% of saturation, so only cover well below that is
+                // OVERGRAZED; a 35% threshold painted every grazed continent dun
+                let lush = (grid.sample(&cover, d) / 0.2).clamp(0.0, 1.0);
+                let k = 0.45 * (1.0 - lush) * (1.0 - lush); // never fully dun: soil + forbs still show through
+                c = [c[0] + (DUN[0] - c[0]) * k, c[1] + (DUN[1] - c[1]) * k, c[2] + (DUN[2] - c[2]) * k];
+            }
             [c[0], c[1], c[2], 1.0]
         })
         .collect();

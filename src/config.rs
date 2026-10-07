@@ -249,6 +249,14 @@ pub const GRASS_HAB_MIN: f32 = 0.25; // min plant_habitability to seed/keep gras
 // so an unchanged 12 would have cut the staple to 6% and starved the world. Shape is physics, level is
 // calibration; this changes only the level.
 pub const CARPET_GRAZE: f32 = 197.0;
+// Energy per kg of ground cover grazed: the same density an average entity-plant bite yields
+// (EAT_GAIN x nutrient ~0.35 x (0.5 + quality ~0.45) ~= 0.33). Converts CARPET_GRAZE's energy intake into the
+// KG the sward actually loses, so the pasture depletes (chem::graze_cover) instead of feeding for free.
+pub const COVER_ENERGY_PER_KG: f32 = EAT_GAIN * 0.33;
+// Share of a cell's cover burned per second at full fire intensity (dry grass goes up fast).
+pub const COVER_BURN_PER_S: f32 = 0.5;
+// Render: ground-cover density (0..1 of COVER_MAX) below which a cell's grass tufts die back (grazed bare).
+pub const GRASS_COVER_BARE: f32 = 0.08;
 
 // --- seaweed/kelp: OCEAN analog of grass. Own cap + lifecycle (seaweed_step); blankets submerged band
 // (above abyssal floor) -> reliable food carpet for swimmers (position-based ocean graze). ---
@@ -262,7 +270,7 @@ pub const SEAWEED_FORAGE_IDX: usize = 1; // kelp nutrient axis (sea grazers tune
 pub const GRAZE_NUTRIENT: f32 = 0.30;    // reserve refill/sec per unit uptake while grazing (> NUTRIENT_USE so tuned gut stays fed)
 pub const GRAZE_FULL: f32 = 38.0;        // grazing tops energy to here (ABOVE REPRO_THRESHOLD 30) so tuned grazer builds breeding surplus, not just clings at threshold
 // Density-dependent grazing: grass+seaweed income drops where creatures pack into a cell. K = extra creatures/
-// cell (above the lone grazer) at which trickle income halves; lower = stronger penalty. SOIL_RES=32 grid.
+// cell (above the lone grazer) at which trickle income halves; lower = stronger penalty. Counted on grid::crowd().
 // NOTE: this alone does NOT cap population at a natural carrying capacity (headless: pop still climbs to
 // CREATURE_CAP because plant biomass is non-depletable, flat ~4220 at any pop). It's mild local-density realism.
 // A real food-limited equilibrium needs depletable plant biomass (lower regrowth/cap) -- separate task.
@@ -432,7 +440,6 @@ pub const FIRE_DAMAGE: f32 = 9.0; // energy/sec creature loses standing in fire
 pub const DEF_REPRO_COST: f32 = 0.7; // armored plant (def=1) reproduces at (1-0.7)=30% base rate
 
 // --- nutrient closed loop (M5): death -> soil fertility -> richer food ---
-pub const SOIL_RES: usize = 32; // fertility grid cells per axis
 // Water-driven fertility baseline: cells relax toward SOIL_BASE + SOIL_WATER_FERT x static moisture, so dry
 // ground is POOR + wetlands/coasts RICH (vs the old pile-up-everywhere model that pegged fert above FERT_CAP
 // globally). Death/decomp/ash still SPIKE cells above baseline (transient fertility where life died), then
@@ -447,7 +454,7 @@ pub const FERT_GROWTH: f32 = 0.6; // max growth-rate bonus from saturated soil
 pub const FERT_CAP: f32 = 1.5; // fertility level at which growth bonus saturates
 pub const PLANT_REPRO_FRAC: f32 = 0.5; // fraction of mass kept after budding off a child
 
-// --- land wear / soil compaction: trampling carves dirt trails (SOIL_RES grid, shared with Soil) ---
+// --- land wear / soil compaction: trampling carves dirt trails (grid::field cells, shared with Soil) ---
 // Grounded creatures ADD wear at their position each tick (heavier = more); ground RELAXES toward 0 slowly, so
 // busy paths/niches compact + go bare while idle ground heals. High wear REDUCES plant+grass growth and CULLS
 // grass tufts -> emergent dirt trails + grazing-pressure feedback (overused ground degrades, herds must roam).
@@ -557,10 +564,8 @@ pub const LIMB_MOVE_COST: f32 = 0.5; // move-cost mult add at full limbs (more l
 pub const CLIMB_EVADE: f32 = 0.35;    // max predation-success reduction at full climb (agile escape). Softened from 0.5 so fleeing/hiding doesn't dominate active fighting + defense.
 pub const CLIMB_REACH: f32 = 0.6;     // effective tree-reach height added at full climb (climbs to fruit)
 pub const CLIMB_FLAT_COST: f32 = 0.6; // energy/sec at full climb on flat non-rocky ground (arboreal misfit)
-// eyes: small detection bonus (effective sensor range) for per-eye upkeep. Gene maps to rendered eye COUNT
-// of EYE_MIN..EYE_MIN+EYE_SPAN (Phase 4 visuals).
-pub const EYE_MIN: f32 = 1.0;         // eyes at gene 0
-pub const EYE_SPAN: f32 = 5.0;        // eyes added across gene range (-> 6 eyes at gene 1)
+// eyes: small detection bonus (effective sensor range) for per-eye upkeep. Rendered eyes are the SENSOR genes
+// (one per sensor, at its angle); this gene only scales their size (viz::spawn_eyes).
 pub const EYE_SENSE_BONUS: f32 = 0.3; // effective sensor-range mult add at full eyes (+30%)
 pub const FLIGHT_VISION: f32 = 1.0;   // effective sensor-range mult add at full flight (birds = keen-eyed: full flier sees ~2x as far). Perk of the costly flight build (no extra SENSE_COST), stacks on the eyes gene.
 pub const EYE_COST: f32 = 0.3;        // energy/sec basal at full eyes (eyes metabolically pricey)

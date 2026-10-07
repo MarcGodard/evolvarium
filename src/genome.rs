@@ -14,7 +14,13 @@ pub const MAX_HIDDEN: usize = 16; // ceiling (bounds per-neuron upkeep cost)
 // 04). Memory biased off on migrated nets (OUTPUT_MIGRATE_BIAS) so old seeds behave identically.
 pub const MEM_CELLS: usize = 3;
 pub const MEM_OUT_START: usize = 8; // out[8..8+MEM_CELLS] = memory writes (after the 8 fixed motors)
-pub const OUTPUTS: usize = 8 + MEM_CELLS; // [thrust 0..1, turn -1..1, attack, defend, eat, sprint, climb, voice, mem*MEM_CELLS]; idx>=2 = 0..1 (sigmoid). memory cells 0..1 = what to remember (read back next tick)
+// Maker motors, after the memory block: weave a nest from litter (OUT_BUILD), heap an earthwork/dam
+// (OUT_DIG), knap a stone tool (OUT_CRAFT). 0..1 intents gated by the `builder` gene (see build.rs).
+// Migrated nets bias all three off.
+pub const OUT_BUILD: usize = MEM_OUT_START + MEM_CELLS;
+pub const OUT_DIG: usize = OUT_BUILD + 1;
+pub const OUT_CRAFT: usize = OUT_DIG + 1;
+pub const OUTPUTS: usize = OUT_CRAFT + 1; // [thrust 0..1, turn -1..1, attack, defend, eat, sprint, climb, voice, mem*MEM_CELLS, build, dig, craft]; idx>=2 = 0..1 (sigmoid). memory cells 0..1 = what to remember (read back next tick)
 pub const NFOOD: usize = 4; // plant FAMILY count (hue + kind label only; NOT metabolic axis)
 pub const NUTRIENTS: usize = 10; // distinct nutrients = metabolic axis (regulatory uptake genome, see 14/05)
 
@@ -37,7 +43,19 @@ pub const SIG_PER_SENSOR: usize = 2; // each sensor reports [inv-dist, food type
 // bite/armour/attack-cost pass: those knobs move the ODDS of the lottery, never the strategy.
 // NEW globals always appended LAST so pad_ih_inputs (inserts
 // before bias) aligns old saved nets correctly. Old saved nets zero-padded for new columns on load, see ensure_net_shape.
-pub const GLOBAL_INPUTS: usize = 17 + MEM_CELLS;
+// + maker globals [shelter_here, earth_here, tool, water_here] (LAST): nest fit and earthwork level in the
+// creature's own field cell, the quality of the tool it carries, and that cell's ground water, 0..1. Water
+// is what makes a dam worth heaping: without it 77/80 dams landed on dry ground where retention buys nothing.
+pub const BUILD_INPUTS: usize = 4;
+pub const GLOBAL_INPUTS: usize = 17 + MEM_CELLS + BUILD_INPUTS;
+// Offsets WITHIN the global block (add n_sensors*SIG_PER_SENSOR for the input column). Named so a new global
+// appended at the end cannot silently shift a reflex prior onto the wrong column.
+pub const IN_PREY_D: usize = GLOBAL_INPUTS - BUILD_INPUTS - 2;
+pub const IN_PREY_B: usize = IN_PREY_D + 1;
+pub const IN_SHELTER: usize = GLOBAL_INPUTS - 4;
+pub const IN_EARTH: usize = GLOBAL_INPUTS - 3;
+pub const IN_TOOL: usize = GLOBAL_INPUTS - 2;
+pub const IN_WATER: usize = GLOBAL_INPUTS - 1;
 pub const CONE_HALF: f32 = 0.7; // sensor FOV half-angle (rad)
 const RANGE_MIN: f32 = 4.0;
 const RANGE_MAX: f32 = 48.0; // long-range vision possible (big world); energy cost = trade-off (see sim SENSE_COST)
@@ -109,6 +127,8 @@ pub struct Genome {
     pub venom: f32,          // 0..1 toxic flesh: predator eating it takes toxic_load hit (deterrent); costs basal + aposematic look. Default 0.
     #[serde(default = "d40")]
     pub limbs: f32,          // 0..1 -> 2..8 legs: more = land traction (speed/stability on rough ground); costs move energy per limb. Default 0.4 (~4 legs).
+    #[serde(default = "zero")]
+    pub builder: f32,        // 0..1 construction skill: kg/s woven or heaped when the brain fires OUT_BUILD/OUT_DIG (build.rs). Costs BUILDER_UPKEEP (manipulative + cognitive machinery) every tick, built or not. Default 0 = cannot build.
     #[serde(default = "zero")]
     pub climb: f32,          // 0..1 tree-climbing: reach fruit trees w/o tall height + tree-refuge safety; costs penalty on open flat (arboreal build). Default 0.
     #[serde(default = "d40")]
@@ -256,7 +276,8 @@ fn pad_ih_inputs(net: &mut Net, want_in: usize, fill: f32) {
 // new outputs existed: combat+effort OFF (strong negative bias -> sigmoid ~0, no unearned ATTACK_COST /
 // SPRINT_COST / brace-drag), EAT ON (positive bias -> sigmoid ~1, still feeds on contact like pre-eat-gate
 // code). Fresh founders use random_net instead (varied combat outputs) so emergence works. Indices:
-// [thrust, turn, attack, defend, eat, sprint, climb, voice, mem*MEM_CELLS]; 0/1 never padded (always present).
+// [thrust, turn, attack, defend, eat, sprint, climb, voice, mem*MEM_CELLS, build, dig]; 0/1 never padded.
+// build/dig/craft take the -4 fill: a migrated creature never spends energy constructing.
 // climb biased negative -> migrated net sinks to ground (no unearned flight). voice biased negative -> migrated
 // net mostly silent. memory cells biased negative -> emit ~0 -> read-back 0 -> old seeds behave identically.
 // const fn so the array stays correct when MEM_CELLS changes (memory entries default to the -4 fill).
@@ -349,6 +370,7 @@ impl Genome {
             venom: rng.f32() * 0.2,   // mostly non-toxic
             limbs: rng.f32(),         // span few..many limbs
             climb: rng.f32() * 0.4,   // mostly ground-dwellers, few climbers
+            builder: if rng.f32() < 0.3 { rng.f32() * 0.5 } else { 0.0 }, // ~30% founders carry some skill to select on
             eyes: rng.f32(),          // span eye counts
             head: rng.range(0.3, 0.7),// mid heads (brain housing)
             skin_hue: rng.f32(),      // span color wheel
@@ -464,7 +486,7 @@ impl Genome {
             })
             .collect();
 
-        // OUTPUTS (must match out[] order): thrust,turn,attack,defend,eat,sprint,climb,voice, mem*MEM_CELLS.
+        // OUTPUTS (must match out[] order): thrust,turn,attack,defend,eat,sprint,climb,voice, mem*MEM_CELLS, build, dig, craft.
         let mut outs = vec![
             Vec3::new(0.0, 0.05, 0.5),  // thrust: forward drive
             Vec3::new(0.35, 0.0, 0.0),  // turn: lateral steer
@@ -478,6 +500,9 @@ impl Genome {
         for i in 0..MEM_CELLS {
             outs.push(Vec3::new(-0.3, -0.2, -0.3 + 0.12 * i as f32)); // memory: interior, distinct
         }
+        outs.push(head + Vec3::new(0.25, -0.35, 0.0)); // build: mouth/forelimbs, low front (weaving)
+        outs.push(Vec3::new(0.0, -0.7, 0.35)); // dig: ventral front (scraping earth)
+        outs.push(head + Vec3::new(-0.25, -0.35, 0.0)); // craft: forelimbs, mirror of build (manipulation)
         (ins, hids, outs)
     }
 
@@ -564,6 +589,7 @@ impl Genome {
         c.venom = pick(rng, a.venom, b.venom);
         c.limbs = pick(rng, a.limbs, b.limbs);
         c.climb = pick(rng, a.climb, b.climb);
+        c.builder = pick(rng, a.builder, b.builder);
         c.eyes = pick(rng, a.eyes, b.eyes);
         c.head = pick(rng, a.head, b.head);
         c.skin_hue = pick(rng, a.skin_hue, b.skin_hue);
@@ -688,6 +714,9 @@ impl Genome {
         }
         if rng.f32() < rate {
             self.climb = (self.climb + rng.normal() * 0.12).clamp(0.0, 1.0);
+        }
+        if rng.f32() < rate {
+            self.builder = (self.builder + rng.normal() * 0.12).clamp(0.0, 1.0);
         }
         if rng.f32() < rate {
             self.eyes = (self.eyes + rng.normal() * 0.12).clamp(0.0, 1.0);
@@ -949,12 +978,13 @@ mod tests {
         let mut rng = Rng::seed(13);
         let mut g = Genome::random(&mut rng);
         let want = n_inputs(g.n_sensors());
+        // memory read-back cols sit right before the prey pair inside the global block
+        let mem_at = g.n_sensors() * SIG_PER_SENSOR + IN_PREY_D - MEM_CELLS;
         for row in g.net.ih.iter_mut().chain(g.plast.ih.iter_mut()) {
-            let at = row.len() - 1 - MEM_CELLS; // strip last MEM_CELLS input cols (before bias)
-            row.drain(at..at + MEM_CELLS);
+            row.drain(mem_at..row.len() - 1); // a pre-memory seed had nothing from memory onward (prey/build came later)
         }
-        g.net.ho.truncate(OUTPUTS - MEM_CELLS); // drop memory output rows
-        g.plast.ho.truncate(OUTPUTS - MEM_CELLS);
+        g.net.ho.truncate(MEM_OUT_START); // a pre-memory seed had only the 8 motors (no memory, no build/dig)
+        g.plast.ho.truncate(MEM_OUT_START);
         g.ensure_net_shape();
         assert_eq!(g.net.ho.len(), OUTPUTS, "memory output rows restored");
         for row in g.net.ih.iter() {
@@ -965,6 +995,38 @@ mod tests {
         let (_, out) = forward(&g.net, &input);
         for i in 0..MEM_CELLS {
             assert!(out[MEM_OUT_START + i] < 0.1, "migrated memory cell emits ~0, got {}", out[MEM_OUT_START + i]);
+        }
+    }
+
+    #[test]
+    fn ensure_net_shape_migrates_pre_construction_nets() {
+        // a seed saved before build/dig existed: strip the BUILD_INPUTS read cols + the 2 build output rows.
+        // Migrated creatures must never construct (both outputs well under BUILD_GATE) and must lose nothing else.
+        let mut rng = Rng::seed(17);
+        let mut g = Genome::random(&mut rng);
+        g.ensure_net_shape();
+        let want = n_inputs(g.n_sensors());
+        let before = g.net.clone();
+        for row in g.net.ih.iter_mut().chain(g.plast.ih.iter_mut()) {
+            let at = row.len() - 1 - BUILD_INPUTS;
+            row.drain(at..at + BUILD_INPUTS);
+        }
+        g.net.ho.truncate(OUT_BUILD);
+        g.plast.ho.truncate(OUT_BUILD);
+        g.ensure_net_shape();
+        assert_eq!(g.net.ho.len(), OUTPUTS);
+        for (r, row) in g.net.ih.iter().enumerate() {
+            assert_eq!(row.len(), want + 1);
+            assert_eq!(row[..want - BUILD_INPUTS], before.ih[r][..want - BUILD_INPUTS], "old input weights moved");
+            assert_eq!(row[want], before.ih[r][want], "bias column moved");
+        }
+        let mut input = vec![0.3f32; want];
+        for k in want - BUILD_INPUTS..want {
+            input[k] = 1.0; // a full nest + full dam underfoot + a tool in hand must not trigger making either
+        }
+        let (_, out) = forward(&g.net, &input);
+        for o in [OUT_BUILD, OUT_DIG, OUT_CRAFT] {
+            assert!(out[o] < 0.1, "migrated net makes on output {o}: {}", out[o]);
         }
     }
 

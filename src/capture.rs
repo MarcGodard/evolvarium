@@ -26,6 +26,8 @@ pub struct CaptureCfg {
     pub dist: f32,    // --cap-dist: orbit distance from planet center (95..420). zoom test for eclipse-disc regression
     pub underwater: bool, // --cap-water: submerge in deep ocean. verifies swim view + blue tint
     pub lat: Option<f32>, // --cap-lat: top-down orbit view at this latitude (deg, +90 = north pole, -90 = south)
+    pub lon: Option<f32>, // --cap-lon: longitude for --cap-lat (deg); None = homeland meridian
+    pub erupt: bool,      // --cap-erupt: a VEI 6 fires on the first climate tick; orbit shot swings to its vent
     pub warmup: u32,      // --cap-warmup: sim frames before the shot (default WARMUP). Raise to let fliers rise off the ground + land-wear trails accumulate before snapping.
     pub back: f32,        // --cap-back: walk side-vantage distance from homeland (default 22 = original framing). Small = wide-area close-up.
     pub orrery: bool,     // --cap-orrery: capture the TSN solar-system view instead of the planet
@@ -100,11 +102,25 @@ impl Plugin for CapturePlugin {
 // objects + shadows always framed.
 fn force_cam(
     cfg: Res<CaptureCfg>,
+    clim: Option<Res<crate::climate::PlanetClimate>>,
     mut q: Query<&mut Transform, (With<Camera3d>, With<crate::camera::OrbitCam>)>,
     creatures: Query<&Transform, (With<crate::components::Creature>, Without<Camera3d>)>,
 ) {
     if cfg.orrery {
         return; // OrreryCam set in setup_capture_view; apply_orrery frames it from the focus point
+    }
+    // --cap-erupt: once the eruption has fired, frame its vent obliquely so the rising plume reads
+    if cfg.erupt && cfg.orbit {
+        if let Some(e) = clim.as_ref().and_then(|c| c.last_eruption) {
+            let v = e.vent.normalize_or_zero();
+            let (east, _) = crate::sphere::tangent_frame(v);
+            let target = crate::sphere::surface_pos(v, 6.0);
+            let eye = (v * 0.8 + east * 0.6).normalize() * cfg.dist;
+            if let Ok(mut t) = q.single_mut() {
+                *t = Transform::from_translation(eye).looking_at(target, v);
+            }
+            return;
+        }
     }
     // --cap-creature: lock onto the creature nearest homeland, frame it from cap-back units away (slightly up
     // + along the cap-yaw tangent). Repeated each frame so it tracks the chosen creature through warmup.
@@ -134,7 +150,10 @@ fn force_cam(
         if let Some(lat_deg) = cfg.lat {
             use std::f32::consts::FRAC_PI_2;
             let lat = lat_deg.to_radians().clamp(-FRAC_PI_2, FRAC_PI_2);
-            let (lon, _) = crate::sphere::dir_to_lonlat(crate::sim::homeland_center());
+            let lon = match cfg.lon {
+                Some(deg) => deg.to_radians(),
+                None => crate::sphere::dir_to_lonlat(crate::sim::homeland_center()).0,
+            };
             let dir = Vec3::new(lat.cos() * lon.cos(), lat.sin(), lat.cos() * lon.sin());
             let eye = dir * cfg.dist;
             let up = if dir.y.abs() > 0.9 { Vec3::Z } else { Vec3::Y }; // near pole: avoid Y up collapse
@@ -197,8 +216,6 @@ fn setup_capture_view(
         return;
     }
     let home = crate::sim::homeland_center();
-    // sun anchor: overhead ocean point for --cap-water, else overhead homeland.
-    let sun_anchor = if cfg.underwater { shallow_swim_dir() } else { home };
     if cfg.underwater {
         // submerged swim view: drop walk eye into deep ocean so track_underwater flags it (tint overlay +
         // murky sky then show in shot). force_cam owns final transform.
@@ -226,23 +243,38 @@ fn setup_capture_view(
             w.pitch = cfg.pitch;
         }
     }
-    // noon_offset puts sun overhead anchor. shift for requested hour, or raw --cap-off. offsets in day-ticks.
+    let (anchor, shift) = sun_plan(&cfg);
+    offset.0 = crate::viz::noon_offset(anchor, 0) + shift; // provisional; capture_tick re-anchors on the live tick
+}
+
+// Where the sun should stand for the shot: (surface dir it is overhead of at local noon, shift in ticks from
+// that noon). The ANCHOR is what the camera looks at (ocean for --cap-water, the --cap-lat/lon target, else
+// the homeland) so "noon" means noon in the frame, not noon somewhere else on the globe.
+fn sun_plan(cfg: &CaptureCfg) -> (Vec3, i64) {
+    let anchor = if cfg.underwater {
+        shallow_swim_dir()
+    } else if let Some(lat_deg) = cfg.lat {
+        let lat = lat_deg.to_radians();
+        let lon = cfg.lon.map(|d| d.to_radians()).unwrap_or_else(|| crate::sphere::dir_to_lonlat(crate::sim::homeland_center()).0);
+        Vec3::new(lat.cos() * lon.cos(), lat.sin(), lat.cos() * lon.sin())
+    } else {
+        crate::sim::homeland_center()
+    };
     let day = crate::sphere::DAY_TICKS as i64;
-    let base = crate::viz::noon_offset(sun_anchor, 0);
-    offset.0 = base
-        + if cfg.off != 0 {
-            cfg.off
-        } else {
-            match cfg.when {
-                // Offsets are from local NOON, so evening must be POSITIVE. Dusk was -day*5/32, i.e. 1.4h
-                // BEFORE noon, which rendered as late morning and made every "dusk" capture in this repo a
-                // morning one. day/8 = 3h, so morning is 09:00 and dusk 16:30. day*7/32 overshot past sunset into full night.
-                CapWhen::Morning => -day / 8,
-                CapWhen::Noon => 0,
-                CapWhen::Dusk => day * 3 / 16,
-                CapWhen::Night => day / 2,
-            }
-        };
+    let shift = if cfg.off != 0 {
+        cfg.off
+    } else {
+        match cfg.when {
+            // Offsets are from local NOON, so evening must be POSITIVE. Dusk was -day*5/32, i.e. 1.4h
+            // BEFORE noon, which rendered as late morning and made every "dusk" capture in this repo a
+            // morning one. day/8 = 3h, so morning is 09:00 and dusk 16:30. day*7/32 overshot past sunset into full night.
+            CapWhen::Morning => -day / 8,
+            CapWhen::Noon => 0,
+            CapWhen::Dusk => day * 3 / 16,
+            CapWhen::Night => day / 2,
+        }
+    };
+    (anchor, shift)
 }
 
 // Wait WARMUP frames, snap window to PNG, exit once written.
@@ -251,13 +283,29 @@ fn capture_tick(
     mut shot: Local<bool>,
     cfg: Res<CaptureCfg>,
     gen: Res<crate::sim::GenState>,
-    offset: Res<SunOffset>,
+    mut offset: ResMut<SunOffset>,
+    clim: Option<Res<crate::climate::PlanetClimate>>,
+    mut erupt_lit: Local<bool>,
     walkers: Query<&WalkCam>,
     lights: Query<(&DirectionalLight, &GlobalTransform, &ViewVisibility), With<crate::viz::SunLight>>,
     underwater: Res<crate::viz::Underwater>,
     mut commands: Commands,
 ) {
     *frames += 1;
+    // re-anchor the sun on the LIVE tick once the world exists: a --load resumes at its saved tick, so the
+    // startup offset (computed for tick 0) put "noon" shots in the middle of the night
+    if *frames == 1 && !cfg.orrery {
+        let (anchor, shift) = sun_plan(&cfg);
+        offset.0 = crate::viz::noon_offset(anchor, gen.tick) + shift;
+    }
+    // --cap-erupt: the vent is only known once climate_step fires it; re-anchor the sun on the VENT once
+    if cfg.erupt && !*erupt_lit {
+        if let Some(e) = clim.as_ref().and_then(|c| c.last_eruption) {
+            let (_, shift) = sun_plan(&cfg);
+            offset.0 = crate::viz::noon_offset(e.vent.normalize_or_zero(), gen.tick) + shift;
+            *erupt_lit = true;
+        }
+    }
     if *frames < cfg.warmup || *shot {
         return;
     }

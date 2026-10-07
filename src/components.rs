@@ -173,6 +173,13 @@ pub struct Brain {
     // pending combat reward set by predation_step (kill/defend/whiff), consumed + cleared next live_step
     // learn() call. 1-tick delay, same pattern as prev_dist.
     pub fight_reward: f32,
+    // nest shelter 0..1 this creature had while RESTING this tick (0 when moving), stashed by live_step for
+    // same-tick predation_step cover. See build.rs.
+    pub shelter: f32,
+    // carried stone tool quality 0..1 (build.rs): per-life, knapped by OUT_CRAFT, worn by use, lost at death.
+    pub tool: f32,
+    // this tick's total making effort (weave+dig+craft), the demonstration juveniles learn from next tick.
+    pub effort: f32,
 }
 
 // Per-life locomotion diagnostic: birth pos + total path walked. Measures roaming vs circling: net

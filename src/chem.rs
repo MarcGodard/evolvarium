@@ -249,6 +249,49 @@ pub const UPLIFT_FRAC_PER_DAY: f64 = 2.0e-7;
 /// Share of a burned plant's nitrogen that volatilizes to the atmosphere rather than staying as ash. Real
 /// wildfire loses most site N this way, so fire is a nitrogen EXPORT: burned ground gains P and loses N.
 pub const COMBUST_N_VOLATILE: f64 = 0.8;
+/// Standing ground cover at saturation, kg dry/m^2. Real grassland carries 0.5-1 kg/m^2 standing biomass.
+pub const COVER_MAX_PER_M2: f64 = 0.6;
+/// Cover turnover (senescence to litter) per real day, DERIVED: at saturation litterfall must equal NPP,
+/// so k = NPP / standing stock (~1/300 d, a perennial sward's leaf turnover). Not a free parameter.
+pub const COVER_TURNOVER_PER_DAY: f64 = NPP_PER_M2_DAY / COVER_MAX_PER_M2;
+/// Beer-Lambert canopy interception: share of a cell's light the ENTITY plants (shrubs, trees, forbs) catch
+/// before it reaches the ground cover, 1 - exp(-k LAI). k = 0.5 (typical extinction coefficient); leaf area
+/// per kg standing biomass ~6 m^2/kg (specific leaf area ~12 m^2/kg x ~half the mass in leaves).
+pub const CANOPY_K: f64 = 0.5;
+pub const LEAF_AREA_PER_KG: f64 = 6.0;
+pub fn canopy_share(entity_kg_per_m2: f64) -> f64 {
+    1.0 - (-CANOPY_K * LEAF_AREA_PER_KG * entity_kg_per_m2.max(0.0)).exp()
+}
+/// Grazing functional response (Holling type II): intake saturates with sward density. Half-saturation
+/// ~0.09 kg/m^2 (0.15 of COVER_MAX), the range measured for large grazers on temperate swards.
+pub const COVER_HALF_SAT01: f32 = 0.15;
+pub fn graze_response(cover01: f32) -> f32 {
+    let x = cover01.max(0.0);
+    x / (x + COVER_HALF_SAT01) * (1.0 + COVER_HALF_SAT01) // normalized: 1.0 at saturation, 0 on bare ground
+}
+
+/// Starting cover stock of cell `c`, kg (habitat-scaled share of saturation).
+pub fn initial_cover_kg(c: usize) -> f64 {
+    let d = crate::grid::field().center(c);
+    COVER_INIT_FRAC * COVER_MAX_PER_M2 * cell_area_at(c) * cover_habitat(d, crate::sphere::moisture(d)) as f64
+}
+
+/// Starting cover as a share of the habitat-scaled saturation stock (world initialised mature, not bare).
+pub const COVER_INIT_FRAC: f64 = 0.5;
+
+/// 0..1 how well ground cover grows at `dir`: land habitability on land, sunlight in the sea (photic zone,
+/// squared falloff with depth, same law as the kelp graze it replaced).
+pub fn cover_habitat(dir: bevy::prelude::Vec3, land_moisture: f32) -> f32 {
+    use crate::sphere;
+    if sphere::is_ocean(dir) {
+        let depth = ((sphere::SEA_LEVEL - sphere::elevation01(dir)) / sphere::SEA_LEVEL).clamp(0.0, 1.0);
+        let light = 1.0 - depth;
+        light * light
+    } else {
+        sphere::plant_habitability_with_moisture(dir, land_moisture)
+    }
+}
+
 /// Nominal ground a single plant draws from, m^2. Sets the per-plant NPP ceiling so growth speed stays
 /// physically bounded instead of being limited only by the cell budget. 10 m^2 matches the world's observed
 /// flora density (~4000 plants over ~40,000 m^2 of land), and the resulting ceiling of ~0.017 kg/tick lands
@@ -330,8 +373,8 @@ pub fn trophic_ratio(flora_kg: f64, fauna_kg: f64) -> f64 {
 /// falling on a patch is finite regardless of how many stems are planted in it, so the whole community
 /// shares this budget. The per-plant ceilings above are the separate physiological limit on a single
 /// individual's own canopy; both apply.
-pub fn cell_npp_per_tick() -> f64 {
-    NPP_PER_M2_DAY * cell_area() * bio_days_per_tick()
+pub fn cell_npp_per_tick(idx: usize) -> f64 {
+    NPP_PER_M2_DAY * cell_area_at(idx) * bio_days_per_tick()
 }
 
 /// As `npp_ceiling_per_tick` for a tree's larger footprint.
@@ -349,11 +392,21 @@ pub fn npp_ceiling_tree_per_tick() -> f64 {
 pub struct SoilCell {
     pub mineral: Elements,
     pub organic: Elements,
+    /// Litter creatures have woven into nests (build.rs). Out of reach of decomposers until it rots back via
+    /// `decay_nest`, so a busy weaver colony locks up some of a cell's nutrient turnover.
+    #[serde(default)]
+    pub nest: Elements,
+    /// Living ground cover (grass/herbs on land, kelp/algae in the photic sea), dry plant tissue. A per-cell
+    /// FIELD rather than entities, so the planet's staple pasture scales with area at any grid resolution and
+    /// is never capped by an entity budget. Grows from the cell's leftover NPP (entity plants shade it first),
+    /// is grazed for real (live_step), senesces to litter, burns.
+    #[serde(default)]
+    pub cover: Elements,
 }
 
 impl SoilCell {
     pub fn total(&self) -> Elements {
-        self.mineral + self.organic
+        self.mineral + self.organic + self.nest + self.cover
     }
 }
 
@@ -389,25 +442,36 @@ pub struct Biosphere {
     pub initial_total: Elements,
 }
 
-/// Surface area of one soil cell, m^2. The grid tiles the sphere, so this is total area over cell count.
+/// MEAN soil cell area, m^2 (total surface / cell count). Per-cell physics uses `cell_area_at`.
 pub fn cell_area() -> f64 {
-    let r = crate::sphere::PLANET_R as f64;
-    let n = (crate::config::SOIL_RES * crate::config::SOIL_RES) as f64;
-    4.0 * std::f64::consts::PI * r * r / n
+    crate::grid::field().mean_area_m2()
+}
+
+/// Exact ground area of soil cell `idx`, m^2. Every per-cell stock and rate that scales with ground (NPP,
+/// soil pools, weathering) keys off this, never the mean.
+pub fn cell_area_at(idx: usize) -> f64 {
+    crate::grid::field().area_m2(idx)
 }
 
 impl Biosphere {
     pub fn new() -> Self {
-        let n = crate::config::SOIL_RES * crate::config::SOIL_RES;
-        let a = cell_area();
-        let org_c = SOIL_ORG_C_PER_M2 * a;
-        let cell = SoilCell {
-            mineral: Elements::new(0.0, SOIL_MIN_N_PER_M2 * a, SOIL_MIN_P_PER_M2 * a),
-            organic: Elements::new(org_c, org_c / SOIL_CN_RATIO, org_c / SOIL_CP_RATIO),
-        };
-        let total_area = a * n as f64;
+        let n = crate::grid::field().len();
+        let soil: Vec<SoilCell> = (0..n)
+            .map(|c| {
+                let a = cell_area_at(c);
+                let org_c = SOIL_ORG_C_PER_M2 * a;
+                let cover_kg = initial_cover_kg(c);
+                SoilCell {
+                    mineral: Elements::new(0.0, SOIL_MIN_N_PER_M2 * a, SOIL_MIN_P_PER_M2 * a),
+                    organic: Elements::new(org_c, org_c / SOIL_CN_RATIO, org_c / SOIL_CP_RATIO),
+                    nest: Elements::ZERO,
+                    cover: PLANT_COMP * cover_kg,
+                }
+            })
+            .collect();
+        let total_area = cell_area() * n as f64;
         let mut b = Biosphere {
-            soil: vec![cell; n],
+            soil,
             air: Elements::new(AIR_C_PER_M2 * total_area, AIR_N_PER_M2 * total_area, 0.0),
             buried: Elements::ZERO,
             rock: Elements::new(0.0, 0.0, ROCK_P_PER_M2 * total_area),
@@ -435,9 +499,10 @@ impl Biosphere {
     pub fn p_breakdown(&self) -> String {
         let mineral: f64 = self.soil.iter().map(|c| c.mineral.p).sum();
         let organic: f64 = self.soil.iter().map(|c| c.organic.p).sum();
+        let nest: f64 = self.soil.iter().map(|c| c.nest.p).sum();
         format!(
-            "P rock {:.0} min {:.1} org {:.1} buried {:.1} fauna {:.3} rescue {:.1}",
-            self.rock.p, mineral, organic, self.buried.p, self.fauna_pool.p, self.rescue_minted.p
+            "P rock {:.0} min {:.1} org {:.1} nest {:.1} buried {:.1} fauna {:.3} rescue {:.1}",
+            self.rock.p, mineral, organic, nest, self.buried.p, self.fauna_pool.p, self.rescue_minted.p
         )
     }
 
@@ -450,6 +515,7 @@ impl Biosphere {
         let organic: Elements = self.soil.iter().fold(Elements::ZERO, |t, c| t + c.organic);
         // per-m^2 figures are the checkable ones: they compare directly against literature values
         let org_c_m2 = organic.c / (n_cells * a);
+        let cover_m2 = self.soil.iter().map(|c| c.cover.c).sum::<f64>() / PLANT_COMP.c / (n_cells * a);
         let min_n_m2 = mineral.n / (n_cells * a);
         let avail = Elements::new(self.air.c, mineral.n / n_cells, mineral.p / n_cells);
         let drift = self.drift_ppm(living);
@@ -463,7 +529,7 @@ impl Biosphere {
         // overstocked relative to the area it actually has.
         let fauna_kg_m2 = fauna_kg / (n_cells * a);
         format!(
-            "flora {flora_kg_m2:.3} fauna {fauna_kg_m2:.3} orgC {org_c_m2:.2} minN {min_n_m2:.4} kg/m2 | lim {} | buried {:.1} | drift C{:+.3} N{:+.3} P{:+.3} ppm",
+            "flora {flora_kg_m2:.3} cover {cover_m2:.3} fauna {fauna_kg_m2:.3} orgC {org_c_m2:.2} minN {min_n_m2:.4} kg/m2 | lim {} | buried {:.1} | drift C{:+.3} N{:+.3} P{:+.3} ppm",
             avail.limiting(PLANT_COMP).label(),
             self.buried.total(),
             drift.c,
@@ -503,6 +569,97 @@ impl Biosphere {
         built
     }
 
+    /// Weave up to `kg` dry litter from cell `idx`'s organic pool into its nest stock. Pure transfer at the
+    /// pool's own stoichiometry; returns kg actually woven (bounded by the litter present).
+    pub fn gather_nest(&mut self, idx: usize, kg: f64) -> f64 {
+        let cell = &mut self.soil[idx];
+        let avail = cell.organic.c / PLANT_COMP.c;
+        if kg <= 0.0 || avail <= 0.0 {
+            return 0.0;
+        }
+        let take = kg.min(avail);
+        let moved = cell.organic * (take / avail);
+        cell.organic = (cell.organic - moved).max0();
+        cell.nest += moved;
+        take
+    }
+
+    /// A save from before ground cover existed restores with none anywhere, and every grazer starves within a
+    /// generation. Seed the starting sward in that case. Runs BEFORE the ledger seals (restore happens in
+    /// Startup), so the added stock is part of the sealed total, not drift. Returns true if it seeded.
+    pub fn seed_cover_if_bare(&mut self) -> bool {
+        if self.soil.iter().any(|c| c.cover.c > 0.0) {
+            return false;
+        }
+        for c in 0..self.soil.len() {
+            self.soil[c].cover = PLANT_COMP * initial_cover_kg(c);
+        }
+        true
+    }
+
+    /// Ground cover in cell `idx`, kg dry tissue.
+    pub fn cover_kg(&self, idx: usize) -> f64 {
+        self.soil[idx].cover.c / PLANT_COMP.c
+    }
+
+    /// Ground cover density as a share of saturation, 0..1.
+    pub fn cover01(&self, idx: usize) -> f32 {
+        (self.cover_kg(idx) / (COVER_MAX_PER_M2 * cell_area_at(idx))).clamp(0.0, 1.0) as f32
+    }
+
+    /// Grow up to `want` kg of cover in cell `idx` (photosynthesis: C from air, N/P from mineral, Liebig).
+    pub fn grow_cover(&mut self, idx: usize, want: f64) -> f64 {
+        let got = self.draw_for_growth(idx, PLANT_COMP, want);
+        self.soil[idx].cover += PLANT_COMP * got;
+        got
+    }
+
+    /// Senescence: a fraction of cover dies to the organic pool (the litter input soil carbon runs on).
+    pub fn senesce_cover(&mut self, idx: usize, frac: f64) {
+        let cell = &mut self.soil[idx];
+        let moved = cell.cover * frac.clamp(0.0, 1.0);
+        cell.cover = (cell.cover - moved).max0();
+        cell.organic += moved;
+    }
+
+    /// Graze up to `kg` of cover in cell `idx`; returns kg actually eaten (bounded by the standing crop).
+    /// The eaten tissue takes the same trophic split as any other food (consume_and_excrete).
+    pub fn graze_cover(&mut self, idx: usize, kg: f64) -> f64 {
+        let take = kg.min(self.cover_kg(idx)).max(0.0);
+        if take <= 0.0 {
+            return 0.0;
+        }
+        let moved = PLANT_COMP * take;
+        let cell = &mut self.soil[idx];
+        cell.cover = (cell.cover - moved).max0();
+        self.consume_and_excrete(idx, take, PLANT_COMP);
+        take
+    }
+
+    /// Burn a fraction of cell `idx`'s cover (real combustion: C and most N to air, P stays as ash).
+    pub fn burn_cover(&mut self, idx: usize, frac: f64) {
+        let kg = self.cover_kg(idx) * frac.clamp(0.0, 1.0);
+        if kg <= 0.0 {
+            return;
+        }
+        let cell = &mut self.soil[idx];
+        cell.cover = (cell.cover - PLANT_COMP * kg).max0();
+        self.combust(idx, kg, PLANT_COMP);
+    }
+
+    /// Nest material in cell `idx`, kg dry plant tissue.
+    pub fn nest_kg(&self, idx: usize) -> f64 {
+        self.soil[idx].nest.c / PLANT_COMP.c
+    }
+
+    /// Rot a fraction of cell `idx`'s nests back into its organic pool.
+    pub fn decay_nest(&mut self, idx: usize, frac: f64) {
+        let cell = &mut self.soil[idx];
+        let moved = cell.nest * frac.clamp(0.0, 1.0);
+        cell.nest = (cell.nest - moved).max0();
+        cell.organic += moved;
+    }
+
     /// Return dead tissue to the soil as litter. Goes to ORGANIC, so it is not plant-available until
     /// decomposers mineralize it.
     pub fn deposit_litter(&mut self, idx: usize, mass: f64, comp: Elements) {
@@ -531,7 +688,7 @@ impl Biosphere {
     /// How much plant growth this cell's mineral pool can still fund, normalized 0..1 against a full cell.
     /// Read-only, so the parallel decide can use it to gate things like seed set without touching the pool.
     pub fn cell_fertility01(&self, idx: usize) -> f32 {
-        let a = cell_area();
+        let a = cell_area_at(idx);
         let full = Elements::new(f64::INFINITY, SOIL_MIN_N_PER_M2 * a, SOIL_MIN_P_PER_M2 * a);
         let cap = full.max_biomass(PLANT_COMP);
         if cap <= 0.0 {
@@ -649,6 +806,61 @@ impl Default for Biosphere {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ground_cover_grows_grazes_burns_and_senesces_without_losing_matter() {
+        let mut b = super::Biosphere::new();
+        let c = (0..b.soil.len()).find(|&c| b.cover_kg(c) > 1.0).expect("a vegetated cell");
+        let before = b.total();
+        let k0 = b.cover_kg(c);
+        let grown = b.grow_cover(c, 0.5);
+        assert!(grown > 0.0 && (b.cover_kg(c) - (k0 + grown)).abs() < 1e-9);
+        let eaten = b.graze_cover(c, 0.3);
+        assert!((eaten - 0.3).abs() < 1e-12);
+        assert!(b.graze_cover(c, 1e9) > 0.0 && b.cover_kg(c).abs() < 1e-9, "grazing is bounded by the standing crop");
+        assert_eq!(b.graze_cover(c, 1.0), 0.0, "bare ground feeds nothing");
+        b.grow_cover(c, 1.0);
+        b.burn_cover(c, 0.5);
+        b.senesce_cover(c, 0.5);
+        let after = b.total();
+        for (x, y) in [(before.c, after.c), (before.n, after.n), (before.p, after.p)] {
+            assert!((x - y).abs() <= 1e-9 * x.abs().max(1.0), "matter changed {x} -> {y}");
+        }
+    }
+
+    #[test]
+    fn canopy_and_grazing_responses_have_the_right_shape() {
+        assert_eq!(super::canopy_share(0.0), 0.0);
+        let half = super::canopy_share(0.3);
+        assert!(half > 0.5 && half < 0.7, "0.3 kg/m2 of shrubs catches {half}");
+        assert!(super::canopy_share(5.0) > 0.99);
+        assert_eq!(super::graze_response(0.0), 0.0);
+        assert!((super::graze_response(1.0) - 1.0).abs() < 1e-6);
+        assert!(super::graze_response(0.3) > 0.6, "a thin sward still feeds near capacity");
+    }
+
+    #[test]
+    fn cover_turnover_balances_npp_at_saturation() {
+        let litterfall = super::COVER_TURNOVER_PER_DAY * super::COVER_MAX_PER_M2;
+        assert!((litterfall - super::NPP_PER_M2_DAY).abs() < 1e-15);
+    }
+
+    #[test]
+    fn nests_move_matter_and_rot_back() {
+        let mut b = super::Biosphere::new();
+        let before = b.total();
+        let woven = b.gather_nest(10, 0.5);
+        assert!((woven - 0.5).abs() < 1e-12, "plenty of litter: weave the full ask");
+        assert!((b.nest_kg(10) - 0.5).abs() < 1e-9);
+        let huge = b.gather_nest(11, 1e9);
+        assert!(huge > 0.0 && b.soil[11].organic.c.abs() < 1e-9, "bounded by the litter present");
+        assert!(b.gather_nest(11, 1.0) == 0.0, "empty pool weaves nothing");
+        b.decay_nest(10, 0.25);
+        assert!((b.nest_kg(10) - 0.375).abs() < 1e-9);
+        let after = b.total();
+        for (x, y) in [(before.c, after.c), (before.n, after.n), (before.p, after.p)] {
+            assert!((x - y).abs() <= 1e-9 * x.abs().max(1.0), "matter changed {x} -> {y}");
+        }
+    }
     use super::*;
 
     // Every reservoir op must be matter-neutral. Helper compares a before/after ledger where `living` is
@@ -914,7 +1126,7 @@ mod tests {
         // PLANT_COMP pushes this out of range, the world has stopped being Earth-like and this fails.
         let b = Biosphere::new();
         let avail = Elements::new(b.air.c, b.soil[0].mineral.n, b.soil[0].mineral.p);
-        let per_m2 = avail.max_biomass(PLANT_COMP) / cell_area();
+        let per_m2 = avail.max_biomass(PLANT_COMP) / cell_area_at(0);
         assert!(
             (0.3..=1.5).contains(&per_m2),
             "standing biomass {per_m2:.2} kg/m^2 is outside the real grassland range 0.3..1.5"
@@ -973,7 +1185,7 @@ mod tests {
         // creature, ~1100 creatures at full population, ~0.4 kg/m^2 standing flora.
         let mean_morph = 1.74f32;
         let pop = 1100.0;
-        let flora_kg = 0.4 * cell_area() * (crate::config::SOIL_RES * crate::config::SOIL_RES) as f64;
+        let flora_kg = 0.4 * cell_area() * crate::grid::field().len() as f64;
         let fauna_kg = creature_mass_kg(mean_morph) * pop;
         let r = trophic_ratio(flora_kg, fauna_kg);
         assert!(

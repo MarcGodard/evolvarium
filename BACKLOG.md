@@ -6,6 +6,92 @@ live in `config.rs`; the live conversion plan is `SPHERE-PLAN.md`.
 
 ## Done
 
+### Higher-resolution planet, climate coupling, construction (2026-10-07)
+- [x] **Bevy 0.18 -> 0.19, avian3d 0.6 -> 0.7**, lockfile refreshed. Captures render identically.
+- [x] **Tick 5.2 -> ~3.0 ms** (same world): terrain + moisture noise baked into a 6x513^2 cube-map atlas
+      (`sphere::atlas`, bilinear, ~1e-3 error, seam-free), `sun_dir` memoized per thread (every plant asked
+      for the same Tychos sun per tick), plant grid cell computed once per plant in the parallel decide.
+      Terrain detail can now grow at bake cost only.
+- [x] **Equal-area cube-sphere field grid** (`grid.rs`) replaces the 32x32 lon/lat grid: 6144 cells (6x), exact
+      per-cell areas. The old grid gave a polar sliver an equatorial cell's NPP and soil stocks. Crowding and
+      foodCV stay on a coarse 1014-cell grid (the scale GRAZE_CROWD_K was tuned at); point deposits (wear,
+      corpse fertility) scale by legacy/actual area. Fire catch rate NOT rescaled (per-cell gain vs decay
+      decides sustain; scaling it burned worlds down), so fronts are slower in metres and fire avg ~0.003
+      vs ~0.007 before.
+- [x] **Greenhouse climate** (`climate.rs`): CO2 forcing 5.35 ln(C/C0), explicit ice-albedo from this
+      planet's ice cover (measured loop gain 0.11-0.45, Earth-like; ~3.4 K/doubling), ocean mixed-layer lag,
+      CO2 fertilization of NPP, volcanic eruptions (VEI 4-8: aerosol cooling, buried C outgassed, rock P ash,
+      vent fires). Global anomaly feeds `base_temperature`, so ice line, plant niches, Q10 decomposition and
+      creature heat balance all feel it. References lock after a WARMUP-length spin-up because soil carbon
+      starts far from equilibrium (see open item below).
+- [x] **Construction** (`build.rs`, `viz_build.rs`): `builder` gene, brain outputs OUT_BUILD/OUT_DIG, inputs
+      shelter_here/earth_here (named IN_* offsets). Nests woven from soil litter (`SoilCell.nest`, conserved,
+      rot back) give resting occupants that FIT them insulation + predation cover + a comfort learning
+      reward; earthworks hold ground water (dams). Public goods: builder pays, the cell benefits; nest shelter
+      is shared by the total body mass in the cell. Old seeds migrate with maker outputs biased off.
+      Measured (25 gens, before tools): builder gene 0.07 -> 0.18 (seed 1) and 0.32 (seed 5), 11-55 dammed
+      cells, up to 28 kg of nests. Building is SELECTED FOR despite its costs.
+- [x] **Tools** (`OUT_CRAFT`, `IN_TOOL`, `Brain.tool`): knapped stone, fastest on rocky ground; adds TOOL_BITE
+      against plant defense (nut cracking) and speeds digging; costs carry weight, wear per use, slow loss,
+      knapping labour. Per-life (dies with the maker).
+- [x] **Culture**: juveniles (age < LEARN_AGE) whose making outputs fire beside last tick's makers get an
+      imitation reward, so reward-modulated Hebbian learning spreads the habit by example.
+- [x] **`--metrics` world summary** (`sim::world_metrics`): means (carnivory, builder, tool, size, endothermy,
+      flight, swim), flora kg/m^2, nest kg, dam cells, climate (CO2 ratio, anomaly, ice, eruptions), fire,
+      wear, rescue-minted P. More objective axes for agent scorers, free-form JSON (no schema churn).
+- [x] **Persistence**: full saves carry Biosphere + PlanetClimate + Earthworks (`WorldState.planet`), so a loaded
+      world keeps its soil, nests, dams and settled climate instead of re-running the spin-up.
+
+### Visuals: a planet that is a pleasure to watch (2026-10-07)
+- [x] **Eyes are the sensor genes**: one eye per `Genome.sensors` entry, placed on the head at the sensor's
+      genetic angle and sized by its range, with a dark pupil (were up to 6 glowing pupil-less balls stacked on
+      the face). Forward sensors read as binocular hunters, wide ones as side-eyed grazers.
+- [x] **Night is watchable**: partial eye adaptation (exposure eases toward scene light, ~1/7 noon brightness at
+      night) + moonlight-blue ambient. Night ground was solid black under the fixed SUNLIGHT exposure.
+- [x] **Aurora lifted above the cloud deck** (was at hill height, so a walker near the oval stood in a green column).
+- [x] **Atmosphere limb**: 10 nested shells with exponential weights fake the limb's falloff (was one hard
+      glassy annulus with visible facets).
+- [x] **Orbit LOD**: grass tufts + herbs hide past orbit distance 165; the land reads from biome + grazing colour
+      instead of black speckle. Overgrazed range tints dun on the globe (cover < ~20% of saturation).
+- [x] **Volcanic eruptions visible**: vent glow with its own orange light + a billowing, wind-bent ash column
+      with lava underglow, sized by VEI. God key **V** erupts a VEI 6; `--cap-erupt` frames one in a capture.
+- [x] **Nests as woven bowls** (procedural lathe mesh, straw streaks), dams as earth mounds with side ponds.
+- [x] **Capture tool**: sun re-anchored on the live tick (`--cap-when` was wrong on loaded saves), `--cap-lon`.
+- [ ] Creature close-up capture often frames no creature (target wanders during warm-up); track a living one.
+- [ ] Aurora curtains read as green spikes on the limb from orbit; fine at night, odd on a day-side limb.
+- [ ] Tools are not drawn in creatures' grip yet.
+
+### Open from this session
+- [~] **Soil carbon starts far from equilibrium**: organic C drained 8 -> ~1.1 kg/m^2 because plant COUNT sits on
+      PLANT_CAP so litter input was capped. Ground cover (above) lifts the floor to ~3 kg/m^2; the remaining gap
+      is still entity flora pinned at the cap. Climate spin-up hides what is left.
+- [ ] **Run-to-run spread is huge**: equivalent builds give pop 100..1900 at tick 96000 on the same seed
+      (Bevy upgrade alone moved seed 1 from 347 to 103). Balance claims need many seeds, not one.
+- [x] **A/B: making on vs `--no-build`** (seeds 2/3/4, 22 gens, `--metrics`): pop 737 vs 803 mean (within
+      run spread, no measurable cost); flora 1.11 vs 0.96 kg/m^2 (dams green the planet, 2 of 3 seeds); builder
+      gene 0.08-0.22 when its upkeep is real vs drifting to 0.2-0.47 when free: builders earn their keep.
+- [x] **Structure visuals verified** (`--capture` of a saved builder world, new `--cap-lon` aims `--cap-lat`):
+      woven nest rings + ochre earth mounds, creatures resting on them. Dams were capsules first and read as
+      fallen logs; now squashed mounds.
+- [x] **Water sense** (`IN_WATER`, BUILD_INPUTS 4): builders feel their cell's ground water. Measured: wet-dam
+      share stays 0-5% over 22 gens (3 seeds); wet cells are rare (mean gw ~0.02), so that may be the base
+      rate. Logged as `wet N%` in BUILD and `wet_dam_frac` in metrics.
+- [x] **Conserved ground cover** (`chem::SoilCell.cover`): grass/kelp as a per-cell field, grown from the light
+      the entity canopy does not intercept (Beer-Lambert, k 0.5, 6 m^2 leaf/kg), senescing at a DERIVED rate
+      (NPP / saturation stock), burned by fire, grazed for real with a Holling II functional response. Replaces
+      the free `CARPET_GRAZE` energy that never depleted. Seeds 2/3/4, 22 gens vs the same build without it:
+      pop 465/311/974 -> 3468/1392/1713, carnivory 0.08-0.16 -> 0.20-0.28, soil organic C ~1.0 -> 2.6-3.1
+      kg/m^2 (the litter input the drain lacked), cover grazed down to 0.10-0.13 kg/m^2 (~20% of saturation).
+      Rendered grass tufts die back on cells grazed bare.
+- [ ] **Ledger drift sources found (pre-existing, not cover)**: the warm-up generation reset (`alive.0 = true;
+      *g = child`) and niche rescue (`spawn_creature` in niche.rs) create bodies without `draw_fauna` and
+      without booking `rescue_minted`. Both scale with population, which is why busy worlds drift more. Cover
+      paths audited matter-neutral.
+- [ ] GRAZE_CROWD_K crowding penalty is now probably redundant (a real sward depletes locally); candidate for
+      deletion after a multi-seed A/B.
+- [ ] Render tools in creatures' grip (viz) and a nest/dam capture from an evolved builder world.
+- [ ] Weather is now ~0.5 ms/tick on 6144 cells (cloud fbm per cell); cache or subsample if it starts to bind.
+
 ### Solar system + sky: real Tychos model (2026-06-24)
 Full design `~/Documents/Github/clients/evolvarium/15-solar-system-tychos.md`. Data copied from
 pholmq/TSN (GPL-2.0) @ commit 49fd49c (pinned in `orrery.rs` + `stars.rs` comments).

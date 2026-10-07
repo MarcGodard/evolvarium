@@ -127,10 +127,14 @@ struct RunMetrics {
     rescues_total: u32,    // sum across niches; lower = closer to balanced
     niches_extinct: u32,   // niches with final count 0 (hard-broken habitats)
     niches: Vec<NicheMetric>,
+    // whole-world summary (sim::world_metrics): extra objective axes for agent scorers. Shape is free-form
+    // JSON so a new axis needs no schema change here.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    world: Option<serde_json::Value>,
 }
 
 // Write end-of-run balance metrics JSON for the harness. Called from generation_step on done.
-pub fn write_metrics(path: &str, sustained: bool, tick: u32, pop: usize, avg_energy: f32, tr: &NicheTracker) {
+pub fn write_metrics(path: &str, sustained: bool, tick: u32, pop: usize, avg_energy: f32, tr: &NicheTracker, world: Option<serde_json::Value>) {
     let niches: Vec<NicheMetric> = (0..NICHE_COUNT)
         .map(|i| NicheMetric { name: NICHE_NAMES[i].to_string(), count: tr.counts[i], total_rescues: tr.total_rescues[i] })
         .collect();
@@ -142,6 +146,7 @@ pub fn write_metrics(path: &str, sustained: bool, tick: u32, pop: usize, avg_ene
         rescues_total: tr.total_rescues.iter().sum(),
         niches_extinct: tr.counts.iter().filter(|&&c| c == 0).count() as u32,
         niches,
+        world,
     };
     match serde_json::to_string_pretty(&m) {
         Ok(s) => {

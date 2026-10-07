@@ -25,7 +25,7 @@ pub struct Snapshot {
     pub world: Option<WorldState>,
 }
 
-// Dynamic per-cell field grids (SOIL_RES^2 each). Empty vec = field not saved (load keeps its fresh default).
+// Dynamic per-cell field grids (grid::field().len() each). Empty vec or length mismatch (save from an older grid) = load keeps the fresh default.
 #[derive(Serialize, Deserialize, Clone, Default)]
 pub struct Grids {
     #[serde(default)]
@@ -74,6 +74,8 @@ pub struct SavedPlantEntity {
     pub ferment_toxic: Option<f32>, // Some -> Ferment marker
     #[serde(default)]
     pub seed: Option<PlantGenome>, // Some -> Seed (fruit carrying parent genome)
+    #[serde(default)]
+    pub carrion: bool, // Carrion marker (flesh, ANIMAL_COMP); older saves restore carcasses as plant litter
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -93,6 +95,19 @@ pub struct WorldState {
     pub seed_bank: Vec<SavedSeed>,
     pub creatures: Vec<SavedCreature>,
     pub plants: Vec<SavedPlantEntity>,
+    // Conserved reservoirs + climate + earthworks at save time. MUST travel with the plants and creatures
+    // saved beside it: the world's matter total is reservoirs + living tissue, so restoring one without the
+    // other re-runs the soil spin-up transient and books the difference as drift. Absent (older save) or
+    // grid-size mismatch = fresh reservoirs, as before.
+    #[serde(default)]
+    pub planet: Option<PlanetState>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct PlanetState {
+    pub bio: crate::chem::Biosphere,
+    pub climate: crate::climate::PlanetClimate,
+    pub earth: Vec<f32>,
 }
 
 // Write any serializable as pretty JSON. Logs on failure, never panics mid-run. `what` = success-log subject.

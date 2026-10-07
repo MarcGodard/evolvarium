@@ -11,12 +11,15 @@
 // Bevy ECS systems take many args + complex query tuples. Silence clippy noise.
 #![allow(clippy::too_many_arguments, clippy::type_complexity)]
 mod audio;
+mod build;
 mod camera;
 mod chem;
+mod climate;
 mod components;
 mod config;
 mod cppn;
 mod genome;
+mod grid;
 mod gym;
 mod latin;
 mod morph;
@@ -39,6 +42,8 @@ mod viz;
 mod viz_flora;
 mod viz_ground;
 mod viz_atmo;
+mod viz_build;
+mod viz_volcano;
 mod viz_sky;
 
 use bevy::app::ScheduleRunnerPlugin;
@@ -65,6 +70,7 @@ fn main() {
         profile::ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);
     }
     let learn = !flag(&args, "--nolearn"); // lifetime learning default ON
+    build::set_enabled(!flag(&args, "--no-build")); // A/B arm: world without construction or tools
     let poison = flag(&args, "--poison"); // legacy: 2 food types (ntypes=2)
     // Epigenetic diet (NFOOD types + instincts) default ON. --no-diet = simple single-food world.
     // --poison forces legacy 2-type mode when --no-diet set.
@@ -120,6 +126,8 @@ fn main() {
     // --cap-lat=DEG: aim orbit camera straight down at this latitude (deg, + = north pole, - = south)
     // for top-down pole view. Implies orbit. Pair w/ --cap-dist to frame whole cap.
     let cap_lat = val(&args, "--cap-lat=").and_then(|s| s.parse::<f32>().ok());
+    // --cap-lon=DEG: longitude for --cap-lat (sphere::dir_to_lonlat convention, atan2(z, x)); default homeland meridian.
+    let cap_lon = val(&args, "--cap-lon=").and_then(|s| s.parse::<f32>().ok());
     let cap_orbit = flag(&args, "--cap-orbit") || cap_lat.is_some();
     let cap_dist = parse_or(&args, "--cap-dist=", 140.0f32);
     // --cap-water: submerge capture camera in deep ocean (verify swim view + underwater tint).
@@ -203,6 +211,10 @@ fn main() {
     app.insert_resource(rng::Rng::seed(seed));
     app.insert_resource(sim::Soil::new()); // soil-fertility grid (M5 nutrient loop)
     app.insert_resource(chem::Biosphere::new());
+    app.init_resource::<build::Earthworks>(); // creature-heaped berms/dams per field cell
+    app.init_resource::<climate::PlanetClimate>();
+    // --cap-erupt: a VEI 6 goes off on the first climate tick (verifies eruption visuals in a capture)
+    app.insert_resource(climate::EruptRequest(if flag(&args, "--cap-erupt") { Some(6) } else { None })); // greenhouse/ice/volcano state; references set on first climate_step
     app.init_resource::<sim::GrowthGrants>(); // mass the element budget funded this tick, per plant // conserved C/N/P reservoirs (soil mineral/organic, air, buried, rock)
     app.insert_resource(sim::GroundWater::new()); // rain-fed ground-water grid
     app.insert_resource(sim::Climate::new()); // slow climate-memory grid (geological desert/rainforest drift)
@@ -304,27 +316,27 @@ fn main() {
             .add_systems(Startup, sim::spawn_world_headless)
             .add_systems(
                 Update,
-                (snapshot::snapshot_capture, sim::seal_matter_ledger, sim::weather_step, sim::biogeochem_step, sim::fire_step, sim::live_step, sim::predation_step, sim::grass_step, sim::seaweed_step, sim::plant_step, sim::apply_growth_grants, sim::rot_step, niche::niche_step, sim::generation_step, profile_report).chain(),
+                (snapshot::snapshot_capture, sim::seal_matter_ledger, sim::weather_step, sim::biogeochem_step, climate::climate_step, sim::fire_step, sim::live_step, sim::predation_step, sim::grass_step, sim::seaweed_step, sim::plant_step, sim::apply_growth_grants, sim::rot_step, niche::niche_step, sim::generation_step, profile_report).chain(),
             );
     } else {
         // Real-time visuals: step in FixedUpdate at sim rate so sim-time = wall-time.
         app.add_plugins(DefaultPlugins)
             .insert_resource(Time::<Fixed>::from_hz((1.0 / sim::DT) as f64))
             .add_plugins(camera::OrbitCameraPlugin)
-            .add_plugins(viz::VizPlugin)
+            .add_plugins((viz::VizPlugin, viz_build::BuildVizPlugin, viz_volcano::VolcanoVizPlugin))
             .add_systems(Update, viz_atmo::update_haze)
             .add_plugins(audio::GameAudioPlugin) // procedural world audio (render-only, never headless)
             .add_plugins(orrery_view::OrreryViewPlugin)
             .add_systems(Startup, (setup_scene, sim::spawn_world_render))
             .add_systems(
                 FixedUpdate,
-                (sim::seal_matter_ledger, sim::weather_step, sim::biogeochem_step, sim::fire_step, sim::live_step, sim::predation_step, sim::grass_step, sim::seaweed_step, sim::plant_step, sim::apply_growth_grants, sim::rot_step, niche::niche_step, sim::generation_step).chain(),
+                (sim::seal_matter_ledger, sim::weather_step, sim::biogeochem_step, climate::climate_step, sim::fire_step, sim::live_step, sim::predation_step, sim::grass_step, sim::seaweed_step, sim::plant_step, sim::apply_growth_grants, sim::rot_step, niche::niche_step, sim::generation_step).chain(),
             );
         if let Some(field) = cap_mmfield {
             app.insert_resource(viz::MinimapInitField(field)); // open minimap on a chosen overlay for the shot
         }
         if let Some(prefix) = capture {
-            app.insert_resource(capture::CaptureCfg { prefix, when: cap_when, yaw: cap_yaw, off: cap_off, pitch: cap_pitch, orbit: cap_orbit, dist: cap_dist, underwater: cap_water, lat: cap_lat, warmup: cap_warmup, orrery: cap_orrery, back: cap_back, focus_creature: cap_creature })
+            app.insert_resource(capture::CaptureCfg { prefix, when: cap_when, yaw: cap_yaw, off: cap_off, pitch: cap_pitch, orbit: cap_orbit, dist: cap_dist, underwater: cap_water, lat: cap_lat, lon: cap_lon, erupt: flag(&args, "--cap-erupt"), warmup: cap_warmup, orrery: cap_orrery, back: cap_back, focus_creature: cap_creature })
                 .add_plugins(capture::CapturePlugin);
         }
     }
@@ -443,23 +455,34 @@ fn setup_scene(
     // peeking past the planet silhouette -> a soft blue limb halo, no tint over the disc. Orbit-view only
     // (viz::atmosphere_visibility). Per-VERTEX color (multiplies base) is set each frame by viz::update_atmosphere:
     // bright day-side limb, dim night airglow, warm twilight band -> a day-biased glow, not a uniform ring.
-    let mut atmo_mesh = Sphere::new(sphere::PLANET_R * 1.17).mesh().ico(4).unwrap();
+    // Nested shells, brightest innermost: each additive back-face ring adds a constant band, so ONE shell drew a
+    // hard-edged glassy annulus. Stacked shells with falling weights sum to a glow that is strongest at the limb
+    // and fades outward, like the real exponential air column. ico(5): ico(4) facets showed on the limb.
+    let atmo_material = materials.add(StandardMaterial {
+        base_color: Color::WHITE, // vertex colors carry the day-biased blue glow
+        unlit: true,
+        alpha_mode: AlphaMode::Add,
+        cull_mode: Some(bevy::render::render_resource::Face::Front),
+        ..default()
+    });
+    // 10 thin shells, weight ~exp(-height/scale_height): 4 shells showed as visible concentric steps
+    const SHELLS: usize = 10;
+    let norm: f32 = (0..SHELLS).map(|i| (-(i as f32) / 3.0).exp()).sum();
+    for i in 0..SHELLS {
+    let scale = 1.012 + 0.016 * i as f32;
+    let weight = (-(i as f32) / 3.0).exp() / norm;
+    let mut atmo_mesh = Sphere::new(sphere::PLANET_R * scale).mesh().ico(5).unwrap();
     let nverts = atmo_mesh.count_vertices();
-    atmo_mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, vec![[0.35f32, 0.55, 1.0, 1.0]; nverts]);
+    atmo_mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, vec![[0.35f32 * weight, 0.55 * weight, 1.0 * weight, 1.0]; nverts]);
     commands.spawn((
         Mesh3d(meshes.add(atmo_mesh)),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::WHITE, // vertex colors carry the day-biased blue glow
-            unlit: true,
-            alpha_mode: AlphaMode::Add,
-            cull_mode: Some(bevy::render::render_resource::Face::Front),
-            ..default()
-        })),
+        MeshMaterial3d(atmo_material.clone()),
         Transform::IDENTITY,
         bevy::light::NotShadowCaster,
         Visibility::Hidden, // shown only in orbit (atmosphere_visibility)
-        viz::Atmosphere,
+        viz::Atmosphere(weight),
     ));
+    }
     viz_atmo::spawn_haze(&mut commands, &mut meshes, &mut materials);
     // sun (directional light; direction set per-frame by day_night_lighting). shadow_maps_enabled toggled by
     // camera::update_shadow_mode: OFF in orbit (shadow-range boundary showed as "eclipse" disc when zoomed),

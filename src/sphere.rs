@@ -211,7 +211,93 @@ fn terrain_features(d: Vec3) -> f32 {
 
 /// Normalized terrain elevation 0..1 at surface dir `d` (continents, oceans, mountains).
 pub fn elevation01(d: Vec3) -> f32 {
+    atlas_sample(d, |a| &a.elev).unwrap_or_else(|| elevation01_exact(d))
+}
+
+fn elevation01_exact(d: Vec3) -> f32 {
     (fbm3(d * TERRAIN_FREQ + Vec3::splat(11.3)) + terrain_features(d)).clamp(0.0, 1.0)
+}
+
+fn moisture_patch_exact(d: Vec3) -> f32 {
+    fbm3(d * 3.7 - Vec3::splat(5.0))
+}
+
+// ---------- baked static fields (perf) ----------
+// Terrain + moisture-patch noise are position-only, yet plant_step re-evaluated ~8 four-octave fbm stacks per
+// plant per tick (76% of tick at ~12k plants). Baked once per process into a cube map, bilinear lookup.
+// Adjacent faces' edge texels are built from the identical unnormalized dir -> bit-equal values, no seam.
+// Detail added to the exact fns costs bake time only, never tick time. Callers must not rely on the exact
+// fbm value: lookup error is ~1e-3 (test `atlas_matches_exact`). Non-unit d now samples its direction (the
+// exact fns scaled noise input by |d|, a latent inconsistency).
+const ATLAS_N: usize = 512; // texels per face edge: ~0.25 m on the 80 m planet, below fbm feature scale
+struct Atlas {
+    elev: Vec<f32>,
+    patch: Vec<f32>,
+}
+static ATLAS: std::sync::OnceLock<Atlas> = std::sync::OnceLock::new();
+
+pub(crate) fn face_dir(face: usize, u: f32, v: f32) -> Vec3 {
+    match face {
+        0 => Vec3::new(1.0, u, v),
+        1 => Vec3::new(-1.0, u, v),
+        2 => Vec3::new(u, 1.0, v),
+        3 => Vec3::new(u, -1.0, v),
+        4 => Vec3::new(u, v, 1.0),
+        _ => Vec3::new(u, v, -1.0),
+    }
+}
+
+pub(crate) fn dir_face_uv(d: Vec3) -> (usize, f32, f32) {
+    let a = d.abs();
+    if a.x >= a.y && a.x >= a.z {
+        (if d.x > 0.0 { 0 } else { 1 }, d.y / a.x, d.z / a.x)
+    } else if a.y >= a.z {
+        (if d.y > 0.0 { 2 } else { 3 }, d.x / a.y, d.z / a.y)
+    } else {
+        (if d.z > 0.0 { 4 } else { 5 }, d.x / a.z, d.y / a.z)
+    }
+}
+
+fn atlas() -> &'static Atlas {
+    ATLAS.get_or_init(|| {
+        let side = ATLAS_N + 1;
+        let per_face = side * side;
+        let mut elev = vec![0.0f32; 6 * per_face];
+        let mut patch = vec![0.0f32; 6 * per_face];
+        let coord = |i: usize| -1.0 + 2.0 * i as f32 / ATLAS_N as f32;
+        std::thread::scope(|s| {
+            for (face, (ec, pc)) in elev.chunks_mut(per_face).zip(patch.chunks_mut(per_face)).enumerate() {
+                s.spawn(move || {
+                    for j in 0..side {
+                        for i in 0..side {
+                            let d = face_dir(face, coord(i), coord(j)).normalize();
+                            ec[j * side + i] = elevation01_exact(d);
+                            pc[j * side + i] = moisture_patch_exact(d);
+                        }
+                    }
+                });
+            }
+        });
+        Atlas { elev, patch }
+    })
+}
+
+fn atlas_sample(d: Vec3, chan: impl Fn(&Atlas) -> &Vec<f32>) -> Option<f32> {
+    if d.length_squared() < 1e-12 || !d.is_finite() {
+        return None;
+    }
+    let (face, u, v) = dir_face_uv(d);
+    let side = ATLAS_N + 1;
+    let fx = ((u + 1.0) * 0.5 * ATLAS_N as f32).clamp(0.0, ATLAS_N as f32);
+    let fy = ((v + 1.0) * 0.5 * ATLAS_N as f32).clamp(0.0, ATLAS_N as f32);
+    let (i0, j0) = ((fx as usize).min(ATLAS_N - 1), (fy as usize).min(ATLAS_N - 1));
+    let (tx, ty) = (fx - i0 as f32, fy - j0 as f32);
+    let g = chan(atlas());
+    let base = face * side * side;
+    let at = |i: usize, j: usize| g[base + j * side + i];
+    let a = at(i0, j0) + (at(i0 + 1, j0) - at(i0, j0)) * tx;
+    let b = at(i0, j0 + 1) + (at(i0 + 1, j0 + 1) - at(i0, j0 + 1)) * tx;
+    Some(a + (b - a) * ty)
 }
 
 /// Terrain height world units RELATIVE TO SEA SURFACE (waterline ref at radius PLANET_R). Positive on land
@@ -246,7 +332,21 @@ pub fn base_temperature(d: Vec3) -> f32 {
     let polar = ((0.55 - c) / 0.55).clamp(0.0, 1.0); // 0 below ~57 deg .. 1 at pole
     let by_lat = c - 0.45 * polar * polar;
     let lapse = elevation(d).max(0.0) / ELEV_MAX * 0.4; // high ground colder (ocean depth: no lapse)
-    (by_lat - lapse).clamp(0.0, 1.0)
+    (by_lat - lapse + temp_anomaly()).clamp(0.0, 1.0)
+}
+
+// Global mean temperature anomaly (field units), set once per tick by climate::climate_step and read by
+// every temperature path. A process-global, not a Resource: base_temperature is a pure fn called from render,
+// snapshot, tests and parallel sim closures alike. Written only from that one chained system, so a tick sees
+// one value everywhere. Zero until a climate_step runs (tests, scenario, render-only tools stay unchanged).
+static TEMP_ANOMALY: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+pub fn set_temp_anomaly(field_units: f32) {
+    TEMP_ANOMALY.store(field_units.to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn temp_anomaly() -> f32 {
+    f32::from_bits(TEMP_ANOMALY.load(std::sync::atomic::Ordering::Relaxed))
 }
 
 // Diurnal temperature swing, in FIELD units (the 0..1 field spans ~75 K, see thermo::field_to_kelvin).
@@ -278,7 +378,7 @@ pub fn temperature(d: Vec3, tick: u32) -> f32 {
 pub fn moisture(d: Vec3) -> f32 {
     let (_lon, lat) = dir_to_lonlat(d);
     let coastal = 1.0 - (elevation(d).max(0.0) / ELEV_MAX).min(1.0); // low/coastal = wetter (ocean = fully wet)
-    let patch = fbm3(d * 3.7 - Vec3::splat(5.0));
+    let patch = atlas_sample(d, |a| &a.patch).unwrap_or_else(|| moisture_patch_exact(d));
     // dry subtropical belts ~ +/-30 deg, wetter equator + poles
     let belt = 0.5 + 0.5 * (lat * 3.0).cos();
     (0.45 * coastal + 0.35 * patch + 0.20 * belt).clamp(0.0, 1.0)
@@ -455,7 +555,18 @@ pub fn ecliptic_to_sky(ecl: Vec3, tick: u32) -> Vec3 {
 /// daily spin. Sub-solar latitude band identical to the old fake (+/-sin AXIAL_TILT) so climate is preserved;
 /// only the season CADENCE changes (was a ~7.7-day wobble, now one ~360-day year).
 pub fn sun_dir(tick: u32) -> Vec3 {
-    ecliptic_to_sky(crate::orrery::sun_ecliptic_dir(t_years(tick)), tick)
+    // per-thread memo: hot paths (every plant + creature via daylight_at) ask for the SAME tick thousands of
+    // times, and the Tychos deferent/epicycle chain is far costlier than the dot product that consumes it.
+    thread_local!(static LAST: std::cell::Cell<(u64, Vec3)> = const { std::cell::Cell::new((u64::MAX, Vec3::ZERO)) });
+    LAST.with(|c| {
+        let (t, d) = c.get();
+        if t == tick as u64 {
+            return d;
+        }
+        let d = ecliptic_to_sky(crate::orrery::sun_ecliptic_dir(t_years(tick)), tick);
+        c.set((tick as u64, d));
+        d
+    })
 }
 
 /// Moon dir (unit) at `tick`: real Tychos geocentric moon (~monthly, was a fixed 8-day circle), through the
@@ -620,6 +731,52 @@ pub fn climate_target(d: Vec3, tick: u32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn atlas_matches_exact() {
+        let mut rng = crate::rng::Rng::seed(7);
+        let mut worst = (0.0f32, 0.0f32);
+        for _ in 0..20000 {
+            let d = Vec3::new(rng.range(-1.0, 1.0), rng.range(-1.0, 1.0), rng.range(-1.0, 1.0)).normalize_or_zero();
+            if d == Vec3::ZERO {
+                continue;
+            }
+            worst.0 = worst.0.max((elevation01(d) - elevation01_exact(d)).abs());
+            let p = atlas_sample(d, |a| &a.patch).unwrap();
+            worst.1 = worst.1.max((p - moisture_patch_exact(d)).abs());
+        }
+        assert!(worst.0 < 5e-3 && worst.1 < 5e-3, "atlas error elev {} patch {}", worst.0, worst.1);
+        // coast classification is what sim + render must agree on; a near-coast flip is the visible failure
+        let flips = (0..20000)
+            .filter(|_| {
+                let d = Vec3::new(rng.range(-1.0, 1.0), rng.range(-1.0, 1.0), rng.range(-1.0, 1.0)).normalize_or_zero();
+                d != Vec3::ZERO && (elevation01(d) < SEA_LEVEL) != (elevation01_exact(d) < SEA_LEVEL)
+            })
+            .count();
+        assert!(flips < 20, "{flips} coast flips per 20000");
+    }
+
+    #[test]
+    fn atlas_continuous_across_face_seams() {
+        // walk across every cube edge region: neighbouring dirs straddling a face boundary must agree
+        let mut rng = crate::rng::Rng::seed(11);
+        for _ in 0..5000 {
+            let a = rng.range(-1.0, 1.0);
+            // all 12 cube edges: two axes pinned at +-1, the third free
+            for (sx, sy) in [(1.0, 1.0), (1.0, -1.0), (-1.0, 1.0), (-1.0, -1.0)] {
+              for (d, step) in [
+                (Vec3::new(sx, sy, a), Vec3::new(sx, -sy, 0.0)),
+                (Vec3::new(sx, a, sy), Vec3::new(sx, 0.0, -sy)),
+                (Vec3::new(a, sx, sy), Vec3::new(0.0, sx, -sy)),
+              ] {
+                let e = 1e-4;
+                let lo = elevation01((d + step * e).normalize());
+                let hi = elevation01((d - step * e).normalize());
+                assert!((lo - hi).abs() < 2e-3, "seam jump {} at {d:?}", (lo - hi).abs());
+              }
+            }
+        }
+    }
 
     // Migration needs somewhere BETTER to go. Pins the two properties that make that true: the hemispheres
     // are in opposite seasons at any moment, and the swing is large inside one creature lifetime (~2800

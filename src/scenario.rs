@@ -206,9 +206,7 @@ fn reflex_brain(name: &str, sensors: &[Sensor]) -> Option<Net> {
     let mut ih: Vec<Vec<f32>> = (0..n_hidden).map(|_| vec![0.0; n_in + 1]).collect();
     let mut ho: Vec<Vec<f32>> = (0..crate::genome::OUTPUTS).map(|_| vec![0.0; n_hidden + 1]).collect();
     let (i_daylight, i_threat_d, i_threat_b) = (base + 1, base + 6, base + 7);
-    // prey globals are appended LAST (after the memory block), so they index off the end of GLOBAL_INPUTS
-    // rather than a fixed offset: adding another global shifts these two and nothing above them.
-    let (i_prey_d, i_prey_b) = (base + crate::genome::GLOBAL_INPUTS - 2, base + crate::genome::GLOBAL_INPUTS - 1);
+    let (i_prey_d, i_prey_b) = (base + crate::genome::IN_PREY_D, base + crate::genome::IN_PREY_B);
     match name {
         "approach-food" => {
             // h0 = food proximity (sum sensor inv-dist); h1 = steering (food left vs right)
@@ -707,16 +705,14 @@ pub fn scenario_step(
 mod tests {
     use super::*;
     use crate::config::ATTACK_INTENT_THRESH;
-    use crate::genome::{forward, GLOBAL_INPUTS, SIG_PER_SENSOR};
+    use crate::genome::{forward, IN_PREY_B, IN_PREY_D, SIG_PER_SENSOR};
 
-    // The prey globals index off the END of GLOBAL_INPUTS, so this also catches a future global being
-    // appended without the reflex following it: the prior would silently wire itself to the wrong column.
     #[test]
     fn chase_prey_reflex_closes_and_lunges_only_when_prey_is_near() {
         let sensors = vec![Sensor { angle: -0.3, range: 20.0 }, Sensor { angle: 0.3, range: 20.0 }];
         let net = reflex_brain("chase-prey", &sensors).expect("chase-prey prior exists");
         let base = sensors.len() * SIG_PER_SENSOR;
-        let (i_prey_d, i_prey_b) = (base + GLOBAL_INPUTS - 2, base + GLOBAL_INPUTS - 1);
+        let (i_prey_d, i_prey_b) = (base + IN_PREY_D, base + IN_PREY_B);
 
         let idle = vec![0.0f32; n_inputs(sensors.len())];
         let (_, out_idle) = forward(&net, &idle);
