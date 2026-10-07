@@ -1,184 +1,49 @@
-# CLAUDE.md — Evolvarium
+# Evolvarium
 
-Guidance for Claude Code working in this repo. This file is project-specific and takes precedence over the
-parent workspace `CLAUDE.md` for anything that conflicts.
-
-## What this is
-
-A 3D artificial-life sim on a small **planet** (Rust + Bevy 0.18). Tiny per-creature neural-net brains
-(genome = weights + sensors + traits) forage, eat, fight, breed, and learn during their lives; a genetic
-algorithm + lifetime learning evolve them against a living, co-evolving food web on a sphere with day/night,
-clouds, rain, wildfire, oceans, mountains, and cold-pole/warm-equator climate.
+3D artificial-life sim on a small planet (Rust + Bevy 0.19). Per-creature NN brains evolve by GA + lifetime learning against a co-evolving food web with climate, weather, fire and oceans.
 
 ## Current phase: FUNDAMENTALS RETROFIT (chemistry + physics)
 
-Replacing the phenomenological model with conserved chemistry + real physical law. Plan:
-`~/.claude/plans/steady-wishing-swan.md`. Roadmap: fundamentals -> living ocean -> parasites.
+Replacing the phenomenological model with conserved chemistry + real physical law. Roadmap: fundamentals, then living ocean, then parasites.
 
-**Organizing principle: matter is closed, energy flows through.** A real biosphere conserves its C/N/P
-(geology only moves it between reservoirs on slow clocks) and does NOT conserve energy: it intercepts
-sunlight and radiates infrared. Encode that asymmetry; everything else follows.
+**Organizing principle: matter is closed, energy flows through.** A real biosphere conserves its C/N/P and does NOT conserve energy: it intercepts sunlight and radiates infrared. Encode that asymmetry; everything else follows.
 
 Until this note is removed:
 
-- **Balance runs are back ON.** The whole point is that equilibria now emerge from conservation instead of
-  tuned caps, so a change that moves the equilibrium needs a headless run showing it REACHES one and holds.
-  It need not match the old numbers, which this phase deliberately invalidates.
-- **Conservation is the phase gate.** Any change touching matter carries a unit test asserting the world's
-  element totals hold across ticks. A new path that creates or destroys matter is a bug, not a tuning knob.
-- **Prefer deleting a constant over adding one.** Each phase replaces invented constants with actual law
-  (Kleiber, Liebig, Archimedes, Stefan-Boltzmann). A new magic number needs a reason it isn't derivable.
+- **Balance runs are back ON.** A change that moves the equilibrium needs a headless run showing it REACHES one and holds. It need not match old numbers, which this phase deliberately invalidates.
+- **Conservation is the phase gate.** Any change touching matter carries a unit test asserting world element totals hold across ticks. A path that creates or destroys matter is a bug, not a tuning knob.
+- **Prefer deleting a constant over adding one.** Replace invented constants with law (Kleiber, Liebig, Archimedes, Stefan-Boltzmann). A new magic number needs a reason it is not derivable.
 - Baseline for comparison: `--gens=5` on seeds 1/5/9, captured before the retrofit began.
-- The old visuals-first phase is over; render-only work no longer skips balance verification.
+- Render-only work no longer skips balance verification.
 
-## Commit & push policy (this project)
+## Commits
 
-**Standing permission: commit and push whenever you judge it's a good time** — you do not need to ask first.
-This overrides the parent workspace's per-commit-approval rule for this repo. Use judgment:
+**Standing permission: commit and push when you judge it a good time.** Overrides the workspace per-commit rule for this repo.
 
-- Commit at coherent stopping points (a feature/fix done + verified), not mid-broken-state.
-- Before committing, the tree must be green: `cargo build` clean, `cargo test` passing, and a headless smoke
-  run (`cargo run -- --headless --gens=1`) OK.
-- Keep verification runs SHORT. The sim got heavier (grass, climate, bathymetry) and the worktree is often
-  shared, so several `evolvarium` processes contend for cores -> long runs crawl. Default to `--gens=1` for a
-  smoke and `--gens=3` to `--gens=5` for a quick balance sanity check; only reach for `--gens=15+` when a
-  change is genuinely balance-critical and a short run can't show the trend. Headless logs are block-buffered
-  to a pipe (flush at exit), so prefer a short run that finishes over tailing a long one.
-- Write honest commit messages (end body with the standard Co-Authored-By trailer).
-- Push to `origin main`; also mirror to the backup branch when convenient: `git push origin main:build`.
-- Note: this worktree may be shared with another agent at times — if files outside your change are
-  mid-refactor and don't build/test, hold the commit until the tree is green again.
+- Only at coherent stopping points, tree green: `cargo build` clean, `cargo test` passing, `cargo run -- --headless --gens=1` OK.
+- The worktree is often shared: if files outside your change are mid-refactor and do not build, hold the commit.
+- Push `origin main`; mirror to backup when convenient: `git push origin main:build`.
+- Keep verification runs SHORT (parallel `evolvarium` processes contend for cores): `--gens=1` smoke, `--gens=3..5` balance sanity, `--gens=15+` only when a short run cannot show the trend. Headless logs are block-buffered to a pipe, so prefer a short run that finishes over tailing a long one.
 
-## Run / inspect
+## Running
 
-```bash
-cargo run                                   # planet visualizer (auto-loads evolved-continuous.json)
-cargo run -- --headless --gens=N            # no window, fast-forward, per-gen stats, exits
-cargo run -- --headless --gens=N --save=run.json   # evolve then save best-healthy snapshot
-cargo run -- --load=run.json                # resume a saved population
-```
+- **NEVER auto-start the windowed visualizer** (`cargo run` with a window). Use `--headless` or `--capture`, which exit on their own. Flags are in `main.rs`.
+- **Redirect `--capture` output to a file, never pipe it.** The PNG is written a few frames after the "capture: writing" log line; piping into `head`/`tail`/`grep` SIGPIPEs the process first, and it exits 2 with no file, which looks like a crash. Use `--capture=X > x.log 2>&1`.
 
-### GPU capture tool (`--capture`) — primary way to verify rendering offline
+## Plant/tree tuning harness
 
-Renders the REAL Bevy scene (true directional light + shadows + ambient) from a chosen vantage, writes a
-PNG, exits. Needs a GPU + display. Read the PNG back to inspect. Flags:
+Design, CLI contract and schemas: `~/Documents/Github/keepfiles/clients/evolvarium/14-tuning-harness.md`. Code: `src/scenario.rs`; workflows in `tools/*.workflow.js` (opt-in, Workflow tool).
 
-```bash
-cargo run -- --capture=PREFIX               # walk view at the homeland (morning sun)
-  --cap-when=morning|noon|dusk|night        # sun phase
-  --cap-off=N                               # raw sun-tick offset (overrides --cap-when), dial sun angle
-  --cap-pitch=F                             # camera pitch (negative = look down)
-  --cap-yaw=F                               # walk heading
-  --cap-orbit                               # capture from orbit (space) instead of walk (surface)
-  --cap-dist=F                              # orbit distance from planet center (test zoom; 95..420)
-  --cap-lat=DEG                             # top-down orbit view at latitude DEG (+90 = north pole, -90 = south); implies orbit, pair w/ --cap-dist
-  --cap-water                               # stand submerged in shallow flora band (verify swim: kelp + fish + blue tint)
-  --cap-warmup=N                            # sim frames before the shot (default 50); raise for slow effects (fliers climbing, wear trails). Pair w/ --load=fullstate.json to skip warmup.
-  --cap-mmfield=N                           # open corner minimap on overlay N (4 soil, 5 water, 6 fire, 7 life, 8 wear)
-```
+- **Gene-agnostic:** overrides, drift and dedup go through serde, so a new `PlantGenome` gene needs zero harness edits (just `#[serde(default)]` + a `mutate()` drift line).
+- `plant-library.json` is the tuned seed bank; normal runs seed every biome from it (`--no-plant-lib` disables). Genes added after the library was written are randomized per plant on seed, so do not rebuild the library just for a new gene.
+- Balance frictions go to `keepfiles/clients/evolvarium/tuning-frictions.md`.
 
-**Redirect capture output to a file, never pipe it.** The PNG is written a few frames AFTER the "capture:
-writing" log line. Piping to `head`/`tail`/`grep` closes the pipe, SIGPIPE kills the process before the
-screenshot lands, and it exits 2 with no error and no file, which reads exactly like a crash. Use
-`--capture=X > x.log 2>&1` and then read the log.
+## Design docs
 
-`--shots[=PREFIX]` is a separate CPU ray-traced snapshot (no GPU) for offline planet views.
-
-**NEVER auto-start the long-running visualizer** (`cargo run` with a window) to "watch" it — use `--capture`
-or `--headless` so it exits on its own.
-
-## Plant/tree tuning harness (BUILT — use it to evolve flora + seed the planet)
-
-A search loop that evolves plant/tree genetics per environment, banks the winners, and seeds the whole
-planet from that bank. Code: `src/scenario.rs` (+ hooks in `sim.rs`/`persist.rs`/`main.rs`). Full design:
-`~/Documents/Github/clients/evolvarium/14-tuning-harness.md`.
-
-**Layer 1 — engine CLI (deterministic, headless, exits on its own):**
-
-```bash
-# run ONE isolated cohort (5-30 plants/trees) in a controlled environment band, write a metrics+genomes JSON
-cargo run -- --scenario=cohort.json --out=result.json [--seed=K]
-# fold a result's best survivors into the seed-bank library under a niche (accumulates across runs)
-cargo run -- --merge=result.json --niche=NAME [--plant-lib=plant-library.json] [--lib-cap=8]
-# harvest a whole-planet co-evolution run's survivors (a --headless --save snapshot) into the library, biome-labeled
-cargo run -- --merge-snapshot=run.json [--niche-suffix=-coevo] [--plant-lib=plant-library.json]
-```
-
-Scenario JSON: `{ seed, ticks, target_count, world:{ lat_band:[lo,hi] (|lat| radians), wetness (= effective
-moisture), aquatic, rocky, fire, grazers, second_band }, plant_cohort:[{ count, archetype, tree, genome:{
-<any gene>:<value> } }] }`. The `genome` override object is **free-form** — any `PlantGenome` field, including
-genes added later. Result JSON: survival/peak/target, mean mass/age, births/deaths/R, `deaths_by_cause`,
-`trait_drift` (per gene), `health_score` (0..1), `best_genomes`.
-
-**GENE-AGNOSTIC**: overrides + drift + dedup go through serde generically, so adding a `PlantGenome` gene
-needs ZERO harness edits (just the usual `#[serde(default)]` + a `mutate()` drift line).
-
-**Seed bank → planet:** `plant-library.json` (in the repo) is the tuned bank. A normal `cargo run` /
-`--headless` seeds every biome from it (biome-matched draws; archetype fallback where unmatched;
-`--no-plant-lib` to disable). Genes added AFTER the library was written are **randomized per-plant on seed**
-(variety), so don't rebuild the library just because you added a gene.
-
-**Layer 2 — Workflows (opt-in, spawn agents; run via the Workflow tool):**
-- `tools/tune-plants.workflow.js` — one tuner agent per niche (core land, aquatic, trees, mixed pairs),
-  synthesize merges winners into the library.
-- `tools/coevolve-niche.workflow.js` — within-niche competition (contrasting cohorts + grazers per biome).
-- `tools/audit-plants.workflow.js` — QA: fan out one agent per behavioral RULE (climate niches, drown/
-  desiccate, succulence, grazing arms race, growth trade-offs, dispersal, tree size/land-only/sterility,
-  no-zombies); each runs a controlled A/B scenario + judges PASS/FAIL/UNCLEAR. Run it to verify the flora
-  obeys the design rules after sim changes.
-- Whole-planet co-evolution: just run `--headless --gens=N --load=evolved-continuous.json --save=run.json`
-  (the living sim IS co-evolution), then `--merge-snapshot=run.json`.
-
-Balance frictions the harness surfaces go to `~/Documents/Github/clients/evolvarium/tuning-frictions.md`.
-
-## Module map (`src/`)
-
-- `main.rs` — app wiring, scene setup (globe, ocean shell, sun light + cascade, moon, sun disc, stars), CLI.
-- `sphere.rs` — the spherical world: terrain/ocean/temperature/moisture noise fields, sun/moon, clouds,
-  cloud-driven rain. Pure functions shared by sim + render + snapshot.
-- `sim.rs` — the simulation: weather, fire, life/predation/plant/rot steps, generation step.
-- `scenario.rs` — tuning harness: `--scenario` cohort runner, result schema, `--merge`/`--merge-snapshot` library builders.
-- `camera.rs` — orbit + walk cameras; per-mode shadow config (cascade, filtering, planet caster), swim.
-- `viz.rs` — render-only visuals: creature/plant/tree meshes, clouds, rain streaks, day/night lighting,
-  underwater tint, HUD, legend, god-controls.
-- `capture.rs` — the `--capture` GPU screenshot tool.
-- `genome.rs` / `components.rs` / `plant.rs` — genome, ECS components, plant model.
-- `terrain.rs` — globe render mesh. `snapshot.rs` — CPU `--shots` renderer. `config.rs` — balance constants.
-
-## Design docs & specs (outside the repo)
-
-The full design specs + roadmap live in **`~/Documents/Github/clients/evolvarium/`** (a plain docs folder,
-NOT a git repo — edit the files directly; nothing to commit there). Read the relevant doc before nontrivial
-design work:
-
-- `00-concept.md` … `13-living-food-and-distribution.md` — numbered design specs (concept, architecture,
-  genome encoding, brain/NN, metabolism + nutrients, environment fields, god controls, roadmap, open
-  questions, environment trade-offs, crate stack, diet/growth/disease, living food).
-- `14-tuning-harness.md` — design blueprint for the tuning harness. The PLANT/TREE arm is BUILT (see the
-  "Plant/tree tuning harness" section above for the CLI + workflows); the CREATURE arm is still spec-only.
-  Full schemas, CLI contract, and the creature-side reflex presets are in there.
-- `tuning-frictions.md` — running log of balance frictions the harness surfaces (F1 = nutrient
-  master-expression gradient too soft; F2 = bite pegs ~1.0; F3-F42 = plant tuning findings).
-- `PITCH.md`, `SESSION-STATUS.md` — friend-facing pitch + a resume/handoff note.
-
-`BACKLOG.md` (in this repo) is the source of truth for what's done vs open; the spec folder is the "why/how".
+Specs live in `~/Documents/Github/keepfiles/clients/evolvarium/` (numbered `00-`..`15-`). Read the relevant one before nontrivial design work. `BACKLOG.md` in this repo is the source of truth for done vs open; update it when landing notable work.
 
 ## Conventions
 
-- **Everything is a trade-off, no free lunch.** Every gene, ability, or behavior needs an explicit cost on another
-  axis, that is what creates selection pressure, niches, and diversity. A purely-good trait just maxes out and
-  collapses variety (plant defense pegged at ~0.9 when its cost was too weak). Already in: bigger `bite` costs
-  upkeep, `defense`/`nutrient` slow growth, generalist diet has overhead, speed costs energy convexly. Before
-  shipping a mechanic, name its cost side; if it has none, add one. Same principle as the one-knob-opposite-signs
-  rule in spec doc 10.
-- Comments are written for an AI agent, never a human (this code is AI-built only). Caveman-lite: drop
-  articles/filler/hedging, fragments OK. Keep only NON-obvious info an AI can't recover by reading the code:
-  why a constant has its value, balance trade-offs, units/ranges (0..1, radians, ticks), cross-file coupling,
-  invariants, gotchas, spec/milestone refs. DELETE comments that just restate what the next line does. Same
-  rule applies to `///` docs and module-header blocks. See the caveman-lite section in the workspace CLAUDE.md.
-- No em/en dashes in generated text; use commas/periods/colons or "and".
-- Balance-affecting sim changes (rain, mortality, reproduction) are sensitive: verify headless population
-  stays stable (~70-90 carrying capacity) before committing. Genome/NN-architecture changes invalidate saved
-  seeds — gate or regenerate them.
-- `BACKLOG.md` tracks roadmap + done items; update it when landing notable work.
-```
+- **Every trait has a cost.** Each gene, ability or behavior needs an explicit cost on another axis, or it maxes out and collapses variety (plant defense pegged ~0.9 when its cost was too weak). Name the cost side before shipping a mechanic. Same principle as the one-knob-opposite-signs rule in spec 10.
+- Code is AI-built only, so comments target an agent: units/ranges (0..1, radians, ticks), why a constant has its value, cross-file coupling.
+- Genome/NN-architecture changes invalidate saved seeds: gate or regenerate them.
