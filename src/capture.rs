@@ -269,11 +269,11 @@ fn capture_tick(
     let day = home.dot(sd);
     let (shadows, fwd, vis) = lights
         .single()
-        .map(|(l, gt, v)| (l.shadows_enabled, gt.forward().as_vec3(), v.get()))
+        .map(|(l, gt, v)| (l.shadow_maps_enabled, gt.forward().as_vec3(), v.get()))
         .unwrap_or((false, Vec3::ZERO, false));
     let weye = walkers.single().map(|w| (crate::sphere::is_ocean(w.dir), w.eye_alt)).unwrap_or((false, 0.0));
     info!(
-        "capture diag: vtick={} -forward={:?} home.dot(sd)={:.2} shadows_enabled={} light_view_visible={} underwater={} is_ocean={} eye_alt={:.2}",
+        "capture diag: vtick={} -forward={:?} home.dot(sd)={:.2} shadow_maps_enabled={} light_view_visible={} underwater={} is_ocean={} eye_alt={:.2}",
         vtick, -fwd, day, shadows, vis, underwater.0, weye.0, weye.1
     );
     let _ = sd;

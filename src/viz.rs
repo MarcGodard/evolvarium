@@ -289,7 +289,7 @@ fn spawn_minimap(
         })
         .with_child((
             Text::new("map: biome  [M]"),
-            TextFont { font_size: 12.0, ..default() },
+            TextFont { font_size: FontSize::Px(12.0), ..default() },
             TextColor(Color::srgb(0.85, 0.9, 1.0)),
             MinimapLabel,
         ));
@@ -439,7 +439,7 @@ fn update_atmosphere(
         return;
     }
     let Ok(m3) = atmo.single() else { return };
-    let Some(mesh) = meshes.get_mut(&m3.0) else { return };
+    let Some(mut mesh) = meshes.get_mut(&m3.0) else { return };
     let pos: Vec<[f32; 3]> = match mesh.attribute(Mesh::ATTRIBUTE_POSITION) {
         Some(bevy::mesh::VertexAttributeValues::Float32x3(p)) => p.clone(),
         _ => return,
@@ -478,7 +478,7 @@ fn minimap_rebuild(mut mm: ResMut<Minimap>, mut meshes: ResMut<Assets<Mesh>>, mu
     mm.dirty = false;
     let field = mm.field;
     if field < MM_STATIC {
-        if let Some(m) = meshes.get_mut(&mm.mesh) {
+        if let Some(mut m) = meshes.get_mut(&mm.mesh) {
             *m = crate::terrain::build_globe_colored(MM_RES, |d| minimap_color(field, d));
         }
     }
@@ -516,7 +516,7 @@ fn minimap_dynamic(
             d.iter().map(|&c| (c / MM_DENSITY_FULL).min(1.0)).collect()
         }
     };
-    if let Some(m) = meshes.get_mut(&mm.mesh) {
+    if let Some(mut m) = meshes.get_mut(&mm.mesh) {
         *m = crate::terrain::build_globe_colored(MM_RES, |dir| {
             minimap_dynamic_color(field, dir, vals[crate::sim::grid_cell(dir)])
         });
@@ -1064,7 +1064,7 @@ fn hide_dead(mut q: Query<(&Alive, &mut Visibility), With<Creature>>) {
 fn color_carrion(mut mats: ResMut<Assets<StandardMaterial>>, q: Query<(&Rot, &MeshMaterial3d<StandardMaterial>)>) {
     for (rot, mm) in &q {
         let f = (rot.age as f32 / ROT_GONE as f32).clamp(0.0, 1.0); // 0 fresh .. 1 rotten
-        if let Some(m) = mats.get_mut(&mm.0) {
+        if let Some(mut m) = mats.get_mut(&mm.0) {
             m.base_color = Color::hsl(10.0 + 90.0 * f, 0.6, 0.5 - 0.35 * f); // red->sick-green, darkening
         }
     }
@@ -1563,7 +1563,7 @@ fn day_night_lighting(
         tf.translation = mp;
         // tidal lock: same face toward planet center (look_at origin) so the textured near side always shows.
         tf.look_at(Vec3::ZERO, Vec3::Y);
-        if let Some(m) = materials.get_mut(&mat.0) {
+        if let Some(mut m) = materials.get_mut(&mat.0) {
             // sun-lit moon (phases via N.L); emissive is only a faint floor. Blood moon: in the umbra sun light
             // ~vanishes, so raise emissive to a coppery glow so the eclipsed full moon reads dim red.
             let e = Vec3::new(0.06, 0.06, 0.07).lerp(Vec3::new(0.35, 0.08, 0.05), lunar);
@@ -1596,7 +1596,7 @@ fn update_sun_glow(
         // billboard: rotate quad normal (+Z) toward camera.
         let to_cam = (cam_tf.translation - tf.translation).normalize_or_zero();
         tf.rotation = Quat::from_rotation_arc(Vec3::Z, to_cam);
-        if let Some(m) = materials.get_mut(&mat.0) {
+        if let Some(mut m) = materials.get_mut(&mat.0) {
             let b = (1.0 - 0.92 * solar).max(0.05);
             m.base_color = Color::srgb(b, b * 0.96, b * 0.86); // dim warm-white during eclipse
         }
@@ -1637,7 +1637,7 @@ fn fade_sky_stars(
         (1.0 - t * t * (3.0 - 2.0 * t)).max(0.02)
     };
     for mat in &stars {
-        if let Some(m) = materials.get_mut(&mat.0) {
+        if let Some(mut m) = materials.get_mut(&mat.0) {
             m.base_color = Color::srgb(f, f, f);
         }
     }
@@ -2067,7 +2067,7 @@ fn update_clouds(
         // Move + orient: sit at drifted pos, lie flat against sky shell (squash along local up).
         tf.translation = dir * (alt + puff.hbias);
         tf.rotation = Quat::from_rotation_arc(Vec3::Y, dir);
-        if let Some(m) = mats.get_mut(&mm.0) {
+        if let Some(mut m) = mats.get_mut(&mm.0) {
             // Daylight-aware albedo (multiplies the white sun light AND the mesh's baked depth profile).
             // cloud_sun_tint carries the forward-scatter terminator and the grazing dawn/dusk gold; the
             // night fade below is separate because it is about visibility from orbit, not about scattering.
@@ -2443,10 +2443,10 @@ fn fire_sheet_visuals(
         tf.translation = surf + up * 0.04;
         tf.rotation = Quat::from_rotation_arc(Vec3::Y, up);
         tf.scale = Vec3::new(w, hgt, w);
-        if let Some(m) = meshes.get_mut(&mesh3d.0) {
+        if let Some(mut m) = meshes.get_mut(&mesh3d.0) {
             m.insert_attribute(Mesh::ATTRIBUTE_POSITION, flame_cluster_positions(t, c as f32 * 0.7));
         }
-        if let Some(m) = mats.get_mut(mat) {
+        if let Some(mut m) = mats.get_mut(mat) {
             let b = (0.55 + 0.45 * flick) * (0.5 + 0.5 * f); // hotter + flicker = brighter additive glow
             m.base_color = Color::LinearRgba(LinearRgba::new(b, b, b, b));
         }
@@ -2486,10 +2486,10 @@ fn smoke_visuals(
         tf.translation = surf + up * (0.04 + flame_h * 0.5);
         tf.rotation = Quat::from_rotation_arc(Vec3::Y, up);
         tf.scale = Vec3::new(w, hgt, w);
-        if let Some(m) = meshes.get_mut(&mesh3d.0) {
+        if let Some(mut m) = meshes.get_mut(&mesh3d.0) {
             m.insert_attribute(Mesh::ATTRIBUTE_POSITION, smoke_plume_positions(t, c as f32 * 0.7));
         }
-        if let Some(m) = mats.get_mut(mat) {
+        if let Some(mut m) = mats.get_mut(mat) {
             let op = (0.30 + 0.55 * f).min(0.85); // denser smoke from hotter fire (capped)
             m.base_color = Color::srgba(1.0, 1.0, 1.0, op);
         }
@@ -2610,7 +2610,7 @@ fn restyle_creatures(
 ) {
     for (g, mm) in &q {
         let (color, _) = creature_look(g); // skin_hue/sat, venom warning, fur/armor tint (multiplies vertex colors)
-        if let Some(m) = mats.get_mut(&mm.0) {
+        if let Some(mut m) = mats.get_mut(&mm.0) {
             m.base_color = color;
         }
     }
@@ -2780,7 +2780,7 @@ fn spawn_identity_ui(mut commands: Commands) {
     commands.spawn((
         IdentityText,
         Text::new(""),
-        TextFont { font_size: 15.0, ..default() },
+        TextFont { font_size: FontSize::Px(15.0), ..default() },
         TextColor(Color::srgb(0.9, 0.95, 1.0)),
         Node { position_type: PositionType::Absolute, top: Val::Px(46.0), left: Val::Px(10.0), ..default() },
         Visibility::Hidden,
@@ -2939,7 +2939,7 @@ fn ocean_opacity(
     // reflection and reads solid, which is what the eye expects.
     let (want_mode, want_alpha) = if underwater.0 { (AlphaMode::Blend, 0.62) } else { (AlphaMode::Opaque, 1.0) };
     let Ok(h) = q.single() else { return };
-    let Some(m) = mats.get_mut(&h.0) else { return };
+    let Some(mut m) = mats.get_mut(&h.0) else { return };
     if m.alpha_mode != want_mode || (m.base_color.alpha() - want_alpha).abs() > 0.01 {
         m.alpha_mode = want_mode;
         m.base_color = Color::srgba(1.0, 1.0, 1.0, want_alpha); // white tint: vertex colors carry water hue
@@ -2998,7 +2998,7 @@ fn update_aurora_curtains(
         // don't blow to white) for ethereal look, not laser beams.
         let i = (night * (0.30 + 0.7 * flick)).clamp(0.0, 1.25);
         let alpha = (night * (0.2 + 0.7 * flick)).clamp(0.0, 0.85);
-        if let Some(mat) = mats.get_mut(&mm.0) {
+        if let Some(mut mat) = mats.get_mut(&mm.0) {
             mat.base_color = Color::LinearRgba(LinearRgba::new(i, i, i, alpha));
         }
     }
@@ -3021,7 +3021,7 @@ fn update_globe_climate(
     }
     *next = gen.tick + GLOBE_RECOLOR_TICKS;
     let Ok(h) = planet.single() else { return };
-    let Some(mesh) = meshes.get_mut(&h.0) else { return };
+    let Some(mut mesh) = meshes.get_mut(&h.0) else { return };
     // clone positions so immutable borrow ends before re-inserting color attribute
     let positions: Vec<[f32; 3]> = match mesh.attribute(Mesh::ATTRIBUTE_POSITION) {
         Some(bevy::mesh::VertexAttributeValues::Float32x3(p)) => p.clone(),
@@ -3056,7 +3056,7 @@ fn spawn_daycycle_ui(mut commands: Commands) {
         })
         .with_child((
             Text::new(""),
-            TextFont { font_size: 22.0, ..default() },
+            TextFont { font_size: FontSize::Px(22.0), ..default() },
             TextColor(Color::WHITE),
             DayCycleText,
         ));
@@ -3099,7 +3099,7 @@ fn update_daycycle(
 fn spawn_world_stats_ui(mut commands: Commands) {
     commands.spawn((
         Text::new("world..."),
-        TextFont { font_size: 13.0, ..default() },
+        TextFont { font_size: FontSize::Px(13.0), ..default() },
         TextColor(Color::srgb(0.78, 0.9, 1.0)),
         Node {
             position_type: PositionType::Absolute,
@@ -3174,7 +3174,7 @@ CONTROLS
 fn spawn_legend_ui(mut commands: Commands) {
     commands.spawn((
         Text::new(LEGEND),
-        TextFont { font_size: 14.0, ..default() },
+        TextFont { font_size: FontSize::Px(14.0), ..default() },
         TextColor(Color::srgb(0.92, 0.96, 1.0)),
         Node {
             position_type: PositionType::Absolute,
@@ -3338,7 +3338,7 @@ fn spawn_phylo_ui(mut commands: Commands) {
         ))
         .with_child((
             Text::new("PHYLOGENY  [Y]"),
-            TextFont { font_size: 13.0, ..default() },
+            TextFont { font_size: FontSize::Px(13.0), ..default() },
             TextColor(Color::srgb(0.9, 0.95, 1.0)),
             PhyloTitle,
         ));
@@ -3378,7 +3378,7 @@ fn spawn_nameplates(mut commands: Commands) {
         commands.spawn((
             CreatureLabel::default(),
             Text::new(""),
-            TextFont { font_size: 14.0, ..default() },
+            TextFont { font_size: FontSize::Px(14.0), ..default() },
             TextColor(Color::srgb(1.0, 1.0, 0.9)), // near-white on a dark pill -> reads over grass + sky
             BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.55)), // contrast pill so the name is legible anywhere
             Node {
@@ -3561,7 +3561,7 @@ fn update_phylo_panel(
     let mut new_lines = Vec::with_capacity(display.len());
     for (line, col) in display {
         let e = commands
-            .spawn((Text::new(line), TextFont { font_size: 12.0, ..default() }, TextColor(col), ChildOf(panel_e)))
+            .spawn((Text::new(line), TextFont { font_size: FontSize::Px(12.0), ..default() }, TextColor(col), ChildOf(panel_e)))
             .id();
         new_lines.push(e);
     }
@@ -3643,7 +3643,7 @@ fn update_world_stats(
 fn spawn_stats_ui(mut commands: Commands) {
     commands.spawn((
         Text::new("H legend  -  J hide HUD  -  N names  -  left-click a creature or plant to inspect"),
-        TextFont { font_size: 13.0, ..default() },
+        TextFont { font_size: FontSize::Px(13.0), ..default() },
         TextColor(Color::WHITE),
         Node {
             position_type: PositionType::Absolute,
@@ -3952,7 +3952,7 @@ fn update_sky_dome(
     *next = gen.tick + SKY_DOME_REPAINT_TICKS;
     let vtick = (gen.tick as i64 + offset.0).max(0) as u32;
     let sun = crate::sphere::sun_dir(vtick).normalize_or_zero();
-    if let Some(mesh) = meshes.get_mut(&mesh3d.0) {
-        crate::viz_sky::paint_sky_dome(mesh, tf.rotation.inverse() * sun);
+    if let Some(mut mesh) = meshes.get_mut(&mesh3d.0) {
+        crate::viz_sky::paint_sky_dome(&mut mesh, tf.rotation.inverse() * sun);
     }
 }

@@ -272,7 +272,7 @@ fn spawn_sky_labels(mut commands: Commands) {
         commands.spawn((
             label,
             Text::new(text),
-            TextFont { font_size: 12.0, ..default() },
+            TextFont { font_size: FontSize::Px(12.0), ..default() },
             TextColor(Color::srgb(0.8, 0.85, 0.95)),
             Node { position_type: PositionType::Absolute, ..default() },
             Visibility::Hidden,

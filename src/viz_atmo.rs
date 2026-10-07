@@ -82,7 +82,7 @@ pub fn update_haze(
     }
     let Ok(cam_tf) = cam.single() else { return };
     let eye = cam_tf.translation();
-    let Some(mesh) = meshes.get_mut(&m3.0) else { return };
+    let Some(mut mesh) = meshes.get_mut(&m3.0) else { return };
     let pos: Vec<[f32; 3]> = match mesh.attribute(Mesh::ATTRIBUTE_POSITION) {
         Some(bevy::mesh::VertexAttributeValues::Float32x3(p)) => p.clone(),
         _ => return,

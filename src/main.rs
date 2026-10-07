@@ -461,7 +461,7 @@ fn setup_scene(
         viz::Atmosphere,
     ));
     viz_atmo::spawn_haze(&mut commands, &mut meshes, &mut materials);
-    // sun (directional light; direction set per-frame by day_night_lighting). shadows_enabled toggled by
+    // sun (directional light; direction set per-frame by day_night_lighting). shadow_maps_enabled toggled by
     // camera::update_shadow_mode: OFF in orbit (shadow-range boundary showed as "eclipse" disc when zoomed),
     // ON in walk (eye-level horizon close so range covers whole view -> real shadows, no disc). Cascade tuned
     // TIGHT for ground scale (creatures ~0.5, trees ~3 units): default config spreads shadow map over ~1000-
@@ -470,7 +470,7 @@ fn setup_scene(
     // so only trees/creatures cast. shadow_normal_bias trims acne on curved terrain receiver.
     commands.spawn((
         DirectionalLight {
-            shadows_enabled: true,
+            shadow_maps_enabled: true,
             illuminance: 64_000.0, // daylight, ~36% below full-noon 100k (two 20% cuts) for softer sun
             shadow_depth_bias: 0.04,
             shadow_normal_bias: 1.8,

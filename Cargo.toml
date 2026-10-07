@@ -8,7 +8,7 @@ description = "Artificial-life sim: GA grows blob bodies + brain shape, brains l
 # Pin Bevy. Ecosystem crates gate the version (see 11-crate-stack.md) so do NOT float.
 # M0 needs only the engine. bevy_rand / bevy_egui / spatial hash arrive in later milestones.
 # "wav" feature: procedural audio (src/audio.rs) synthesizes in-memory WAV; default bevy audio enables only ogg.
-bevy = { version = "0.18", features = ["wav"] }
+bevy = { version = "0.19", features = ["wav"] }
 
 # Save/load survivor population (serde + JSON). Lets a good run stop + resume (BACKLOG P2).
 serde = { version = "1", features = ["derive"] }
@@ -20,7 +20,7 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 # P2 morphology gym (--gym only): articulated-body physics to evolve+learn gaits in isolation. Headless
 # feature set (no render/debug/picking deps); enhanced-determinism for reproducible gym runs. NOT used by the
 # live planet (kinematic) -- only gym.rs builds a PhysicsPlugins app.
-avian3d = { version = "0.6", default-features = false, features = ["3d", "f32", "parry-f32", "default-collider", "xpbd_joints", "enhanced-determinism"] }
+avian3d = { version = "0.7", default-features = false, features = ["3d", "f32", "parry-f32", "default-collider", "xpbd_joints", "enhanced-determinism"] }
 
 # Bevy build-speed profile (deps optimized, our crate fast to recompile).
 [profile.dev]

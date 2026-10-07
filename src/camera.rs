@@ -441,7 +441,7 @@ fn update_shadow_mode(
     }
     let walk = *mode == CameraMode::Walk;
     for mut l in &mut lights {
-        l.shadows_enabled = show_shadows.0; // real shadows in walk AND orbit (no eclipse disc)
+        l.shadow_maps_enabled = show_shadows.0; // real shadows in walk AND orbit (no eclipse disc)
         // planet casts in both modes. On surface curved globe self-shadows ground eye stands on -> needs
         // heftier normal bias to push receiver off own caster (no acne). Orbit (large-scale terminator,
         // distant view) keeps lighter bias for crisp object shadows.
