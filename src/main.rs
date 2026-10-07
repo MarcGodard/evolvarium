@@ -17,6 +17,7 @@ mod chem;
 mod climate;
 mod components;
 mod config;
+mod director;
 mod cppn;
 mod genome;
 mod grid;
@@ -26,6 +27,7 @@ mod morph;
 mod niche;
 mod orrery;
 mod orrery_view;
+mod perf_hud;
 mod persist;
 mod capture;
 mod plant;
@@ -323,7 +325,7 @@ fn main() {
         app.add_plugins(DefaultPlugins)
             .insert_resource(Time::<Fixed>::from_hz((1.0 / sim::DT) as f64))
             .add_plugins(camera::OrbitCameraPlugin)
-            .add_plugins((viz::VizPlugin, viz_build::BuildVizPlugin, viz_volcano::VolcanoVizPlugin))
+            .add_plugins((viz::VizPlugin, viz_build::BuildVizPlugin, viz_volcano::VolcanoVizPlugin, director::DirectorPlugin, perf_hud::PerfHudPlugin))
             .add_systems(Update, viz_atmo::update_haze)
             .add_plugins(audio::GameAudioPlugin) // procedural world audio (render-only, never headless)
             .add_plugins(orrery_view::OrreryViewPlugin)
@@ -336,7 +338,7 @@ fn main() {
             app.insert_resource(viz::MinimapInitField(field)); // open minimap on a chosen overlay for the shot
         }
         if let Some(prefix) = capture {
-            app.insert_resource(capture::CaptureCfg { prefix, when: cap_when, yaw: cap_yaw, off: cap_off, pitch: cap_pitch, orbit: cap_orbit, dist: cap_dist, underwater: cap_water, lat: cap_lat, lon: cap_lon, erupt: flag(&args, "--cap-erupt"), warmup: cap_warmup, orrery: cap_orrery, back: cap_back, focus_creature: cap_creature })
+            app.insert_resource(capture::CaptureCfg { prefix, when: cap_when, yaw: cap_yaw, off: cap_off, pitch: cap_pitch, orbit: cap_orbit, dist: cap_dist, underwater: cap_water, lat: cap_lat, lon: cap_lon, erupt: flag(&args, "--cap-erupt"), director: flag(&args, "--cap-director"), warmup: cap_warmup, orrery: cap_orrery, back: cap_back, focus_creature: cap_creature })
                 .add_plugins(capture::CapturePlugin);
         }
     }

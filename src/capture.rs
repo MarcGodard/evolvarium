@@ -28,6 +28,7 @@ pub struct CaptureCfg {
     pub lat: Option<f32>, // --cap-lat: top-down orbit view at this latitude (deg, +90 = north pole, -90 = south)
     pub lon: Option<f32>, // --cap-lon: longitude for --cap-lat (deg); None = homeland meridian
     pub erupt: bool,      // --cap-erupt: a VEI 6 fires on the first climate tick; orbit shot swings to its vent
+    pub director: bool,   // --cap-director: the director owns the camera (verifies its framing); capture only snaps
     pub warmup: u32,      // --cap-warmup: sim frames before the shot (default WARMUP). Raise to let fliers rise off the ground + land-wear trails accumulate before snapping.
     pub back: f32,        // --cap-back: walk side-vantage distance from homeland (default 22 = original framing). Small = wide-area close-up.
     pub orrery: bool,     // --cap-orrery: capture the TSN solar-system view instead of the planet
@@ -106,8 +107,8 @@ fn force_cam(
     mut q: Query<&mut Transform, (With<Camera3d>, With<crate::camera::OrbitCam>)>,
     creatures: Query<&Transform, (With<crate::components::Creature>, Without<Camera3d>)>,
 ) {
-    if cfg.orrery {
-        return; // OrreryCam set in setup_capture_view; apply_orrery frames it from the focus point
+    if cfg.orrery || cfg.director {
+        return; // OrreryCam set in setup_capture_view; the director frames its own shots
     }
     // --cap-erupt: once the eruption has fired, frame its vent obliquely so the rising plume reads
     if cfg.erupt && cfg.orbit {
@@ -204,7 +205,14 @@ fn setup_capture_view(
     mut q: Query<&mut WalkCam>,
     mut orbit_q: Query<&mut crate::camera::OrbitCam>,
     mut orrery_q: Query<&mut crate::camera::OrreryCam>,
+    director: Option<ResMut<crate::director::Director>>,
 ) {
+    if cfg.director {
+        if let Some(mut d) = director {
+            d.engage();
+        }
+    }
+    // (a non-director capture is never taken over: director_input skips idle takeover when CaptureCfg exists)
     if cfg.orrery {
         *mode = CameraMode::Orrery;
         // drive the OrreryCam from cfg so apply_orrery frames it AND body sizing (reads dist) matches

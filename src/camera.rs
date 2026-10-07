@@ -103,7 +103,7 @@ pub struct WalkCam {
 
 const MIN_DIST: f32 = 95.0; // just above surface (planet radius ~80 + terrain)
 const MAX_DIST: f32 = 420.0;
-const WALK_EYE: f32 = 2.5; // eye height above terrain surface (rides elevation)
+pub const WALK_EYE: f32 = 2.5; // eye height above terrain surface (rides elevation)
 const WALK_SPEED: f32 = 14.0; // units/sec; Shift runs
 const WALK_TURN: f32 = 1.6; // keyboard look speed (rad/sec)
 const PITCH_LIMIT: f32 = 1.3;
