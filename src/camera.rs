@@ -484,8 +484,10 @@ fn update_shadow_cascade(
         let far = dist + r + 20.0; // reach far edge of visible near hemisphere
         // first split must sit strictly between near + far (bevy asserts minimum_distance < first bound)
         let first = near + (far - near) * 0.4;
+        // 2 cascades: from orbit the whole near hemisphere sits in one narrow depth band, so cascades 3-4 bought
+        // no visible detail while re-rendering every caster twice more (~13 ms of a 25 ms orbit frame was shadows)
         bevy::light::CascadeShadowConfigBuilder {
-            num_cascades: 4,
+            num_cascades: 2,
             minimum_distance: near,
             maximum_distance: far,
             first_cascade_far_bound: first,

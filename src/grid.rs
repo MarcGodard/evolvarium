@@ -107,7 +107,16 @@ impl CubeGrid {
     /// 2-ring neighbourhood. Continuous everywhere, face edges included: a cell's weight reaches 0 before it
     /// can leave the candidate set (any centre within one width of `d` is at most a diagonal away from the
     /// containing cell, and diagonals are neighbours-of-neighbours).
+    #[cfg(test)] // production callers cache sample_weights (globe vertices never move)
     pub fn sample(&self, field: &[f32], d: Vec3) -> f32 {
+        let w = self.sample_weights(d);
+        let wsum: f32 = w.iter().map(|x| x.1).sum();
+        if wsum > 0.0 { w.iter().map(|&(c, k)| k * field[c as usize]).sum::<f32>() / wsum } else { field[self.cell(d)] }
+    }
+
+    /// The (cell, weight) kernel `sample` blends at `d`, unnormalized. For points that never move (globe
+    /// vertices) cache this once and blend any number of fields with it.
+    pub fn sample_weights(&self, d: Vec3) -> Vec<(u32, f32)> {
         let c = self.cell(d);
         let dn = d.normalize_or_zero();
         let r = std::f32::consts::FRAC_PI_2 / self.n as f32; // < 1 width: near cube corners (3 faces meet) a 2-ring misses some cells within a full width
@@ -127,17 +136,18 @@ impl CubeGrid {
                 push(b, &mut cand, &mut k);
             }
         }
-        let (mut wsum, mut acc) = (0.0f32, 0.0f32);
+        let mut out = Vec::with_capacity(k);
         for &x in &cand[..k] {
             let ang2 = 2.0 * (1.0 - self.center[x].dot(dn)).max(0.0); // chord^2 ~ angle^2
             let q = 1.0 - ang2 * inv_r2;
             if q > 0.0 {
-                let w = q * q;
-                wsum += w;
-                acc += w * field[x];
+                out.push((x as u32, q * q));
             }
         }
-        if wsum > 0.0 { acc / wsum } else { field[c] }
+        if out.is_empty() {
+            out.push((c as u32, 1.0));
+        }
+        out
     }
 }
 

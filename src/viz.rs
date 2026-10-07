@@ -18,28 +18,64 @@ use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 // shape, catches no sun, and the whole tree goes ambient-only. Same trap the grass hit.
 // Genuinely thin two-sided surfaces (fronds, blossoms, wings) still want double_sided_mat, where flipping IS
 // right because a leaf seen from behind should be lit from behind.
-fn no_cull_mat(mats: &mut Assets<StandardMaterial>, color: Color, rough: Option<f32>) -> Handle<StandardMaterial> {
-    mats.add(StandardMaterial {
-        base_color: color,
-        perceptual_roughness: rough.unwrap_or(0.5),
-        double_sided: false,
-        cull_mode: None,
-        ..default()
-    })
+// Shared materials for the flora. Bevy batches draws only across entities sharing BOTH mesh and material, and
+// every plant used to `materials.add` its own: ~29k materials, nothing batched, ~25 ms frames at ~900 creatures.
+// Colours are quantized to 6 bits/channel (invisible on foliage) and keyed with a variant id so identical-looking
+// plants share one handle. Never mutate a cached material in place: it is shared (rot stages swap handles).
+#[derive(Resource, Default)]
+pub struct MatCache(std::collections::HashMap<u64, Handle<StandardMaterial>>);
+
+pub mod matv {
+    pub const PLAIN: u8 = 0;
+    pub const BODY: u8 = 1; // regular plant body: rough 0.9, back-face culled
+    pub const LEAFY: u8 = 2; // thin leaf/frond/disc body: rough 0.9, double-sided
+    pub const DOUBLE: u8 = 3; // blossoms: double-sided, rough 0.5
+    pub const NOCULL06: u8 = 4; // conifer shells
+    pub const ROUGH085: u8 = 5; // vines
+    pub const GLOW_CENTER: u8 = 6; // flower eye
+    pub const BERRY_TOX: u8 = 7;
+    pub const BERRY: u8 = 8;
+    pub const ROT: u8 = 9; // carrion/detritus/fallen-fruit rot stages
+    pub const EYE: u8 = 10; // sclera: faint glow + wet glint
+    pub const PUPIL: u8 = 11;
+    pub const WING: u8 = 12; // double-sided membrane, rough 0.75
 }
 
-// Double-sided, no-cull material: thin/open meshes (wings, fronds, blossoms) show both faces AND flip the
-// normal on the back, which is correct for a single-layer sheet.
-// `rough` = perceptual_roughness (None -> StandardMaterial default 0.5).
-fn double_sided_mat(mats: &mut Assets<StandardMaterial>, color: Color, rough: Option<f32>) -> Handle<StandardMaterial> {
-    mats.add(StandardMaterial {
-        base_color: color,
-        perceptual_roughness: rough.unwrap_or(0.5),
-        double_sided: true,
-        cull_mode: None,
-        ..default()
-    })
+impl MatCache {
+    pub fn get(&mut self, mats: &mut Assets<StandardMaterial>, color: Color, variant: u8) -> Handle<StandardMaterial> {
+        let c = color.to_srgba();
+        let q = |x: f32| ((x.clamp(0.0, 1.0) * 63.0).round() as u64) & 63;
+        let key = (variant as u64) << 24 | q(c.red) << 12 | q(c.green) << 6 | q(c.blue);
+        if let Some(h) = self.0.get(&key) {
+            return h.clone();
+        }
+        let base = Color::srgb(q(c.red) as f32 / 63.0, q(c.green) as f32 / 63.0, q(c.blue) as f32 / 63.0);
+        let m = match variant {
+            matv::BODY => StandardMaterial { base_color: base, perceptual_roughness: 0.9, ..default() },
+            matv::LEAFY => StandardMaterial { base_color: base, perceptual_roughness: 0.9, double_sided: true, cull_mode: None, ..default() },
+            matv::DOUBLE => StandardMaterial { base_color: base, double_sided: true, cull_mode: None, ..default() },
+            matv::NOCULL06 => StandardMaterial { base_color: base, perceptual_roughness: 0.6, cull_mode: None, ..default() },
+            matv::ROUGH085 => StandardMaterial { base_color: base, perceptual_roughness: 0.85, ..default() },
+            matv::GLOW_CENTER => StandardMaterial { base_color: base, emissive: LinearRgba::rgb(0.55, 0.42, 0.0), ..default() },
+            matv::BERRY_TOX => StandardMaterial { base_color: base, emissive: LinearRgba::rgb(0.20, 0.0, 0.28), ..default() },
+            matv::BERRY => StandardMaterial { base_color: base, emissive: LinearRgba::rgb(0.30, 0.02, 0.0), ..default() },
+            matv::EYE => StandardMaterial { base_color: base, emissive: LinearRgba::rgb(0.18, 0.18, 0.2), perceptual_roughness: 0.15, ..default() },
+            matv::PUPIL => StandardMaterial { base_color: base, perceptual_roughness: 0.1, ..default() },
+            matv::WING => StandardMaterial { base_color: base, perceptual_roughness: 0.75, double_sided: true, cull_mode: None, ..default() },
+            matv::ROT => StandardMaterial { base_color: base, perceptual_roughness: 0.9, double_sided: true, cull_mode: None, ..default() }, // dead fronds keep LEAFY two-sidedness
+            _ => StandardMaterial::from(base),
+        };
+        let h = mats.add(m);
+        self.0.insert(key, h.clone());
+        h
+    }
 }
+
+// Rot-stage colour (0 fresh .. 1 rotten): bright red corpse -> darkening -> sick muddy green.
+pub fn rot_color(f: f32) -> Color {
+    Color::hsl(10.0 + 90.0 * f, 0.6, 0.5 - 0.35 * f)
+}
+const ROT_STAGES: f32 = 15.0;
 
 // Visual time-of-day offset (ticks) added to sun ONLY for lighting + sun/moon sky. Sim daylight
 // (creature rest, plant growth) still reads raw tick. Lets walk snap to local noon + scrub sun for
@@ -128,10 +164,12 @@ impl Plugin for VizPlugin {
             .init_resource::<Phylogeny>()
             .init_resource::<ShowPhylo>()
             .init_resource::<ShowLabels>()
-            .insert_resource(ShowShadows(true)) // shadows on by default (O toggles)
+            // shadows on by default (O toggles); --no-shadows starts with them off (perf A/B, slow GPUs)
+            .insert_resource(ShowShadows(!std::env::args().any(|a| a == "--no-shadows")))
             .init_resource::<Identified>()
             .init_resource::<TreePositions>()
             .init_resource::<BodyMeshCache>()
+            .init_resource::<MatCache>()
             .add_systems(Startup, (log_viz_help, spawn_stats_ui, spawn_world_stats_ui, spawn_legend_ui, spawn_daycycle_ui, spawn_underwater_tint, spawn_clouds, set_initial_speed, spawn_minimap, spawn_phylo_ui, load_star_catalog, spawn_identity_ui, spawn_nameplates))
             .add_systems(
                 Update,
@@ -428,19 +466,27 @@ fn atmosphere_visibility(
 
 // Day-bias the atmosphere rim: per-vertex glow tracks the sun. Lit hemisphere bright blue, night side a dim
 // airglow floor, warm sliver at the terminator. Only runs in orbit (the only mode the shell shows). Rewrites
-// the shell's vertex colors each frame; ico(4) (~2.5k verts) keeps it cheap.
+// the shell's vertex colors when the sun moves; ico(4) (~2.5k verts) keeps it cheap.
 fn update_atmosphere(
     mode: Res<crate::camera::CameraMode>,
     gen: Res<GenState>,
     offset: Res<SunOffset>,
     atmo: Query<(&Mesh3d, &Atmosphere)>,
     mut meshes: ResMut<Assets<Mesh>>,
+    mut painted_for: Local<Option<Vec3>>,
 ) {
     if *mode != crate::camera::CameraMode::Orbit {
+        *painted_for = None; // repaint on return to orbit
         return;
     }
     let vtick = (gen.tick as i64 + offset.0).max(0) as u32;
     let sun = crate::sphere::sun_dir(vtick);
+    // 10 shells x ~10k verts re-uploaded every frame cost more than the glow is worth; the terminator only
+    // needs repainting once the sun has visibly moved (~0.3 deg, a few seconds at default speed)
+    if painted_for.is_some_and(|p| p.dot(sun) > 0.999985) {
+        return;
+    }
+    *painted_for = Some(sun);
     let day_blue = Vec3::new(0.35, 0.55, 1.0);
     let twilight = Vec3::new(0.9, 0.5, 0.55); // warm terminator sliver
     // every shell is the same ico(5) sphere scaled, so vertex i has the same DIRECTION on all of them: the
@@ -655,6 +701,7 @@ fn add_creature_visuals(
     mut commands: Commands,
     parts: Option<Res<CreatureParts>>,
     mut cache: ResMut<BodyMeshCache>,
+    mut mat_cache: ResMut<MatCache>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut q: Query<(Entity, &Genome, &mut Transform), (With<Creature>, Without<Mesh3d>)>,
@@ -668,9 +715,9 @@ fn add_creature_visuals(
         tf.scale = Vec3::splat(body_scale(g));
         let (body_mesh, was_built) = cache.get_or_build(g, &mut meshes);
         commands.entity(e).insert((Mesh3d(body_mesh), MeshMaterial3d(materials.add(color))));
-        spawn_eyes(&mut commands, e, g, &parts.eye, &mut materials);
-        spawn_ears(&mut commands, e, g, &parts.ear, &mut materials); // all creatures, sized by hearing gene
-        spawn_wings(&mut commands, e, g, &parts.wing, &mut materials); // fliers only (gene + wing loading)
+        spawn_eyes(&mut commands, &mut mat_cache, e, g, &parts.eye, &mut materials);
+        spawn_ears(&mut commands, &mut mat_cache, e, g, &parts.ear, &mut materials); // all creatures, sized by hearing gene
+        spawn_wings(&mut commands, &mut mat_cache, e, g, &parts.wing, &mut materials); // fliers only (gene + wing loading)
         if was_built {
             built += 1;
             if built >= MAX_BODY_BUILDS_PER_FRAME {
@@ -692,18 +739,13 @@ const MAX_BODY_BUILDS_PER_FRAME: usize = 6;
 // sim's bearing test) and is sized by that sensor's range (far-sighted = big eye). Forward-pointing sensors
 // give binocular hunter faces, wide angles give side-eyed grazers, a rear sensor puts an eye at the back of
 // the head. The `eyes` gene (photoreceptor investment, a detection bonus in sim) scales every eye a little.
-fn spawn_eyes(commands: &mut Commands, parent: Entity, g: &Genome, eye_mesh: &Handle<Mesh>, materials: &mut Assets<StandardMaterial>) {
+fn spawn_eyes(commands: &mut Commands, cache: &mut MatCache, parent: Entity, g: &Genome, eye_mesh: &Handle<Mesh>, materials: &mut Assets<StandardMaterial>) {
     let pheno = crate::morph::develop(&g.body);
     let m = crate::morph::Morphometrics::from_phenotype(&pheno);
     let center_y = (m.bbox_min.y + m.bbox_max.y) * 0.5; // mesh shifts verts down by this
     let a = crate::morph::eye_anchor(&pheno);
-    let eye_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.97, 0.98, 1.0),
-        emissive: LinearRgba::rgb(0.18, 0.18, 0.2), // faint glow keeps eyes readable at dusk
-        perceptual_roughness: 0.15, // wet glint
-        ..default()
-    });
-    let pupil_mat = materials.add(StandardMaterial { base_color: Color::srgb(0.04, 0.03, 0.03), perceptual_roughness: 0.1, ..default() });
+    let eye_mat = cache.get(materials, Color::srgb(0.97, 0.98, 1.0), matv::EYE); // faint glow keeps eyes readable at dusk
+    let pupil_mat = cache.get(materials, Color::srgb(0.04, 0.03, 0.03), matv::PUPIL);
     let head = Vec3::new(a.center.x, a.center.y - center_y, a.center.z);
     for s in &g.sensors {
         let range01 = ((s.range - 4.0) / 44.0).clamp(0.0, 1.0); // genome RANGE_MIN..RANGE_MAX
@@ -732,13 +774,13 @@ pub fn ear_mesh() -> Mesh {
 
 // Two pointed ears flanking the head top, sized by `hearing` acuity (keen-eared = big ears). Cosmetic, render
 // only; reuses the head anchor (eye_anchor). Splayed outward, sat just behind the eyes.
-fn spawn_ears(commands: &mut Commands, parent: Entity, g: &Genome, ear_mesh: &Handle<Mesh>, materials: &mut Assets<StandardMaterial>) {
+fn spawn_ears(commands: &mut Commands, cache: &mut MatCache, parent: Entity, g: &Genome, ear_mesh: &Handle<Mesh>, materials: &mut Assets<StandardMaterial>) {
     let pheno = crate::morph::develop(&g.body);
     let m = crate::morph::Morphometrics::from_phenotype(&pheno);
     let center_y = (m.bbox_min.y + m.bbox_max.y) * 0.5; // body mesh shifts verts down by this
     let a = crate::morph::eye_anchor(&pheno);
     let body = creature_look(g).0.to_srgba();
-    let mat = materials.add(Color::srgb(body.red * 0.8, body.green * 0.8, body.blue * 0.8)); // skin, a touch darker
+    let mat = cache.get(materials, Color::srgb(body.red * 0.8, body.green * 0.8, body.blue * 0.8), matv::PLAIN); // skin, a touch darker
     let eh = a.radius * (0.7 + 1.6 * g.hearing); // ear height scales with acuity (visual cue to the gene)
     let ew = a.radius * (0.35 + 0.5 * g.hearing);
     for side in [-1.0f32, 1.0] {
@@ -790,7 +832,7 @@ pub fn wing_mesh() -> Mesh {
 // Dress a FLIER with a mirrored pair of wings, sized by its EVOLVED wing area (morphology) + placed at the body
 // sides. Only real fliers (gene + wing loading) get them, so wings == actually flies. Children -> inherit the
 // creature's body_scale + juvenile grow-in. NOT spawned for non-fliers (wingless/heavy bodies stay bare).
-fn spawn_wings(commands: &mut Commands, parent: Entity, g: &Genome, wing_mesh: &Handle<Mesh>, materials: &mut Assets<StandardMaterial>) {
+fn spawn_wings(commands: &mut Commands, cache: &mut MatCache, parent: Entity, g: &Genome, wing_mesh: &Handle<Mesh>, materials: &mut Assets<StandardMaterial>) {
     let m = g.morph.unwrap_or_else(|| crate::morph::Morphometrics::of(&g.body)); // robust if cache not populated
     let wl = crate::sim::wing_loading(&m) * g.size_scale();
     if !crate::sim::is_flier(g.flight, wl) {
@@ -801,7 +843,7 @@ fn spawn_wings(commands: &mut Commands, parent: Entity, g: &Genome, wing_mesh: &
     // wing tint = the bird's own body color, lightened -> reads as part of the creature + stands out from sky
     let body = creature_look(g).0.to_srgba();
     let wcol = Color::srgb((body.red + 0.28).min(1.0), (body.green + 0.28).min(1.0), (body.blue + 0.28).min(1.0));
-    let mat = double_sided_mat(materials, wcol, Some(0.75));
+    let mat = cache.get(materials, wcol, matv::WING);
     // ONE rendered wing per EVOLVED horizontal plate (the lift surfaces). So wing COUNT + size are genetic: a
     // body that evolved two wing-plate pairs flies on 4 wings, etc. Each sits at its plate, extends outboard.
     let pheno = crate::morph::develop(&g.body);
@@ -878,10 +920,12 @@ fn add_plant_visuals(
     forms: Option<Res<PlantForms>>,
     trees: Option<Res<TreeMeshes>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    q: Query<(Entity, &PlantGenome, Option<&Tree>, Option<&Seed>), (With<Food>, Without<Mesh3d>, Without<Grass>, Without<Seaweed>)>, // grass + seaweed have own visuals
+    mut cache: ResMut<MatCache>,
+    q: Query<(Entity, &PlantGenome, Option<&Tree>, Option<&Seed>, Option<&Rot>), (With<Food>, Without<Mesh3d>, Without<Grass>, Without<Seaweed>)>, // grass + seaweed have own visuals
 ) {
     let Some(forms) = forms else { return };
-    for (e, g, tree, seed) in &q {
+    let mats = &mut *materials;
+    for (e, g, tree, seed, rot) in &q {
         // tree = brown trunk (this entity) + canopy child. Fruit trees get round broadleaf crown
         // (greener + hint of genome leaf hue), evergreens a dark cone. Trees ignore `form`.
         if let (Some(t), Some(tm)) = (tree, &trees) {
@@ -897,19 +941,19 @@ fn add_plant_visuals(
             // the material colour is the tree's average bark tone, not its darkest.
             commands.entity(e).insert((
                 Mesh3d(tm.trunk[(h as usize >> 3) % tm.trunk.len()].clone()),
-                MeshMaterial3d(materials.add(Color::srgb(0.30 + 0.14 * bk, 0.20 + 0.09 * bk, 0.12 + 0.07 * bk))),
+                MeshMaterial3d(cache.get(mats, Color::srgb(0.30 + 0.14 * bk, 0.20 + 0.09 * bk, 0.12 + 0.07 * bk), matv::PLAIN)),
             ));
             // broadleaf crown centered (sits high in canopy); stacked-cone conifer base at y=0 rests on
             // trunk top (lower attach). Trunk centered (half-height 1.0); canopies attach to envelop most
             // of trunk, leaving short bare-trunk stub -> a tree, not a hat on a pole.
             let (canopy, cmat, cy) = if t.edible {
-                (tm.broadleaf[(h as usize) % tm.broadleaf.len()].clone(), materials.add(plant_color(g)), 1.0)
+                (tm.broadleaf[(h as usize) % tm.broadleaf.len()].clone(), cache.get(mats, plant_color(g), matv::PLAIN), 1.0)
             } else {
                 // conifer skirts are open shells: no_cull (NOT double-sided, which negates the back-face
                 // normal and blacks the tree out); spine cone fills the core so nothing sees through to the
                 // sky. Evergreen needle-green: brighter blue-green reads as foliage not black blob;
                 // roughness 0.6 near foliage default (0.5) so sun catches soft sheen like broadleaf.
-                let m = no_cull_mat(&mut materials, Color::srgb(0.16, 0.52, 0.30), Some(0.6));
+                let m = cache.get(mats, Color::srgb(0.16, 0.52, 0.30), matv::NOCULL06);
                 (tm.conifer[(h as usize >> 5) % tm.conifer.len()].clone(), m, -0.6)
             };
             let child = commands
@@ -918,7 +962,7 @@ fn add_plant_visuals(
             commands.entity(e).add_child(child);
             // flowering (blossom) fruit tree gets ring of bloom blobs in crown
             if t.edible && g.flower > 0.4 {
-                let fmat = double_sided_mat(&mut materials, flower_color(g), None);
+                let fmat = cache.get(mats, flower_color(g), matv::DOUBLE);
                 for k in 0..5 {
                     let a = k as f32 * 1.2566; // 72 deg apart
                     let c = commands
@@ -944,7 +988,7 @@ fn add_plant_visuals(
                 } else {
                     Color::srgb(0.95, 0.30, 0.06) // ripe: orange-red
                 };
-                let frmat = materials.add(StandardMaterial { base_color: fruit, ..default() });
+                let frmat = cache.get(mats, fruit, matv::PLAIN);
                 let fy = 1.4 - 0.95 * g.branches.clamp(0.0, 1.0); // bare ~1.4 (top), full branches ~0.45 (low in branches)
                 let n = 6;
                 for k in 0..n {
@@ -963,11 +1007,7 @@ fn add_plant_visuals(
             // some trees host climbing vine up trunk (vine appears only WITH a tree). Presence keyed off
             // flower_hue gene > 0.58 -> deterministic + varied (~40% of trees).
             if g.flower_hue > 0.58 {
-                let vmat = materials.add(StandardMaterial {
-                    base_color: Color::srgb(0.16, 0.45, 0.12),
-                    perceptual_roughness: 0.85,
-                    ..default()
-                });
+                let vmat = cache.get(mats, Color::srgb(0.16, 0.45, 0.12), matv::ROUGH085);
                 let vine = commands.spawn((Mesh3d(tm.vine.clone()), MeshMaterial3d(vmat), Transform::IDENTITY)).id();
                 commands.entity(e).add_child(vine);
             }
@@ -987,14 +1027,12 @@ fn add_plant_visuals(
         } else {
             plant_color(g)
         };
-        let mat = materials.add(StandardMaterial {
-            base_color: body_color,
-            perceptual_roughness: 0.9,
-            // fallen fruit: no emissive either, same reason as canopy fruit above
-            double_sided: leafy, // thin leaf/frond/disc meshes need both faces
-            cull_mode: if leafy { None } else { Some(bevy::render::render_resource::Face::Back) },
-            ..default()
-        });
+        // rotting food takes its stage colour from the shared rot ramp (color_carrion swaps it as it ages);
+        // fallen fruit included: no emissive, same reason as canopy fruit above
+        let mat = match rot {
+            Some(r) => cache.get(mats, rot_color(rot_stage(r)), matv::ROT),
+            None => cache.get(mats, body_color, if leafy { matv::LEAFY } else { matv::BODY }), // thin meshes need both faces
+        };
         commands.entity(e).insert((Mesh3d(forms.forms[fi].clone()), MeshMaterial3d(mat)));
         // bloom child for flowering plant (near top of unit mesh, local space)
         if g.flower > 0.25 && !matches!(g.form, form::KELP | form::MOSS) {
@@ -1011,7 +1049,7 @@ fn add_plant_visuals(
             let child = commands
                 .spawn((
                     Mesh3d(forms.flower.clone()),
-                    MeshMaterial3d(double_sided_mat(&mut materials, flower_color(g), None)),
+                    MeshMaterial3d(cache.get(mats, flower_color(g), matv::DOUBLE)),
                     Transform::from_xyz(0.0, top, 0.0).with_scale(Vec3::splat(0.28 + 0.45 * g.flower)),
                 ))
                 .id();
@@ -1022,11 +1060,7 @@ fn add_plant_visuals(
             let center = commands
                 .spawn((
                     Mesh3d(forms.berry.clone()),
-                    MeshMaterial3d(materials.add(StandardMaterial {
-                        base_color: Color::srgb(1.0, 0.86, 0.12),
-                        emissive: LinearRgba::rgb(0.55, 0.42, 0.0),
-                        ..default()
-                    })),
+                    MeshMaterial3d(cache.get(mats, Color::srgb(1.0, 0.86, 0.12), matv::GLOW_CENTER)),
                     Transform::from_xyz(0.0, top + 0.16 * bloom, 0.0).with_scale(Vec3::splat(0.5 * bloom)),
                 ))
                 .id();
@@ -1035,12 +1069,11 @@ fn add_plant_visuals(
         // berry children for fruiting land bush; skip aquatic/flat forms. Toxic berries warn deep
         // magenta/violet, edible glow ripe red/orange (slight emissive sheen).
         if g.fruiting > 0.3 && matches!(g.form, form::SHRUB | form::HERB | form::FLOWER_STALK) {
-            let (berry, bem) = if g.toxicity > 0.5 {
-                (Color::srgb(0.62, 0.05, 0.78), LinearRgba::rgb(0.20, 0.0, 0.28)) // toxic: vivid violet warning
+            let bmat = if g.toxicity > 0.5 {
+                cache.get(mats, Color::srgb(0.62, 0.05, 0.78), matv::BERRY_TOX) // toxic: vivid violet warning
             } else {
-                (Color::srgb(0.95, 0.12, 0.18), LinearRgba::rgb(0.30, 0.02, 0.0)) // ripe: bright red
+                cache.get(mats, Color::srgb(0.95, 0.12, 0.18), matv::BERRY) // ripe: bright red
             };
-            let bmat = materials.add(StandardMaterial { base_color: berry, emissive: bem, ..default() });
             for k in 0..3 {
                 let a = k as f32 * 2.0944; // 120 deg
                 let c = commands
@@ -1058,7 +1091,7 @@ fn add_plant_visuals(
             let c = commands
                 .spawn((
                     Mesh3d(forms.cap.clone()),
-                    MeshMaterial3d(materials.add(plant_color(g))),
+                    MeshMaterial3d(cache.get(mats, plant_color(g), matv::PLAIN)),
                     Transform::from_xyz(0.0, 0.24, 0.0).with_scale(Vec3::new(0.5, 0.45, 0.5)),
                 ))
                 .id();
@@ -1080,11 +1113,22 @@ fn hide_dead(mut q: Query<(&Alive, &mut Visibility), With<Creature>>) {
 
 // Carrion/detritus (Rot) color = rot stage: fresh = meaty red, rotten = dark muddy green. Rot chain (P3)
 // reads at a glance: bright red corpse -> darkening -> gone.
-fn color_carrion(mut mats: ResMut<Assets<StandardMaterial>>, q: Query<(&Rot, &MeshMaterial3d<StandardMaterial>)>) {
-    for (rot, mm) in &q {
-        let f = (rot.age as f32 / ROT_GONE as f32).clamp(0.0, 1.0); // 0 fresh .. 1 rotten
-        if let Some(mut m) = mats.get_mut(&mm.0) {
-            m.base_color = Color::hsl(10.0 + 90.0 * f, 0.6, 0.5 - 0.35 * f); // red->sick-green, darkening
+// Rot age -> quantized stage 0..1 (ROT_STAGES steps), so a carcass changes material only ~15 times in its life.
+fn rot_stage(rot: &Rot) -> f32 {
+    ((rot.age as f32 / ROT_GONE as f32).clamp(0.0, 1.0) * ROT_STAGES).round() / ROT_STAGES
+}
+
+// Swap each rotting item onto its stage's SHARED material when the stage changes. Was: rewrite every carcass's
+// own material every frame (forcing per-entity materials and a GPU re-upload of all of them each frame).
+fn color_carrion(
+    mut mats: ResMut<Assets<StandardMaterial>>,
+    mut cache: ResMut<MatCache>,
+    mut q: Query<(&Rot, &mut MeshMaterial3d<StandardMaterial>)>,
+) {
+    for (rot, mut mm) in &mut q {
+        let h = cache.get(&mut mats, rot_color(rot_stage(rot)), matv::ROT);
+        if mm.0 != h {
+            mm.0 = h;
         }
     }
 }
@@ -1109,9 +1153,8 @@ fn size_plants(mut q: Query<(&PlantState, &PlantGenome, &mut Transform, Option<&
             // larger than poor-soil one. Mature tree reads as real TREE (~2.4 at maturity ~14, up to ~3.8
             // full) not shrub; cap keeps tallest clear of clouds. height gene tweaks +/- for canopy variety.
             let s = (0.6 + 0.13 * st.mass).clamp(0.6, 3.8) * life * (0.85 + 0.3 * g.height);
-            tf.scale = Vec3::splat(s);
-            tf.rotation = rot_q;
-            tf.translation = base + up * (0.7 * s); // trunk base on surface (trunk half-height = 0.7)
+            // trunk base on surface (trunk half-height = 0.7)
+            write_if_visible(&mut tf, Transform { translation: base + up * (0.7 * s), rotation: rot_q, scale: Vec3::splat(s) });
             continue;
         }
         // per-form scale (girth, height) + lift so each silhouette sits on surface. girth grows with mass +
@@ -1138,14 +1181,20 @@ fn size_plants(mut q: Query<(&PlantState, &PlantGenome, &mut Transform, Option<&
             // HERB + fallback: small bushy clump, stretched by height gene
             _ => (girth * bushy, girth * bushy * tall, girth * bushy, 0.0),
         };
-        tf.scale = Vec3::new(sx, sy, sz) * life;
-        tf.rotation = rot_q;
-        // lily pad floats ON water surface (~PLANET_R), not on seabed below.
-        if g.form == form::LILYPAD {
-            tf.translation = up * (crate::sphere::PLANET_R + 0.08);
-        } else {
-            tf.translation = base + up * (lift * sy * life); // mesh base rooted on terrain (no float)
-        }
+        // lily pad floats ON water surface (~PLANET_R), not on seabed below; others root on terrain (no float)
+        let translation = if g.form == form::LILYPAD { up * (crate::sphere::PLANET_R + 0.08) } else { base + up * (lift * sy * life) };
+        write_if_visible(&mut tf, Transform { translation, rotation: rot_q, scale: Vec3::new(sx, sy, sz) * life });
+    }
+}
+
+// Plant size tracks mass, which drifts by tiny amounts every tick. Writing the Transform anyway marked ~12k
+// plants changed EVERY frame (propagation + GPU upload for all of them). Write only once the change would be
+// visible: >1% in size or >1 cm in position. Reading through Mut does not flag a change; only the write does.
+fn write_if_visible(tf: &mut Mut<Transform>, new: Transform) {
+    let ds = (tf.scale - new.scale).abs().max_element();
+    let dp = tf.translation.distance_squared(new.translation);
+    if ds > 0.01 * new.scale.max_element().max(1e-3) || dp > 1e-4 || tf.rotation.dot(new.rotation).abs() < 0.99999 {
+        **tf = new;
     }
 }
 
@@ -3087,6 +3136,7 @@ fn update_globe_climate(
     mut meshes: ResMut<Assets<Mesh>>,
     mut next: Local<u32>,
     mut tint_cache: Local<Vec<[f32; 3]>>, // static per-vertex ground mottling (3 fbm stacks each): computed once
+    mut kernel: Local<Vec<Vec<(u32, f32)>>>, // per-vertex grid sampling weights (vertices never move): computed once
 ) {
     if gen.tick < *next {
         return; // not time yet (also paints once at startup: tick 0 >= next 0)
@@ -3112,21 +3162,31 @@ fn update_globe_climate(
     // ground cover per cell (0..1 of saturation): herds crop the sward, and a grazed range should LOOK grazed
     let cover: Vec<f32> = (0..bio.soil.len()).map(|c| bio.cover01(c)).collect();
     let grid = crate::grid::field();
+    // the smooth grid kernel cost ~21 candidate cells per vertex per field (51k verts, two fields) on every
+    // repaint, a visible hitch; the weights depend only on vertex position, so build them once
+    if kernel.len() != positions.len() {
+        *kernel = positions.iter().map(|p| grid.sample_weights(Vec3::from_array(*p))).collect();
+    }
+    let blend = |w: &Vec<(u32, f32)>, f: &[f32]| {
+        let (a, s) = w.iter().fold((0.0f32, 0.0f32), |(a, s), &(c, k)| (a + k * f[c as usize], s + k));
+        if s > 0.0 { a / s } else { 0.0 }
+    };
     const DUN: [f32; 3] = [0.60, 0.52, 0.36]; // cropped, trampled grassland
     let colors: Vec<[f32; 4]> = positions
         .iter()
         .zip(tint_cache.iter())
-        .map(|(p, t)| {
+        .zip(kernel.iter())
+        .map(|((p, t), w)| {
             // vertex pos = d * (R + elevation) -> normalize recovers surface direction
             let d = Vec3::new(p[0], p[1], p[2]).normalize_or_zero();
-            let m = climate.sample(d);
+            let m = blend(w, &climate.cell);
             let mut c = crate::sphere::biome_color_with_moisture(d, m);
             // the initial build multiplies ground_tint in; repaints dropped it and the land went flat
             c = [c[0] * t[0], c[1] * t[1], c[2] * t[2]];
             if !crate::sphere::is_ocean(d) && crate::sphere::base_temperature(d) >= crate::config::FREEZE_TEMP {
                 // grazers hold a healthy sward near ~15-20% of saturation, so only cover well below that is
                 // OVERGRAZED; a 35% threshold painted every grazed continent dun
-                let lush = (grid.sample(&cover, d) / 0.2).clamp(0.0, 1.0);
+                let lush = (blend(w, &cover) / 0.2).clamp(0.0, 1.0);
                 let k = 0.45 * (1.0 - lush) * (1.0 - lush); // never fully dun: soil + forbs still show through
                 c = [c[0] + (DUN[0] - c[0]) * k, c[1] + (DUN[1] - c[1]) * k, c[2] + (DUN[2] - c[2]) * k];
             }

@@ -455,7 +455,7 @@ fn setup_scene(
     // atmosphere rim: thin shell just above the surface, additive sky-blue, FRONT-culled (only far-side back
     // faces drawn). The opaque globe writes depth first, so the far shell is occluded EXCEPT the thin ring
     // peeking past the planet silhouette -> a soft blue limb halo, no tint over the disc. Orbit-view only
-    // (viz::atmosphere_visibility). Per-VERTEX color (multiplies base) is set each frame by viz::update_atmosphere:
+    // (viz::atmosphere_visibility). Per-VERTEX color (multiplies base) is set by viz::update_atmosphere when the sun moves:
     // bright day-side limb, dim night airglow, warm twilight band -> a day-biased glow, not a uniform ring.
     // Nested shells, brightest innermost: each additive back-face ring adds a constant band, so ONE shell drew a
     // hard-edged glassy annulus. Stacked shells with falling weights sum to a glow that is strongest at the limb

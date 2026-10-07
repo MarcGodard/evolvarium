@@ -422,11 +422,6 @@ impl Climate {
             .collect();
         Climate { cell }
     }
-    // Smooth climate moisture at dir `d` (grid::CubeGrid::sample). Smooths the cell grid
-    // -> globe recolor shows soft biome edges, not blocky cells.
-    pub fn sample(&self, d: Vec3) -> f32 {
-        crate::grid::field().sample(&self.cell, d)
-    }
     pub fn avg(&self) -> f32 {
         self.cell.iter().sum::<f32>() / self.cell.len() as f32
     }
