@@ -122,14 +122,15 @@ impl Soil {
 // moisture-gated, and rain is what wakes a dry cell's microbes up.
 // Cost is grid::field().len() (6144) cells/tick of scalar math.
 pub fn biogeochem_step(mut bio: ResMut<crate::chem::Biosphere>, gw: Res<GroundWater>) {
+    let _g = crate::profile::scope("biogeochem");
     let days = crate::chem::bio_days_per_tick();
+    let cs = cell_static();
     for c in 0..bio.soil.len() {
         let area = crate::chem::cell_area_at(c);
-        let d = cell_center(c).normalize_or_zero();
         // GroundWater shares the field grid layout, so cell index maps straight across
         let water = gw.cell[c];
-        let moist = (crate::sphere::moisture(d) + WET_GAIN * water).clamp(0.0, 1.0) as f64;
-        let temp = crate::sphere::base_temperature(d) as f64;
+        let moist = (cs[c].moist + WET_GAIN * water).clamp(0.0, 1.0) as f64;
+        let temp = crate::sphere::temp_with_anomaly(cs[c].t_static) as f64;
         bio.decompose(c, temp, moist, days);
         if bio.soil[c].cover.c > 0.0 {
             bio.senesce_cover(c, crate::chem::COVER_TURNOVER_PER_DAY * days); // the sward's litterfall
@@ -137,12 +138,12 @@ pub fn biogeochem_step(mut bio: ResMut<crate::chem::Biosphere>, gw: Res<GroundWa
         if bio.soil[c].nest.c > 0.0 {
             bio.decay_nest(c, crate::build::NEST_DECAY_PER_DAY * days); // woven litter rots back to organic
         }
-        if crate::sphere::is_ocean(d) {
+        if cs[c].ocean {
             bio.bury(c, crate::chem::BURY_FRAC_PER_DAY * days); // sinking particulate leaves the active system
         } else {
             // weathering needs exposed rock AND water to act, so bare wet peaks release P fastest and a dry
             // interior barely does. This is the only tap for phosphorus anywhere in the world.
-            let exposure = 0.2 + 0.8 * crate::sphere::rockiness(d) as f64;
+            let exposure = 0.2 + 0.8 * cs[c].rock as f64;
             bio.weather(c, crate::chem::WEATHER_P_PER_M2_DAY * days * area * exposure * (0.3 + 0.7 * moist));
         }
     }
@@ -274,6 +275,7 @@ pub fn seal_matter_ledger(
     restored: Option<Res<PlanetRestored>>,
     mut done: Local<bool>,
 ) {
+    let _g = crate::profile::scope("ledger");
     if *done {
         return;
     }
@@ -335,6 +337,31 @@ fn cell_center(c: usize) -> Vec3 {
     crate::grid::field().center(c) * crate::sphere::PLANET_R // callers sample fields by direction
 }
 
+// Time-invariant terrain fields at each field-cell centre, built once (pure fns of position, like the grid).
+// biogeochem_step reads them every tick for every cell; sampling the noise live cost ~2 ms/tick at 24k cells.
+struct CellStatic {
+    moist: f32,
+    t_static: f32, // base_temperature before the global anomaly
+    ocean: bool,
+    rock: f32,
+}
+fn cell_static() -> &'static [CellStatic] {
+    static CS: std::sync::OnceLock<Vec<CellStatic>> = std::sync::OnceLock::new();
+    CS.get_or_init(|| {
+        (0..crate::grid::field().len())
+            .map(|c| {
+                let d = cell_center(c).normalize_or_zero();
+                CellStatic {
+                    moist: crate::sphere::moisture(d),
+                    t_static: crate::sphere::temperature_static(d),
+                    ocean: crate::sphere::is_ocean(d),
+                    rock: crate::sphere::rockiness(d),
+                }
+            })
+            .collect()
+    })
+}
+
 // Surface pos (on terrain) of grid cell `c`. Render places fire/effects on the globe.
 pub fn grid_cell_surface(c: usize) -> Vec3 {
     crate::sphere::surface_pos(cell_center(c).normalize_or_zero(), 0.0)
@@ -352,6 +379,61 @@ const FGRID: usize = (40.0 * crate::sphere::WORLD_SCALE) as usize; // ~6.3 m lat
 const NEAR_QUERY: f32 = 24.0;
 fn fcell(w: f32) -> usize {
     (((w + WORLD_HALF) / (2.0 * WORLD_HALF)) * FGRID as f32).clamp(0.0, (FGRID - 1) as f32) as usize
+}
+/// Food-grid bins that can hold any point within `reach` metres of `pos`, as (rows cv0..=cv1, columns
+/// cu_first.. cu_first+cols, each mod FGRID). Lat bins are fixed metres; lon bins shrink by cos(lat), so the lon
+/// span widens poleward (whole ring at the pole) and wraps the date line. Angles use the inner radius
+/// (PLANET_R - ELEV_MAX) so a seabed point's span is not underestimated.
+fn bin_span(pos: Vec3, reach: f32) -> (usize, usize, usize, usize) {
+    let (pu, pv) = fcell_uv(pos);
+    let pdir = pos.normalize_or_zero();
+    let r_in = crate::sphere::PLANET_R - crate::sphere::ELEV_MAX;
+    let lat_bin_m = std::f32::consts::PI * crate::sphere::PLANET_R / FGRID as f32;
+    let sv = (reach * crate::sphere::PLANET_R / r_in / lat_bin_m).ceil() as usize;
+    let lat_far = (pdir.y.clamp(-1.0, 1.0).asin().abs() + reach / r_in).min(std::f32::consts::FRAC_PI_2);
+    let lon_bin_m = std::f32::consts::TAU * r_in / FGRID as f32 * lat_far.cos();
+    let su = if lon_bin_m > 1e-3 { ((reach / lon_bin_m).ceil() as usize).min(FGRID / 2) } else { FGRID / 2 };
+    let cols = (2 * su + 1).min(FGRID);
+    (pv.saturating_sub(sv), (pv + sv).min(FGRID - 1), (pu + FGRID - su % FGRID) % FGRID, cols)
+}
+
+/// CSR over food-grid bins: bin b's items are idx[start[b]..start[b+1]], in input order.
+fn bin_csr(bins: &[u32]) -> (Vec<u32>, Vec<u32>) {
+    let mut start = vec![0u32; FGRID * FGRID + 1];
+    for &b in bins {
+        start[b as usize + 1] += 1;
+    }
+    for b in 0..FGRID * FGRID {
+        start[b + 1] += start[b];
+    }
+    let mut idx = vec![0u32; bins.len()];
+    let mut fill = start.clone();
+    for (i, &b) in bins.iter().enumerate() {
+        idx[fill[b as usize] as usize] = i as u32;
+        fill[b as usize] += 1;
+    }
+    (start, idx)
+}
+
+/// Indices (into the array `bin_csr` was built from) of every item in a bin within `reach` of `pos`, sorted
+/// ascending: callers scanning the result see items in their ORIGINAL order, so float sums and strict-< ties
+/// match a full scan of the array bit for bit (items outside the bins contributed nothing to it).
+fn near_sorted(start: &[u32], idx: &[u32], pos: Vec3, reach: f32, out: &mut Vec<usize>) {
+    out.clear();
+    let (cv0, cv1, cu_first, cols) = bin_span(pos, reach);
+    for cv in cv0..=cv1 {
+        for k in 0..cols {
+            let b = cv * FGRID + (cu_first + k) % FGRID;
+            out.extend(idx[start[b] as usize..start[b + 1] as usize].iter().map(|&i| i as usize));
+        }
+    }
+    out.sort_unstable();
+}
+
+/// Flat food-grid bin (v * FGRID + u) for a world pos. Cached per plant in PlantSite (plants never move).
+pub(crate) fn food_bin(pos: Vec3) -> u32 {
+    let (fu, fv) = fcell_uv(pos);
+    (fv * FGRID + fu) as u32
 }
 // Food-grid cell (lon, lat bins) for a 3D sphere pos.
 fn fcell_uv(pos: Vec3) -> (usize, usize) {
@@ -683,9 +765,11 @@ struct MatePool<'a> {
 }
 
 impl<'a> MatePool<'a> {
-    fn build(plants: impl Iterator<Item = (Entity, Vec3, bool, &'a PlantGenome)>) -> Self {
+    // last field: cached crowd cell (PlantSite), None = not visited yet -> bin now
+    fn build(plants: impl Iterator<Item = (Entity, Vec3, bool, &'a PlantGenome, Option<u32>)>) -> Self {
         let g = crate::grid::crowd();
-        let tagged: Vec<(usize, (Entity, Vec3, bool, &'a PlantGenome))> = plants.map(|p| (g.cell(p.1), p)).collect();
+        let tagged: Vec<(usize, (Entity, Vec3, bool, &'a PlantGenome))> =
+            plants.map(|(e, p, t, pg, c)| (c.map_or_else(|| g.cell(p), |c| c as usize), (e, p, t, pg))).collect();
         let mut start = vec![0u32; g.len() + 1];
         for (c, _) in &tagged {
             start[c + 1] += 1;
@@ -2211,10 +2295,12 @@ struct PlantBatch {
     // Biosphere what the local element budget can fund, and apply_growth_grants writes the granted mass. Same
     // deferred pattern as TreeBites (live_step records, plant_step applies).
     growth_wants: Vec<(u32, Entity, usize, f32)>, // idx, plant, grid cell, desired kg this tick
-    litter: Vec<(u32, Vec3, f32)>,               // dead tissue -> soil ORGANIC (not plant-available yet)
-    combust: Vec<(u32, Vec3, f32)>,              // burned tissue -> C and most N to air, P to ash
-    consumed: Vec<(u32, Vec3, f32)>,             // grazed tissue -> respired + excreted (Phase 1 stand-in)
-    nfix: Vec<(u32, Vec3, f32)>,                 // idx, pos, kg N pulled from air by rhizobia
+    // (idx, field cell, kg): the cell comes from the plant's cached PlantSite, so apply never re-bins
+    litter: Vec<(u32, u32, f32)>,               // dead tissue -> soil ORGANIC (not plant-available yet)
+    combust: Vec<(u32, u32, f32)>,              // burned tissue -> C and most N to air, P to ash
+    consumed: Vec<(u32, u32, f32)>,             // grazed tissue -> respired + excreted (Phase 1 stand-in)
+    nfix: Vec<(u32, u32, f32)>,                 // kg N pulled from air by rhizobia
+    sites: Vec<(u32, Entity, crate::plant::PlantSite)>, // first-visit site caches, inserted in apply
 }
 
 // Mass the Biosphere agreed to fund this tick, per plant. Written by plant_step's serial apply, consumed by
@@ -2226,6 +2312,7 @@ pub struct GrowthGrants(pub HashMap<Entity, f32>);
 // serial access, while the mass itself lives on a component the parallel decide already borrowed.
 // Runs immediately after plant_step; grants are consumed (drained) so nothing is applied twice.
 pub fn apply_growth_grants(mut grants: ResMut<GrowthGrants>, mut q: Query<&mut PlantState>) {
+    let _g = crate::profile::scope("grants");
     for (e, g) in grants.0.drain() {
         if let Ok(mut st) = q.get_mut(e) {
             st.mass += g;
@@ -2251,8 +2338,8 @@ pub fn plant_step(
     mut stats: Option<ResMut<crate::scenario::ScenarioStats>>,
     pclim: Option<Res<crate::climate::PlanetClimate>>,
     mut cover_hab: Local<(u32, Vec<f32>)>, // (tick computed, per-cell cover habitat): slow field, refreshed every COVER_HAB_REFRESH
-    mut q: Query<(Entity, &mut PlantState, &PlantGenome, &Transform, Option<&Tree>), (Without<Rot>, Without<Grass>)>, // not carrion, not grass (grass_step owns grass)
-    gq: Query<(Entity, &Transform, &PlantGenome, Has<Tree>), (Without<Rot>, Without<Grass>)>, // read-only twin of q: mate pool borrows genomes instead of cloning them
+    mut q: Query<(Entity, &mut PlantState, &PlantGenome, &Transform, Option<&Tree>, Option<&crate::plant::PlantSite>), (Without<Rot>, Without<Grass>)>, // not carrion, not grass (grass_step owns grass)
+    gq: Query<(Entity, &Transform, &PlantGenome, Has<Tree>, Option<&crate::plant::PlantSite>), (Without<Rot>, Without<Grass>)>, // read-only twin of q: mate pool borrows genomes instead of cloning them
 ) {
     let _g = crate::profile::scope("plant");
     // CO2 fertilization scales BOTH the per-plant ceiling and the per-cell light budget: carboxylation is
@@ -2269,8 +2356,8 @@ pub fn plant_step(
     };
     // season drifts on global tick clock (advances both modes; generation frozen in continuous)
     let season_tick = gen.tick;
-    let mut plant_count = q.iter().filter(|(.., t)| t.is_none()).count();
-    let tree_count = q.iter().filter(|(.., t)| t.is_some()).count();
+    let tree_count = q.iter().filter(|(_, _, _, _, t, _)| t.is_some()).count();
+    let mut plant_count = q.iter().len() - tree_count;
     // coarse start-of-tick repro gates. Serial gated each birth by `count + births.len() < cap` (and
     // short-circuited the rng + mass cost when full). Parallel decide can't see other entities' births, so we
     // gate on the start-of-tick count -> blocks seeding (and its mass cost) when already AT cap, matching serial
@@ -2278,16 +2365,16 @@ pub fn plant_step(
     // band where count < cap but count+births > cap (a few parents pay mass with no surviving seed). PARALLELIZATION.md.
     let seeding_open = plant_count < pcap;
     let tree_open = tree_count < tcap;
-    let tree_positions: Vec<Vec3> = q.iter().filter_map(|(_, _, _, tf, t)| t.map(|_| tf.translation)).collect();
+    let tree_positions: Vec<Vec3> = q.iter().filter_map(|(_, _, _, tf, t, _)| t.map(|_| tf.translation)).collect();
     // entity standing biomass per cell -> Beer-Lambert canopy share of the cell's light (rest reaches cover)
     let mut entity_kg = vec![0.0f64; bio.soil.len()];
-    for (_, st, _, tf, _) in q.iter() {
-        entity_kg[grid_cell(tf.translation)] += st.mass as f64;
+    for (_, st, _, tf, _, site) in q.iter() {
+        entity_kg[site.map_or_else(|| grid_cell(tf.translation), |s| s.cell as usize)] += st.mass as f64;
     }
     // mating mode (--mating, shared with creatures): pool of (entity, pos, is_tree, genome) so a seeding
     // plant/tree finds a nearby genetically-similar MATE to cross. Built only when --mating (cloning every plant
     // genome each tick isn't free); else empty -> reproduction is single-parent budding.
-    let mate_pool = MatePool::build(gen.mating.then(|| gq.iter().map(|(e, tf, g, tree)| (e, tf.translation, tree, g))).into_iter().flatten());
+    let mate_pool = MatePool::build(gen.mating.then(|| gq.iter().map(|(e, tf, g, tree, site)| (e, tf.translation, tree, g, site.map(|s| s.crowd)))).into_iter().flatten());
     let seed = gen.seed;
     let tick = gen.tick;
     // read-only snapshots for the parallel decide (soil/tree_bites not mutated until the serial apply below)
@@ -2308,16 +2395,21 @@ pub fn plant_step(
     let mut batch: bevy::utils::Parallel<PlantBatch> = bevy::utils::Parallel::default();
     q.par_iter_mut().for_each_init(
         || batch.borrow_local_mut(),
-        |out, (e, mut st, g, tf, tree)| {
+        |out, (e, mut st, g, tf, tree, site)| {
             let idx = e.index().index();
             let mut prng = crate::rng::Rng::for_entity(seed, idx, tick);
             let ppos = tf.translation;
             let pdir = ppos.normalize_or_zero();
-            let cell = grid_cell(ppos); // static: plants never move
+            let site = site.copied().unwrap_or_else(|| {
+                let s = crate::plant::PlantSite::at(ppos);
+                out.sites.push((idx, e, s));
+                s
+            });
+            let cell = site.cell as usize; // static: plants never move
             // wildfire burn-up: biomass -> ash (trees ~3x). Burned ground regrows richer. Serotiny: fire-adapted
             // plant releases a seed AS it burns (post-fire recruitment onto fresh ash).
             if fire_r.cell[cell] > FIRE_KILL {
-                out.combust.push((idx, ppos, st.mass));
+                out.combust.push((idx, site.cell, st.mass));
                 if tree.is_none() && prng.f32() < g.fire_seed {
                     let child = mate_or_self(pool_r, e, ppos, g, false, &mut prng);
                     out.births.push((idx, child, disperse_pos(&mut prng, ppos, g.spread, FOOD_Y)));
@@ -2326,8 +2418,8 @@ pub fn plant_step(
                 return;
             }
             // hard freeze: polar ice core -> any plant/tree dies outright (absolute kill, temp_pref-independent).
-            if crate::sphere::base_temperature(pdir) < FREEZE_TEMP {
-                out.litter.push((idx, ppos, st.mass)); // frozen tissue still returns to the soil
+            if site.temp() < FREEZE_TEMP {
+                out.litter.push((idx, site.cell, st.mass)); // frozen tissue still returns to the soil
                 out.despawns.push((idx, e, tree.is_none(), Some("frozen")));
                 return;
             }
@@ -2340,8 +2432,8 @@ pub fn plant_step(
             let lf = 0.35 + 0.65 * (1.0 - (light - g.light_pref).abs());
             if let Some(tree) = tree {
                 // trees land-only: a tree in water drowns fast (no kelp/mangrove forests).
-                if crate::sphere::is_ocean(pdir) && prng.f32() < DROWN_TREE {
-                    out.litter.push((idx, ppos, st.mass));
+                if site.e01 < crate::sphere::SEA_LEVEL && prng.f32() < DROWN_TREE {
+                    out.litter.push((idx, site.cell, st.mass));
                     out.despawns.push((idx, e, false, Some("drown")));
                     return;
                 }
@@ -2355,24 +2447,24 @@ pub fn plant_step(
                     // gives the clamped value and reintroduces the same bug.
                     let removed = bites_r.0[&e].min(st.mass);
                     st.mass -= removed;
-                    out.consumed.push((idx, ppos, removed));
+                    out.consumed.push((idx, site.cell, removed));
                     if st.mass < TREE_MIN_MASS {
-                        out.litter.push((idx, ppos, st.mass));
+                        out.litter.push((idx, site.cell, st.mass));
                         out.despawns.push((idx, e, false, Some("eaten")));
                         return;
                     }
                 }
                 // tree climate niche: moisture-immune (deep roots) but feels temperature. Far off thermal band -> dies.
-                let tmiss = (crate::sphere::base_temperature(pdir) - g.temp_pref).abs();
+                let tmiss = (site.temp() - g.temp_pref).abs();
                 if prng.f32() < TREE_TEMP_KILL * (tmiss - TREE_TEMP_TOL).max(0.0) {
-                    out.litter.push((idx, ppos, st.mass));
+                    out.litter.push((idx, site.cell, st.mass));
                     out.despawns.push((idx, e, false, Some("temp")));
                     return;
                 }
                 let temp_grow = TEMP_FLOOR + (1.0 - TEMP_FLOOR) * (1.0 - tmiss);
                 // soil response shapes growth speed + final SIZE (survival stays moisture-immune): rich + ideally
                 // moist ground grows bigger trees. Still MATURES at g.maturity so food/spread unchanged.
-                let clim = crate::sphere::moisture(pdir) * (1.0 - CLIMATE_VEG) + climate_r.cell[cell] * CLIMATE_VEG;
+                let clim = site.moist * (1.0 - CLIMATE_VEG) + climate_r.cell[cell] * CLIMATE_VEG;
                 let m = (clim + 0.2 * crate::sphere::season_wetness(season_tick, pdir) + WET_GAIN * water).clamp(0.0, 1.0);
                 let moist_q = (1.0 - (m - TREE_WET_OPT).abs() / TREE_WET_TOL).clamp(0.0, 1.0);
                 // Soil quality is moisture-only now. Nutrient scarcity used to be double-counted here (a
@@ -2415,7 +2507,7 @@ pub fn plant_step(
                     let spent = st.mass * (1.0 - PLANT_REPRO_FRAC);
                     st.mass *= PLANT_REPRO_FRAC; // budding a seed costs parent mass either way
                     // provisioning tissue that did not become seed: banked as litter, not destroyed
-                    out.litter.push((idx, ppos, spent));
+                    out.litter.push((idx, site.cell, spent));
                 }
                 return;
             }
@@ -2427,28 +2519,28 @@ pub fn plant_step(
                 // existed. Take the minimum against the mass the plant actually had.
                 let removed = bite.min(st.mass);
                 st.mass -= removed;
-                out.consumed.push((idx, ppos, removed));
+                out.consumed.push((idx, site.cell, removed));
                 if st.mass < PLANT_MIN_MASS {
-                    out.litter.push((idx, ppos, st.mass)); // the uneaten remainder rots where it stood
+                    out.litter.push((idx, site.cell, st.mass)); // the uneaten remainder rots where it stood
                     out.despawns.push((idx, e, true, Some("eaten")));
                     return;
                 }
             }
             // mortality from moisture mismatch / poor site / drown / desiccate / temp. Effective moisture = slow
             // CLIMATE moisture (drifts -> deserts/rainforests) + season + rain-fed ground water.
-            let clim = crate::sphere::moisture(pdir) * (1.0 - CLIMATE_VEG) + climate_r.cell[cell] * CLIMATE_VEG;
+            let clim = site.moist * (1.0 - CLIMATE_VEG) + climate_r.cell[cell] * CLIMATE_VEG;
             let m = (clim + 0.2 * crate::sphere::season_wetness(season_tick, pdir) + WET_GAIN * water).clamp(0.0, 1.0);
             // succulence buffers DROUGHT only (water-storers survive drier than their `wet`); soggy side unbuffered.
             let dry_deficit = (g.wet - m).max(0.0);
             let stress = ((m - g.wet).abs() - SUCC_BUFFER * g.succulence * dry_deficit).max(0.0);
-            let hab = crate::sphere::plant_habitability_with_moisture(pdir, clim);
-            let e01 = crate::sphere::elevation01(pdir);
+            let hab = crate::sphere::habitability_from(site.e01, site.temp(), clim);
+            let e01 = site.e01;
             let submersion = ((crate::sphere::SEA_LEVEL - e01) / crate::sphere::SEA_LEVEL).clamp(0.0, 1.0);
             let drown = DROWN_KILL * submersion * (1.0 - g.wet.max(g.submerged)); // F22/F27
             // desiccation (mirror of drown): aquatic plant stranded on dry land dries out.
             let aquatic = ((g.wet - 0.85) / 0.15).clamp(0.0, 1.0);
             let desiccate = DESICCATE_KILL * aquatic * (1.0 - submersion) * (1.0 - (m / 0.6).min(1.0));
-            let temp = crate::sphere::base_temperature(pdir);
+            let temp = site.temp();
             let tmiss = (temp - g.temp_pref).abs();
             let temp_grow = TEMP_FLOOR + (1.0 - TEMP_FLOOR) * (1.0 - tmiss);
             let m_moist = MOISTURE_KILL * (stress - MOISTURE_TOLERANCE).max(0.0);
@@ -2478,7 +2570,7 @@ pub fn plant_step(
             // nitrogen-fixer (legume): root nodules enrich local soil each tick.
             if g.nitrogen_fix > 0.0 {
                 let kg = crate::chem::NFIX_PER_M2_DAY * crate::chem::PLANT_FOOTPRINT_M2 * crate::chem::bio_days_per_tick();
-                out.nfix.push((idx, ppos, (kg * g.nitrogen_fix as f64) as f32));
+                out.nfix.push((idx, site.cell, (kg * g.nitrogen_fix as f64) as f32));
             }
             // request growth; the element budget decides what is actually funded (see growth_wants)
             let want = (g.growth_rate() * boost * hab * lf * temp_grow * DT).min(crate::chem::npp_ceiling_per_tick() as f32 * fert);
@@ -2517,7 +2609,7 @@ pub fn plant_step(
                     let spent = st.mass * (1.0 - PLANT_REPRO_FRAC);
                     st.mass *= PLANT_REPRO_FRAC; // budding a ramet costs parent
                     // provisioning tissue that did not become seed: banked as litter, not destroyed
-                    out.litter.push((idx, ppos, spent));
+                    out.litter.push((idx, site.cell, spent));
                 }
             }
             // cling (epizoochory): burr/sticky seed snagged by passing animal -> even inedible plants disperse.
@@ -2547,7 +2639,7 @@ pub fn plant_step(
                 let spent = st.mass * (1.0 - PLANT_REPRO_FRAC);
                 st.mass *= PLANT_REPRO_FRAC;
                 // provisioning tissue that did not become seed: banked as litter, not destroyed
-                out.litter.push((idx, ppos, spent));
+                out.litter.push((idx, site.cell, spent));
             }
         },
     );
@@ -2563,10 +2655,11 @@ pub fn plant_step(
     let mut tree_births: Vec<(u32, Vec3, bool, PlantGenome)> = Vec::new();
     let mut new_bank: Vec<(u32, PlantGenome, Vec3, u32)> = Vec::new();
     let mut growth_wants: Vec<(u32, Entity, usize, f32)> = Vec::new();
-    let mut litter: Vec<(u32, Vec3, f32)> = Vec::new();
-    let mut combust: Vec<(u32, Vec3, f32)> = Vec::new();
-    let mut consumed: Vec<(u32, Vec3, f32)> = Vec::new();
-    let mut nfix: Vec<(u32, Vec3, f32)> = Vec::new();
+    let mut litter: Vec<(u32, u32, f32)> = Vec::new();
+    let mut combust: Vec<(u32, u32, f32)> = Vec::new();
+    let mut consumed: Vec<(u32, u32, f32)> = Vec::new();
+    let mut nfix: Vec<(u32, u32, f32)> = Vec::new();
+    let mut sites: Vec<(u32, Entity, crate::plant::PlantSite)> = Vec::new();
     for b in batch.iter_mut() {
         despawns.append(&mut b.despawns);
         soil_adds.append(&mut b.soil_adds);
@@ -2580,9 +2673,14 @@ pub fn plant_step(
         combust.append(&mut b.combust);
         consumed.append(&mut b.consumed);
         nfix.append(&mut b.nfix);
+        sites.append(&mut b.sites);
     }
     despawns.sort_by_key(|d| d.0);
     soil_adds.sort_by_key(|d| d.0);
+    sites.sort_unstable_by_key(|d| d.0);
+    for (_, e, site) in sites {
+        commands.entity(e).try_insert(site); // try_: a plant can despawn the same tick it is first visited
+    }
     // Every reservoir touch is sorted by parent index before it lands: f64 addition is not associative, so
     // unsorted merge order would make the ledger drift differ run-to-run and break determinism.
     growth_wants.sort_unstable_by_key(|d| d.0); // one want per plant: keys unique, unstable is deterministic
@@ -2591,17 +2689,17 @@ pub fn plant_step(
     consumed.sort_by_key(|d| d.0);
     nfix.sort_by_key(|d| d.0);
     let comp = crate::chem::PLANT_COMP;
-    for (_, pos, mass) in &litter {
-        bio.deposit_litter(grid_cell(*pos), *mass as f64, comp);
+    for &(_, c, mass) in &litter {
+        bio.deposit_litter(c as usize, mass as f64, comp);
     }
-    for (_, pos, mass) in &combust {
-        bio.combust(grid_cell(*pos), *mass as f64, comp);
+    for &(_, c, mass) in &combust {
+        bio.combust(c as usize, mass as f64, comp);
     }
-    for (_, pos, mass) in &consumed {
-        bio.consume_and_excrete(grid_cell(*pos), *mass as f64, comp);
+    for &(_, c, mass) in &consumed {
+        bio.consume_and_excrete(c as usize, mass as f64, comp);
     }
-    for (_, pos, kg) in &nfix {
-        bio.fix_nitrogen(grid_cell(*pos), *kg as f64);
+    for &(_, c, kg) in &nfix {
+        bio.fix_nitrogen(c as usize, kg as f64);
     }
     // Fund growth under TWO real constraints, and the order matters.
     // 1. LIGHT is captured per unit AREA, so a cell's whole plant community shares one NPP budget. Without
@@ -2878,6 +2976,14 @@ pub fn predation_step(
     let (mut kin_acc, mut climb_acc, mut succ_acc) = (0.0f32, 0.0f32, 0.0f32);
     let r2 = ATTACK_RADIUS * ATTACK_RADIUS;
     let rs2 = SOCIAL_RADIUS * SOCIAL_RADIUS;
+    // creatures binned on the food grid: target + kin scans cover only bins within their radius (was every
+    // creature per attacker, ~9 ms/tick at 4k pop). Candidates visited in SNAPSHOT order so exact eff_def ties
+    // resolve to the same prey as the old full scan.
+    let sbins: Vec<u32> = snap.iter().map(|s| food_bin(s.1)).collect();
+    let (sstart, sidx) = bin_csr(&sbins);
+    let near = |p: Vec3, reach: f32, out: &mut Vec<usize>| near_sorted(&sstart, &sidx, p, reach, out);
+    let mut cand: Vec<usize> = Vec::new();
+    let mut kin_cand: Vec<usize> = Vec::new();
     for (ai, &(ae, apos, abite, _aenergy, _asig, _, _, _, a_atk_intent, _, a_kg, _)) in snap.iter().enumerate() {
         if killed.contains(&ae) {
             continue; // a creature killed this tick doesn't also attack
@@ -2896,7 +3002,9 @@ pub fn predation_step(
         // whatever is closest, and picking the softest target is what turns an outlier bite into a diet.
         // Brace counts here (a braced animal reads as defensive), so a hunter skips the one standing ground.
         let mut best: Option<(f32, usize)> = None;
-        for (bi, &(be, bpos, _, _, _, bdef, _, _, _, b_def_intent, _, _)) in snap.iter().enumerate() {
+        near(apos, ATTACK_RADIUS, &mut cand);
+        for &bi in &cand {
+            let (be, bpos, _, _, _, bdef, _, _, _, b_def_intent, _, _) = snap[bi];
             if bi == ai || killed.contains(&be) {
                 continue;
             }
@@ -2913,8 +3021,9 @@ pub fn predation_step(
             let (be, bpos, _, b_fat, bsig, bdef, bven, bclimb, _, b_def_intent, b_kg, b_shelter) = snap[bi];
             // herd safety: prey surrounded by KIN is harder to pick off (vigilance) -> being social pays
             let mut kin = 0.0f32;
-            for (e2, p2, _, _, s2, _, _, _, _, _, _, _) in &snap {
-                if *e2 != be && bpos.distance_squared(*p2) < rs2 && sig_dist(&bsig, s2) < SOCIAL_SIM {
+            near(bpos, SOCIAL_RADIUS, &mut kin_cand);
+            for &(e2, p2, _, _, ref s2, _, _, _, _, _, _, _) in kin_cand.iter().map(|&i| &snap[i]) {
+                if e2 != be && bpos.distance_squared(p2) < rs2 && sig_dist(&bsig, s2) < SOCIAL_SIM {
                     kin += 1.0;
                 }
             }
@@ -3132,9 +3241,11 @@ pub fn live_step(
     fire: Res<Fire>,
     mut earth: ResMut<crate::build::Earthworks>,
     gw: Res<GroundWater>,
-    fq: Query<(Entity, &Transform, &PlantState, &PlantGenome, Option<&Rot>, Option<&Tree>, Option<&Ferment>, Option<&Seed>, Option<&Carrion>), (With<Food>, Without<Creature>)>,
+    fq: Query<(Entity, &Transform, &PlantState, &PlantGenome, Option<&Rot>, Option<&Tree>, Option<&Ferment>, Option<&Seed>, Option<&Carrion>, Option<&crate::plant::PlantSite>), (With<Food>, Without<Creature>)>,
+    mq: Query<&Genome, With<Creature>>, // read-only genome twin: the mate pool borrows instead of cloning every genome
 ) {
     let _g = crate::profile::scope("live");
+    let pre = crate::profile::scope("live.pre");
     let dt = DT;
     let ntypes = gen.ntypes();
     let pop = cq.iter().count(); // live population (start-of-tick; reproduction/density reads this fixed count)
@@ -3148,10 +3259,13 @@ pub fn live_step(
     // snapshot: (entity, pos, genome, mass, rot_age, tree, ferment_toxic, seed). rot_age=Some+ferment=None ->
     // animal carrion (meat); rot_age=Some+ferment=Some -> fermenting plant matter (fruit/detritus);
     // tree=Some(edible) -> a tree; else a living plant.
-    let foods: Vec<(Entity, Vec3, PlantGenome, f32, Option<u32>, Option<bool>, Option<f32>, Option<PlantGenome>, bool)> = fq
+    // genomes BORROWED from fq, not cloned (~50k foods a tick); the cached food bin rides along (None = compute).
+    let mut fbins: Vec<u32> = Vec::with_capacity(fq.iter().len());
+    let foods: Vec<(Entity, Vec3, &PlantGenome, f32, Option<u32>, Option<bool>, Option<f32>, Option<&PlantGenome>, bool)> = fq
         .iter()
-        .map(|(e, t, st, pg, rot, tree, ferment, seed, carrion)| {
-            (e, t.translation, pg.clone(), st.mass, rot.map(|r| r.age), tree.map(|t| t.edible), ferment.map(|f| f.toxic), seed.map(|s| s.0.clone()), carrion.is_some())
+        .map(|(e, t, st, pg, rot, tree, ferment, seed, carrion, site)| {
+            fbins.push(site.map_or_else(|| food_bin(t.translation), |s| s.fbin));
+            (e, t.translation, pg, st.mass, rot.map(|r| r.age), tree.map(|t| t.edible), ferment.map(|f| f.toxic), seed.map(|s| &s.0), carrion.is_some())
         })
         .collect();
     // creature snapshot for social/kin need + threat/prey sense: (entity, pos, signature, LOG BODY MASS,
@@ -3188,6 +3302,11 @@ pub fn live_step(
         .filter(|(_, _, _, _, _, a, _, b, _, _)| a.0 && b.voice > 0.0)
         .map(|(e, t, _, _, _, _, g, b, _, _)| (e, t.translation, 1.0 - g.size, b.voice))
         .collect();
+    // creature + caller snapshots binned on the food grid: threat/prey, hearing and collision scan only nearby
+    // bins (were whole-population scans per creature, O(n^2): ~58M checks a tick at 4k pop)
+    let (cstart, cidx) = bin_csr(&cre_snap.iter().map(|c| food_bin(c.1)).collect::<Vec<u32>>());
+    let (vstart, vidx) = bin_csr(&voice_snap.iter().map(|v| food_bin(v.1)).collect::<Vec<u32>>());
+    let max_body_r = cre_snap.iter().map(|c| c.4).fold(0.0f32, f32::max);
     // per-cell creature crowding -> density-dependent grazing income (grass+seaweed graze drop where creatures
     // pack in). Makes carrying capacity EMERGENT (food self-limits pop below CREATURE_CAP) instead of riding the
     // hard cap. Binned on the COARSE crowd grid (grid::CROWD_N, the scale GRAZE_CROWD_K was tuned at); own
@@ -3206,34 +3325,15 @@ pub fn live_step(
         }
     }
     // mating mode: pool of (entity, pos, signature, genome) so a breeding creature finds a nearby
-    // genetically-similar MATE to cross. Built only when --mating (cloning genomes isn't free).
-    let mate_pool: Vec<(Entity, Vec3, [f32; 10], Genome)> = if gen.mating {
-        cq.iter()
-            .filter(|(_, _, _, _, _, a, _, _, _, _)| a.0)
-            .map(|(e, t, _, _, _, _, g, _, _, _)| (e, t.translation, signature(g), g.clone()))
-            .collect()
+    // genetically-similar MATE to cross. Same creatures + order as cre_snap (alive only); genomes borrowed.
+    let mate_pool: Vec<(Entity, Vec3, [f32; 10], &Genome)> = if gen.mating {
+        cre_snap.iter().filter_map(|&(e, p, sig, _, _)| mq.get(e).ok().map(|g| (e, p, sig, g))).collect()
     } else {
         Vec::new()
     };
     // bin food indices into the spatial grid (built once per tick). CSR: bin b's foods are
     // fgrid[fstart[b]..fstart[b+1]], in food order (as the old per-bin Vec pushes).
-    let fbins: Vec<u32> = foods.iter().map(|f| {
-        let (fu, fv) = fcell_uv(f.1);
-        (fv * FGRID + fu) as u32
-    }).collect();
-    let mut fstart = vec![0u32; FGRID * FGRID + 1];
-    for &b in &fbins {
-        fstart[b as usize + 1] += 1;
-    }
-    for b in 0..FGRID * FGRID {
-        fstart[b + 1] += fstart[b];
-    }
-    let mut fgrid = vec![0u32; foods.len()];
-    let mut ffill = fstart.clone();
-    for (i, &b) in fbins.iter().enumerate() {
-        fgrid[ffill[b as usize] as usize] = i as u32;
-        ffill[b as usize] += 1;
-    }
+    let (fstart, fgrid) = bin_csr(&fbins);
     // start-of-tick population snapshots: parallel decide reads these fixed counts (social-density drain + repro
     // taper); running caps re-enforced serially in apply. pop/niche_pop no longer mutate during the step.
     let pop_start = pop;
@@ -3245,6 +3345,8 @@ pub fn live_step(
     // DECIDE (parallel): each creature senses/thinks/moves/eats/metabolizes/learns on its OWN components, drawing a
     // per-entity deterministic RNG; every shared-world effect pushed as an intent. PARALLELIZATION.md.
     let mut batch: bevy::utils::Parallel<LiveBatch> = bevy::utils::Parallel::default();
+    drop(pre);
+    let decide = crate::profile::scope("live.decide");
     cq.par_iter_mut().for_each_init(
         || batch.borrow_local_mut(),
         |bat, (entity, mut ct, mut energy, mut fit, mut head, mut alive, genome, mut brain, mut diet, mut loco)| {
@@ -3280,20 +3382,23 @@ pub fn live_step(
         let wing_load = wing_loading(&morph) * genome.size_scale(); // size folds in: bigger body -> higher loading
         let flier = is_flier(genome.flight, wing_load); // bird: flight gene AND wings; picks fruit from canopy
         // scan the food bins within this creature's own reach (widest sensor, floor NEAR_QUERY so the nearest
-        // food for eating/approach is still found). Lat bins are fixed metres; lon bins shrink by cos(lat), so
-        // the lon span widens poleward (whole ring at the pole) and wraps the date line.
+        // food for eating/approach is still found).
         let reach = max_range.max(NEAR_QUERY);
-        let (pu, pv) = fcell_uv(pos);
+        let (cv0, cv1, cu_first, cols) = bin_span(pos, reach);
         let pdir = pos.normalize_or_zero();
-        let lat_bin_m = std::f32::consts::PI * crate::sphere::PLANET_R / FGRID as f32;
-        let sv = (reach * crate::sphere::PLANET_R / (crate::sphere::PLANET_R - crate::sphere::ELEV_MAX) / lat_bin_m).ceil() as usize;
-        let lat_far = (pdir.y.clamp(-1.0, 1.0).asin().abs() + reach / (crate::sphere::PLANET_R - crate::sphere::ELEV_MAX)).min(std::f32::consts::FRAC_PI_2); // inner radius: seabed creatures span more angle
-        let lon_bin_m = std::f32::consts::TAU * crate::sphere::PLANET_R / FGRID as f32 * lat_far.cos();
-        let su = if lon_bin_m > 1e-3 { ((reach / lon_bin_m).ceil() as usize).min(FGRID / 2) } else { FGRID / 2 };
-        let (cv0, cv1) = (pv.saturating_sub(sv), (pv + sv).min(FGRID - 1));
-        let cols = (2 * su + 1).min(FGRID);
-        let cu_first = (pu + FGRID - su % FGRID) % FGRID;
         let (east, north) = crate::sphere::tangent_frame(pdir);
+        // sensor cone test without atan2 (hot: ~1000 foods x every creature x every tick). Axis of sensor s in the
+        // (east, north) tangent frame at bearing head + s.angle (0 = north, clockwise): "within CONE_HALF of
+        // the axis" == t . axis >= |t| cos(CONE_HALF) (any CONE_HALF in 0..pi).
+        let cone_cos = CONE_HALF.cos();
+        let axes: Vec<(f32, f32, f32)> = genome
+            .sensors
+            .iter()
+            .map(|s| {
+                let (sin, cos) = (head.0 + s.angle).sin_cos();
+                (sin, cos, s.range * eye_mult)
+            })
+            .collect();
         for cv in cv0..=cv1 {
             for k in 0..cols {
                 let cu = (cu_first + k) % FGRID;
@@ -3323,9 +3428,13 @@ pub fn live_step(
                         continue; // out of every sensor range -> skip bearing + cone tests
                     }
                     // bearing in local tangent frame: 0 = north (toward +Y pole), +pi/2 = east
-                    let bearing = wrap_angle(to.dot(east).atan2(to.dot(north)) - head.0);
-                    for (si, s) in genome.sensors.iter().enumerate() {
-                        if dist <= s.range * eye_mult && dist < sd[si] && wrap_angle(bearing - s.angle).abs() <= CONE_HALF {
+                    let (mut te, mut tn) = (to.dot(east), to.dot(north));
+                    if te == 0.0 && tn == 0.0 {
+                        (te, tn) = (0.0, 1.0); // atan2(0, 0) = 0 = due north, as the old bearing test read it
+                    }
+                    let tlen_cos = (te * te + tn * tn).sqrt() * cone_cos;
+                    for (si, &(ae, an, range)) in axes.iter().enumerate() {
+                        if dist <= range && dist < sd[si] && te * ae + tn * an >= tlen_cos {
                             sd[si] = dist;
                             skind[si] = f.2.kind;
                         }
@@ -3361,7 +3470,10 @@ pub fn live_step(
         let mut prey_d2 = f32::INFINITY;
         let mut prey_pos = Vec3::ZERO;
         let mut prey_score = f32::NEG_INFINITY;
-        for (e2, p2, _, c2, _) in &cre_snap {
+        // threat/prey only count inside THREAT_RADIUS (see below), so only those bins are scanned
+        let mut near = Vec::new();
+        near_sorted(&cstart, &cidx, pos, THREAT_RADIUS, &mut near);
+        for (e2, p2, _, c2, _) in near.iter().map(|&i| &cre_snap[i]) {
             if *e2 == entity {
                 continue;
             }
@@ -3408,7 +3520,8 @@ pub fn live_step(
         let mut hear_loud = 0.0f32;
         let mut hear_best = 0.0f32;
         let mut hear_pos = Vec3::ZERO;
-        for (ve, vp, pitch, loud) in &voice_snap {
+        near_sorted(&vstart, &vidx, pos, hear_radius, &mut near);
+        for (ve, vp, pitch, loud) in near.iter().map(|&i| &voice_snap[i]) {
             if *ve == entity {
                 continue; // don't hear self
             }
@@ -3653,7 +3766,9 @@ pub fn live_step(
         let my_r = body_radius(genome);
         let mut push = Vec3::ZERO;
         let mut overlap_sum = 0.0f32;
-        for (e2, p2, _, _, r2) in &cre_snap {
+        let mut near = Vec::new();
+        near_sorted(&cstart, &cidx, np, my_r + max_body_r, &mut near);
+        for (e2, p2, _, _, r2) in near.iter().map(|&i| &cre_snap[i]) {
             if *e2 == entity {
                 continue;
             }
@@ -3787,7 +3902,7 @@ pub fn live_step(
         // at healthy density social creatures must herd, but sparse population relaxes the pressure -> no Allee
         // death-spiral (constant loneliness drain on a spread-out pop feeds back to extinction; this self-limits).
         if genome.social > 0.0 {
-            let kinf = kin_fraction(entity, np, &signature(genome), &cre_snap);
+            let kinf = kin_fraction(entity, np, &signature(genome), &cre_snap, &cstart, &cidx);
             let density = (pop_start as f32 / SOCIAL_DENSITY_REF).min(1.0);
             energy.burn(SOCIAL_COST * genome.social * (1.0 - kinf) * density * dt);
         }
@@ -3800,7 +3915,7 @@ pub fn live_step(
             let rot_age = foods[i].4;
             let tree = foods[i].5; // None=plant/carrion, Some(true)=fruit tree, Some(false)=evergreen
             let ferment = foods[i].6; // Some(toxic) -> fermenting plant matter (fruit/detritus); None+rot -> meat
-            let seed = foods[i].7.clone(); // Some(genome) -> fallen fruit carrying a viable seed (planted if eaten ripe)
+            let seed = foods[i].7.cloned(); // Some(genome) -> fallen fruit carrying a viable seed (planted if eaten ripe)
             // eat-gate (out[4]): ingestion is a CHOICE -> brain can refuse bad food (unripe/spoiled/toxic).
             // EAT_GATE sits BELOW the fresh-net 0.5 baseline so founders feed before learning (no gen-0 starve).
                 // fruit-tree eating uses HORIZONTAL distance for a flier (picks from the canopy at any altitude);
@@ -4225,6 +4340,8 @@ pub fn live_step(
         }
     },
     );
+    drop(decide);
+    let _apply = crate::profile::scope("live.apply");
     // APPLY (serial, deterministic): drain every thread-local batch, sort each intent list by the actor's stable
     // entity index, then do the shared-world writes in that fixed order so caps, soil float-sums, and SPAWN order
     // (-> new entity-index assignment) all reproduce run-to-run regardless of thread scheduling. PARALLELIZATION.md.
@@ -4402,10 +4519,13 @@ fn sig_dist(a: &[f32; 10], b: &[f32; 10]) -> f32 {
 }
 
 // Fraction of social satisfaction from nearby kin (0 isolated .. 1 fully in herd). Excludes self by entity id.
-fn kin_fraction(me: Entity, pos: Vec3, sig: &[f32; 10], snap: &[(Entity, Vec3, [f32; 10], f32, f32)]) -> f32 {
+// `start`/`idx`: snap binned with bin_csr, so only bins within SOCIAL_RADIUS are scanned (a count: order-free).
+fn kin_fraction(me: Entity, pos: Vec3, sig: &[f32; 10], snap: &[(Entity, Vec3, [f32; 10], f32, f32)], start: &[u32], idx: &[u32]) -> f32 {
     let r2 = SOCIAL_RADIUS * SOCIAL_RADIUS;
     let mut kin = 0.0f32;
-    for (e, p, s, _, _) in snap {
+    let mut near = Vec::new();
+    near_sorted(start, idx, pos, SOCIAL_RADIUS, &mut near);
+    for (e, p, s, _, _) in near.iter().map(|&i| &snap[i]) {
         if *e == me {
             continue;
         }

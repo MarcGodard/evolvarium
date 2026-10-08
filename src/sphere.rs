@@ -333,6 +333,11 @@ pub fn is_ocean(d: Vec3) -> bool {
 /// Temperature 0..1 at `d`: warm at equator, cold at poles + high elevation. Sub-solar point also warms
 /// locally (day side warmer) once a tick supplied via `solar_warmth`.
 pub fn base_temperature(d: Vec3) -> f32 {
+    temp_with_anomaly(temperature_static(d))
+}
+
+/// Time-invariant part of base_temperature (latitude band minus lapse), before the global anomaly. Plants cache it.
+pub fn temperature_static(d: Vec3) -> f32 {
     let (_lon, lat) = dir_to_lonlat(d);
     let c = lat.cos(); // 1 at equator, 0 at poles
     // Extra polar chill: ramps in ONLY at high lat (cos < ~0.55, i.e. |lat| > ~57 deg) so temperate +
@@ -341,7 +346,11 @@ pub fn base_temperature(d: Vec3) -> f32 {
     let polar = ((0.55 - c) / 0.55).clamp(0.0, 1.0); // 0 below ~57 deg .. 1 at pole
     let by_lat = c - 0.45 * polar * polar;
     let lapse = elevation(d).max(0.0) / ELEV_MAX * 0.4; // high ground colder (ocean depth: no lapse)
-    (by_lat - lapse + temp_anomaly()).clamp(0.0, 1.0)
+    by_lat - lapse
+}
+
+pub fn temp_with_anomaly(t_static: f32) -> f32 {
+    (t_static + temp_anomaly()).clamp(0.0, 1.0)
 }
 
 // Global mean temperature anomaly (field units), set once per tick by climate::climate_step and read by
@@ -438,8 +447,11 @@ pub fn surface_pos(d: Vec3, offset: f32) -> Vec3 {
 
 /// Rockiness 0..1 at `d`: 0 on low/mid ground, ramps to 1 on highest peaks (hard to cross, few plants).
 pub fn rockiness(d: Vec3) -> f32 {
+    rockiness_from(elevation01(d))
+}
+pub fn rockiness_from(e01: f32) -> f32 {
     const ROCK_START: f32 = 0.72;
-    ((elevation01(d) - ROCK_START) / (1.0 - ROCK_START)).clamp(0.0, 1.0)
+    ((e01 - ROCK_START) / (1.0 - ROCK_START)).clamp(0.0, 1.0)
 }
 
 /// Plant habitability 0..1 at `d`: 0 in ocean, reduced on rock, drought, cold (poles). Land flora thrives
@@ -454,19 +466,27 @@ pub fn plant_habitability(d: Vec3) -> f32 {
 pub fn plant_habitability_with_moisture(d: Vec3, moist: f32) -> f32 {
     let e = elevation01(d);
     if e < AQUATIC_FLOOR {
+        return 0.0; // skip the temperature lookup: barren regardless
+    }
+    habitability_from(e, base_temperature(d), moist)
+}
+
+/// plant_habitability_with_moisture from its inputs (elevation01, base_temperature, moisture): the cached-site path.
+pub fn habitability_from(e: f32, temp: f32, moist: f32) -> f32 {
+    if e < AQUATIC_FLOOR {
         return 0.0; // abyssal deep ocean: barren (no light reaches bottom)
     }
-    let warm_ok = 0.45 + 0.55 * base_temperature(d); // poles support hardy cold-tolerant flora, not barren
+    let warm_ok = 0.45 + 0.55 * temp; // poles support hardy cold-tolerant flora, not barren
     if e < SEA_LEVEL {
         // Water column grows aquatic flora (plankton/algae/seagrass) -> food base for swimmers sea-wide,
         // richest in shallows (coastal seagrass), thinning toward open water (plankton). Water moderates
         // temp, so aquatic flora less polar-sensitive than land. Trade-off: open water feeds less than rich
         // land, swimmers pay swim gene + slow on land.
         let shallow = ((e - AQUATIC_FLOOR) / (SEA_LEVEL - AQUATIC_FLOOR)).clamp(0.0, 1.0); // 0 open .. 1 coast
-        let water_warm = 0.7 + 0.3 * base_temperature(d);
+        let water_warm = 0.7 + 0.3 * temp;
         return ((0.55 + 0.30 * shallow) * water_warm).clamp(0.0, 1.0);
     }
-    let rock_ok = 1.0 - 0.9 * rockiness(d);
+    let rock_ok = 1.0 - 0.9 * rockiness_from(e);
     // Dry-ground habitability with desert floor: bone-dry land keeps DESERT_FLORA_FLOOR (rare scrub).
     // Callers pass effective moisture (static + rain ground water), so downpour lifts this -> bloom.
     let moist_ok = (moist / 0.35).clamp(0.0, 1.0).max(DESERT_FLORA_FLOOR);

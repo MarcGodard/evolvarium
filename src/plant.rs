@@ -166,6 +166,36 @@ fn half_light() -> f32 {
     0.5
 }
 
+/// Position-only environment of a plant (plants never move), cached on its first plant_step so the hot decide
+/// skips ~200 ns of noise lookups per plant per tick. Exactly the values the sphere fns return at its position;
+/// time-varying parts (temperature anomaly, climate drift, season, light) stay live.
+#[derive(Component, Clone, Copy)]
+pub struct PlantSite {
+    pub cell: u32,  // grid::field() cell
+    pub crowd: u32, // grid::crowd() cell (mate pool)
+    pub fbin: u32,  // live_step food-grid bin
+    pub e01: f32,
+    pub t_static: f32,
+    pub moist: f32,
+}
+
+impl PlantSite {
+    pub fn at(pos: Vec3) -> Self {
+        let d = pos.normalize_or_zero();
+        PlantSite {
+            cell: crate::grid::field().cell(pos) as u32,
+            crowd: crate::grid::crowd().cell(pos) as u32,
+            fbin: crate::sim::food_bin(pos),
+            e01: crate::sphere::elevation01(d),
+            t_static: crate::sphere::temperature_static(d),
+            moist: crate::sphere::moisture(d),
+        }
+    }
+    pub fn temp(&self) -> f32 {
+        crate::sphere::temp_with_anomaly(self.t_static)
+    }
+}
+
 // Per-plant state: mass grows over life; eaten plants despawned.
 #[derive(Component)]
 pub struct PlantState {
@@ -761,4 +791,3 @@ pub fn flower_color(g: &PlantGenome) -> Color {
     let light = 0.50 + 0.30 * g.flower_light; // 0.50 .. 0.80: always bright, never near-black/near-white
     Color::hsl(hue, sat, light)
 }
-
