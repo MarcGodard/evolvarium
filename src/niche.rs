@@ -171,6 +171,7 @@ pub fn niche_step(
     mut tr: ResMut<NicheTracker>,
     q: Query<(&Genome, &Fitness, &DietState), With<Creature>>,
     scen: Option<Res<crate::scenario::ScenarioStats>>,
+    mut bio: ResMut<crate::chem::Biosphere>,
 ) {
     let _g = crate::profile::scope("niche");
     let live_continuous = gen.continuous && gen.generation >= WARMUP_GENS;
@@ -229,6 +230,8 @@ pub fn niche_step(
             };
             child.mutate(&mut rng, MUT_RATE, MUT_STD);
             let pos = crate::sim::loaded_creature_pos(&child, &mut rng); // habitat-matched placement
+            // a rescued body is matter: fund it from the fauna pool, book any shortfall as minted
+            bio.settle_fauna(crate::chem::creature_mass_kg(child.morph.map(|m| m.mass).unwrap_or_else(|| crate::morph::Morphometrics::of(&child.body).mass)));
             crate::sim::spawn_creature(&mut commands, child, pos, &mut rng, BIRTH_ENERGY);
         }
         tr.per_last_rescue[i] = tick;

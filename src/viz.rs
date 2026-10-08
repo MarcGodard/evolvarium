@@ -2784,7 +2784,7 @@ fn god_disturbances(
     gen: Res<GenState>,
     mut fire: ResMut<Fire>,
     gw: Res<GroundWater>,
-    mut creatures: Query<(&Genome, &mut Alive), With<Creature>>,
+    mut creatures: Query<(&Genome, &Alive, &mut crate::components::Energy), With<Creature>>,
     mut commands: Commands,
     mut rng: ResMut<crate::rng::Rng>,
     mut strikes: ResMut<Strikes>,
@@ -2795,14 +2795,14 @@ fn god_disturbances(
     if keys.just_pressed(KeyCode::KeyB) {
         // seed burst of creatures cloned from living pop (competent brains)
         const BURST: usize = 200;
-        let parents: Vec<Genome> = creatures.iter().filter(|(_, a)| a.0).map(|(g, _)| g.clone()).collect();
+        let parents: Vec<Genome> = creatures.iter().filter(|(_, a, _)| a.0).map(|(g, _, _)| g.clone()).collect();
         crate::sim::seed_burst(&mut commands, &mut rng, &parents, BURST);
         info!("god: seeded {BURST} new creatures (clones of the living)");
     }
     if keys.just_pressed(KeyCode::KeyP) {
         // populate WHOLE planet: plants + trees + creatures, each in survivable habitat (aquatic in sea,
         // alpine in mountains, climate-matched). Fills every region instead of waiting for spread.
-        let parents: Vec<Genome> = creatures.iter().filter(|(_, a)| a.0).map(|(g, _)| g.clone()).collect();
+        let parents: Vec<Genome> = creatures.iter().filter(|(_, a, _)| a.0).map(|(g, _, _)| g.clone()).collect();
         crate::sim::seed_planet(&mut commands, &mut rng, &parents, gen.ntypes(), 300, 600, 120);
         info!("god: seeded the whole planet (300 creatures, 600 plants, 120 trees)");
     }
@@ -2828,11 +2828,13 @@ fn god_disturbances(
     if keys.just_pressed(KeyCode::KeyK) {
         let mut i = 0u32;
         let mut killed = 0u32;
-        for (_, mut alive) in &mut creatures {
+        for (_, alive, mut energy) in &mut creatures {
             if alive.0 {
                 i += 1;
                 if i.is_multiple_of(3) {
-                    alive.0 = false; // sim turns into carrion + despawns next step
+                    // starve, don't flip Alive: live_step skips the already-dead, so a direct flip left the body
+                    // with no carrion, no despawn and no matter return. Deep negative so no meal this tick saves it.
+                    *energy = crate::components::Energy::from_total(-1.0e6);
                     killed += 1;
                 }
             }

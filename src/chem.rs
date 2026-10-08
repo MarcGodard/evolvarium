@@ -436,6 +436,11 @@ pub struct Biosphere {
     /// drift. A healthy world should leave this near zero; a large value means the food web keeps collapsing.
     #[serde(default)]
     pub rescue_minted: Elements,
+    /// Same idea for the generational WARM-UP reset, which rebuilds every body in place each generation with
+    /// no birth to fund it. Tallied apart so rescue_minted keeps its meaning (a collapsing food web), and so the
+    /// reset never drains fauna_pool (draining it recreated the Allee trap at the start of continuous mode).
+    #[serde(default)]
+    pub reset_minted: Elements,
     /// Non-living total at world creation, kept so `drift_ppm` can report leakage as a live number rather
     /// than only in tests. Once living biomass is element-backed, pass it to `drift_ppm` and this becomes
     /// the single honest answer to "is the world still conserving".
@@ -477,6 +482,7 @@ impl Biosphere {
             rock: Elements::new(0.0, 0.0, ROCK_P_PER_M2 * total_area),
             fauna_pool: Elements::ZERO,
             rescue_minted: Elements::ZERO,
+            reset_minted: Elements::ZERO,
             initial_total: Elements::ZERO,
         };
         b.initial_total = b.total();
@@ -486,7 +492,7 @@ impl Biosphere {
     /// Leakage since creation, parts per million per element, given the `living` biomass currently held
     /// outside these reservoirs. Must stay at 0; anything else means a path is creating or destroying matter.
     pub fn drift_ppm(&self, living: Elements) -> Elements {
-        let now = self.total() + living - self.rescue_minted;
+        let now = self.total() + living - self.rescue_minted - self.reset_minted;
         let base = self.initial_total;
         let rel = |a: f64, b: f64| if b.abs() > 0.0 { (a - b) / b * 1.0e6 } else { 0.0 };
         Elements::new(rel(now.c, base.c), rel(now.n, base.n), rel(now.p, base.p))
@@ -754,7 +760,36 @@ impl Biosphere {
         true
     }
 
+    /// Body mass `delta` (kg of ANIMAL_COMP; + appearing, - vanishing) that changes OUTSIDE a birth or death: a
+    /// warm-up generation rewriting genomes in place, a niche rescue spawning a body. Draws what the fauna pool
+    /// can fund per element, returns any surplus to it, and books the unfundable rest as rescue_minted, the
+    /// ledger's one deliberate exception (same rule as the plant reseed floor).
+    pub fn settle_fauna(&mut self, delta_kg: f64) {
+        let d = ANIMAL_COMP * delta_kg;
+        let settle = |want: f64, pool: &mut f64, minted: &mut f64| {
+            if want >= 0.0 {
+                let take = want.min(*pool).max(0.0);
+                *pool -= take;
+                *minted += want - take;
+            } else {
+                *pool -= want; // returned tissue
+            }
+        };
+        settle(d.c, &mut self.fauna_pool.c, &mut self.rescue_minted.c);
+        settle(d.n, &mut self.fauna_pool.n, &mut self.rescue_minted.n);
+        settle(d.p, &mut self.fauna_pool.p, &mut self.rescue_minted.p);
+    }
+
+    /// Warm-up reset body change (kg, + grown / - shrunk): booked to reset_minted, fauna_pool untouched.
+    pub fn mint_reset_body(&mut self, delta_kg: f64) {
+        self.reset_minted += ANIMAL_COMP * delta_kg;
+    }
+
     /// Return animal tissue to the shared pool (a body that never became carrion, e.g. drowned at sea).
+    pub fn return_fauna(&mut self, kg: f64) {
+        self.fauna_pool += ANIMAL_COMP * kg.max(0.0);
+    }
+
     /// Biological nitrogen fixation: rhizobia pulling inert atmospheric N2 into plant-available soil N.
     /// The `PlantGenome.nitrogen_fix` gene drives this, so a legume genuinely enriches its patch instead of
     /// conjuring fertility from nothing.
@@ -1025,6 +1060,27 @@ mod tests {
         assert_conserved(after_seed, b.total() + ANIMAL_COMP * 1.5, "birth draw");
         assert!(b.fauna_pool.n >= 0.0, "pool went negative");
         let _ = start;
+    }
+
+    #[test]
+    fn settle_fauna_keeps_the_ledger_closed() {
+        // a body appearing outside a birth (warm-up reset, niche rescue) must either be drawn from the pool or
+        // booked as minted, and a body shrinking must return its tissue: drift stays 0 either way.
+        let mut b = Biosphere::new();
+        b.fauna_pool = ANIMAL_COMP * 0.4;
+        b.initial_total = b.total(); // seal the ledger after seeding, as seal_matter_ledger does
+        let living0 = Elements::ZERO;
+        let d0 = b.drift_ppm(living0);
+        b.settle_fauna(1.0); // pool covers 0.4, 0.6 minted
+        let d1 = b.drift_ppm(ANIMAL_COMP * 1.0);
+        b.settle_fauna(-0.3); // body shrinks: tissue back to the pool
+        let d2 = b.drift_ppm(ANIMAL_COMP * 0.7);
+        for d in [d0, d1, d2] {
+            assert!(d.c.abs() < 1e-6 && d.n.abs() < 1e-6 && d.p.abs() < 1e-6, "drift {d:?}");
+        }
+        // it must DRAW what the pool holds before minting: pool emptied by the +1.0, then refilled by 0.3
+        assert!((b.fauna_pool.n - ANIMAL_COMP.n * 0.3).abs() < 1e-12, "pool {:?}", b.fauna_pool);
+        assert!((b.rescue_minted.n - ANIMAL_COMP.n * 0.6).abs() < 1e-12, "minted {:?}", b.rescue_minted);
     }
 
     #[test]

@@ -773,6 +773,11 @@ impl Genome {
         if rng.f32() < 0.05 && self.net.ih.len() > MIN_HIDDEN {
             self.remove_hidden(rng);
         }
+        // body just mutated: a cached morph is the PARENT's. Births and rescues fund the body from it before
+        // spawn re-derives it, so a stale value charged the wrong mass to the ledger on every birth.
+        if self.morph.is_some() {
+            self.morph = Some(crate::morph::Morphometrics::of(&self.body));
+        }
     }
 
     // Grow hidden layer by one neuron: new ih row (input weights) + new column in every ho row (its output

@@ -83,14 +83,22 @@ live in `config.rs`; the live conversion plan is `SPHERE-PLAN.md`.
       pop 465/311/974 -> 3468/1392/1713, carnivory 0.08-0.16 -> 0.20-0.28, soil organic C ~1.0 -> 2.6-3.1
       kg/m^2 (the litter input the drain lacked), cover grazed down to 0.10-0.13 kg/m^2 (~20% of saturation).
       Rendered grass tufts die back on cells grazed bare.
-- [ ] **Ledger drift sources found (pre-existing, not cover)**: the warm-up generation reset (`alive.0 = true;
-      *g = child`) and niche rescue (`spawn_creature` in niche.rs) create bodies without `draw_fauna` and
-      without booking `rescue_minted`. Both scale with population, which is why busy worlds drift more. Cover
-      paths audited matter-neutral.
+- [x] **Ledger closed: drift C +1800..3100 ppm -> +0.03..0.08 ppm at tick 96000** (seeds 1/5/9, 20 gens).
+      Leaks, all found by tick-level drift traces + review: (1) headless seaweed grown and killed by plant_step
+      though it sits outside the ledger (now `Without<Seaweed>` everywhere plants are counted, saved or grown);
+      (2) warm-up reset revived bodies whose old body had already become carrion (now `reset_minted`, kept apart
+      so it never drains `fauna_pool`); (3) niche rescue spawned unfunded bodies (`settle_fauna`); (4) drowned
+      bodies vanished and lingered as dead zombies (`return_fauna` + despawn); (5) `mutate` left the parent's
+      cached morph, so births were charged the wrong mass; (6) a restored save sealed against its own mint
+      tallies. God key K now starves rather than flipping Alive (that skipped carrion and despawn).
+- [ ] God keys B and P (seed bursts) still spawn unfunded bodies (windowed only).
 - [ ] GRAZE_CROWD_K crowding penalty is now probably redundant (a real sward depletes locally); candidate for
       deletion after a multi-seed A/B.
 - [ ] Render tools in creatures' grip (viz) and a nest/dam capture from an evolved builder world.
-- [ ] Weather is now ~0.5 ms/tick on 6144 cells (cloud fbm per cell); cache or subsample if it starts to bind.
+- [ ] Weather is ~1.1 ms/tick on 24.6k cells (cloud fbm per cell, already parallel); subsample if it binds.
+- [x] **Planet 2x radius, 4x surface** (a67d657) as a magnified copy; sim at ~4400 creatures: live 23 -> 8 ms,
+      predation 9.2 -> 1.2, plant 11.1 -> 4.3, biogeochem 2.0 -> 0.2 (b3a3890), all bit-identical except the
+      cone test. Windowed frame time at the new size still unmeasured past ~1100 creatures (screen was locked).
 
 ### Solar system + sky: real Tychos model (2026-06-24)
 Full design `~/Documents/Github/clients/evolvarium/15-solar-system-tychos.md`. Data copied from

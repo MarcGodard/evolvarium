@@ -581,7 +581,7 @@ pub fn scenario_step(
     cfg: Res<ScenarioCfg>,
     mut stats: ResMut<ScenarioStats>,
     mut exit: MessageWriter<AppExit>,
-    q: Query<(&PlantState, &PlantGenome, Option<&Tree>), (Without<crate::components::Rot>, Without<crate::components::Grass>)>,
+    q: Query<(&PlantState, &PlantGenome, Option<&Tree>), (Without<crate::components::Rot>, Without<crate::components::Grass>, Without<crate::components::Seaweed>)>,
     cq: Query<(&Genome, &DietState, &Energy, &Alive, &crate::components::Fitness), With<Creature>>,
 ) {
     gen.tick = gen.tick.wrapping_add(1); // drives daylight_at + season in plant_step

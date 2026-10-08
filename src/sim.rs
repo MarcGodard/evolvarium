@@ -202,7 +202,7 @@ pub struct PlanetRes<'w> {
 }
 
 // The world's field grids as one system param. Exists because generation_step hit Bevy's 16-param ceiling:
-// bundling the read-only grids buys headroom and keeps the signature legible. Add new grids HERE rather than
+// bundling the grids (all read-only but bio) buys headroom and keeps the signature legible. Add new grids HERE rather than
 // as another bare Res, or the next addition breaks the same ceiling again.
 #[derive(bevy::ecs::system::SystemParam)]
 pub struct FieldGrids<'w> {
@@ -212,7 +212,7 @@ pub struct FieldGrids<'w> {
     pub fire: Res<'w, Fire>,
     pub wear: Res<'w, Wear>,
     pub weather: Res<'w, Weather>,
-    pub bio: Res<'w, crate::chem::Biosphere>,
+    pub bio: ResMut<'w, crate::chem::Biosphere>, // mut: the warm-up reset settles body-mass changes
     pub pclim: Option<Res<'w, crate::climate::PlanetClimate>>,
     pub earth: Res<'w, crate::build::Earthworks>,
 }
@@ -300,7 +300,8 @@ pub fn seal_matter_ledger(
     if restored.is_none() {
         bio.seed_fauna_pool(crate::chem::ANIMAL_COMP * fauna_kg);
     }
-    bio.initial_total = bio.total() + flora + crate::chem::ANIMAL_COMP * fauna_kg;
+    // minus the tallies: a restored save carries rescue/reset mints that drift_ppm subtracts from `now`
+    bio.initial_total = bio.total() + flora + crate::chem::ANIMAL_COMP * fauna_kg - bio.rescue_minted - bio.reset_minted;
     info!(
         "ledger sealed: total C{:.0} N{:.0} P{:.0} | flora P{:.1} fauna P{:.3} | {}",
         bio.initial_total.c, bio.initial_total.n, bio.initial_total.p, flora.p, crate::chem::ANIMAL_COMP.p * fauna_kg,
@@ -2338,8 +2339,8 @@ pub fn plant_step(
     mut stats: Option<ResMut<crate::scenario::ScenarioStats>>,
     pclim: Option<Res<crate::climate::PlanetClimate>>,
     mut cover_hab: Local<(u32, Vec<f32>)>, // (tick computed, per-cell cover habitat): slow field, refreshed every COVER_HAB_REFRESH
-    mut q: Query<(Entity, &mut PlantState, &PlantGenome, &Transform, Option<&Tree>, Option<&crate::plant::PlantSite>), (Without<Rot>, Without<Grass>)>, // not carrion, not grass (grass_step owns grass)
-    gq: Query<(Entity, &Transform, &PlantGenome, Has<Tree>, Option<&crate::plant::PlantSite>), (Without<Rot>, Without<Grass>)>, // read-only twin of q: mate pool borrows genomes instead of cloning them
+    mut q: Query<(Entity, &mut PlantState, &PlantGenome, &Transform, Option<&Tree>, Option<&crate::plant::PlantSite>), (Without<Rot>, Without<Grass>, Without<Seaweed>)>, // not carrion; grass + seaweed are decor owned by their own steps and sit outside the matter ledger, so growing/killing them here minted matter
+    gq: Query<(Entity, &Transform, &PlantGenome, Has<Tree>, Option<&crate::plant::PlantSite>), (Without<Rot>, Without<Grass>, Without<Seaweed>)>, // read-only twin of q: mate pool borrows genomes instead of cloning them
 ) {
     let _g = crate::profile::scope("plant");
     // CO2 fertilization scales BOTH the per-plant ceiling and the per-cell light budget: carboxylation is
@@ -3181,6 +3182,7 @@ struct LiveBatch {
     plant_births: Vec<(u32, PlantGenome, Vec3)>, // idx, endozoochory-dispersed offspring (already mutated+placed)
     carrion: Vec<(u32, Vec3, f32, f32)>,      // idx, pos, mass, fattiness -> spawn_carrion
     self_despawns: Vec<(u32, Entity)>,        // idx, dead creature entity (continuous mode -> becomes carrion, body gone)
+    drowned: Vec<(u32, f64)>,                 // idx, body kg of a drowned creature: no carrion, tissue back to fauna_pool
     births: Vec<(u32, Genome, Vec3, f32, usize)>, // idx, child, pos, birth_energy, parent niche (running-cap in apply)
     nest_builds: Vec<(u32, usize, f64)>,     // idx, field cell, kg litter to weave (Biosphere::gather_nest in apply)
     earth_digs: Vec<(u32, usize, f32)>,      // idx, field cell, earthwork level to heap
@@ -3804,6 +3806,12 @@ pub fn live_step(
             let sub = ((crate::sphere::SEA_LEVEL - crate::sphere::elevation01(nd)) / crate::sphere::SEA_LEVEL).clamp(0.0, 1.0);
             if sub > DROWN_DEPTH {
                 alive.0 = false;
+                // no carrion (sinks to the abyss), but the body is still matter: back to the pool, and in
+                // continuous mode the entity goes like any corpse (it lingered as a dead zombie counted in pop)
+                bat.drowned.push((idx, crate::chem::creature_mass_kg(morph.mass)));
+                if live_continuous {
+                    bat.self_despawns.push((idx, entity));
+                }
                 return;
             }
         }
@@ -4352,6 +4360,7 @@ pub fn live_step(
     let mut plant_births: Vec<(u32, PlantGenome, Vec3)> = Vec::new();
     let mut carrion: Vec<(u32, Vec3, f32, f32)> = Vec::new();
     let mut self_despawns: Vec<(u32, Entity)> = Vec::new();
+    let mut drowned: Vec<(u32, f64)> = Vec::new();
     let mut births: Vec<(u32, Genome, Vec3, f32, usize)> = Vec::new();
     let mut nest_builds: Vec<(u32, usize, f64)> = Vec::new();
     let mut earth_digs: Vec<(u32, usize, f32)> = Vec::new();
@@ -4367,6 +4376,7 @@ pub fn live_step(
         plant_births.append(&mut b.plant_births);
         carrion.append(&mut b.carrion);
         self_despawns.append(&mut b.self_despawns);
+        drowned.append(&mut b.drowned);
         births.append(&mut b.births);
     }
     food_despawns.sort_by_key(|d| d.0);
@@ -4376,6 +4386,10 @@ pub fn live_step(
     plant_births.sort_by_key(|d| d.0);
     carrion.sort_by_key(|d| d.0);
     self_despawns.sort_by_key(|d| d.0);
+    drowned.sort_by_key(|d| d.0);
+    for &(_, kg) in &drowned {
+        bio.return_fauna(kg);
+    }
     births.sort_by_key(|d| d.0);
     // tree-bite damage accumulates per food (trees + living plants; plant_step/tree mass read it next). Two
     // creatures grazing one food this tick both record -> energy each extracted stays paired with mass removed.
@@ -4544,13 +4558,13 @@ pub fn generation_step(
         (&mut Transform, &mut Energy, &mut Fitness, &mut Heading, &mut Alive, &mut Genome, &mut Brain, &mut DietState, &mut Locomotion),
         With<Creature>,
     >,
-    pq: Query<(&PlantGenome, &PlantState), (Without<Rot>, Without<Grass>)>, // living plants only (carrion + grass excluded from stats/save)
+    pq: Query<(&PlantGenome, &PlantState), (Without<Rot>, Without<Grass>, Without<Seaweed>)>, // living plants only (carrion, grass, seaweed excluded from stats/save)
     tq: Query<&PlantGenome, With<Tree>>, // trees only, for the evolvable-height stat
     // full plant-class query for the world snapshot: living plants + trees + carrion + ferment + fruit, with
     // positions + markers. Grass/seaweed carpets excluded (regenerated on load). Without<Creature> -> disjoint from cq.
     pf: Query<(&PlantGenome, &PlantState, &Transform, Option<&Tree>, Option<&Rot>, Option<&Ferment>, Option<&Seed>, Option<&Carrion>), (Without<Grass>, Without<Seaweed>, Without<Creature>)>,
     carrion_q: Query<&PlantState, With<Carrion>>, // animal flesh: 7x the N, 10x the P of plant litter
-    fields: FieldGrids,
+    mut fields: FieldGrids,
     bank: Res<SeedBank>,
     mut exit: MessageWriter<AppExit>,
     niche: Res<crate::niche::NicheTracker>, // --until-sustain stop: all niches quiet for a full window
@@ -4918,6 +4932,11 @@ pub fn generation_step(
         diet.g = 0.0;
         diet.age = if desync { (rng.f32() * 600.0) as u32 } else { 0 };
         diet.fatigue = 0.0;
+        // the reset rewrites the body in place with no birth to fund it. A survivor's body just changes mass; a
+        // DEAD entity's old body already left as carrion (live_step), so its revival is a whole new body.
+        let body_kg = |g: &Genome| crate::chem::creature_mass_kg(g.morph.map(|m| m.mass).unwrap_or_else(|| crate::morph::Morphometrics::of(&g.body).mass));
+        let old_kg = if alive.0 { body_kg(&g) } else { 0.0 };
+        fields.bio.mint_reset_body(body_kg(&child) - old_kg);
         *g = child;
         *energy = Energy::from_total(if desync { rng.range(0.8, 1.2) * START_ENERGY } else { START_ENERGY }); // stagger but never lethally low
         fit.0 = 0.0;
