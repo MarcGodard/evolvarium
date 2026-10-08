@@ -33,9 +33,9 @@ pub const FATIGUE_DRAG: f32 = 0.6;  // fraction of thrust output lost at full fa
 // Continuous breeding must require GENUINELY EARNED surplus, else warmup->continuous handoff (all at
 // START_ENERGY 30) triggers synchronized birth burst -> boom-bust extinction. Threshold ABOVE start
 // energy means no one breeds at handoff; each must forage up to it -> staggered births.
-pub const REPRO_THRESHOLD: f32 = 30.0; // eligibility energy. BELOW ~33-37 foraging energy so fed majority breeds -> R>1. Density taper + competition cap growth, not a high threshold.
-pub const REPRO_COST: f32 = 16.0; // energy parent spends per child (parent stays viable: 30->14)
-pub const BIRTH_ENERGY: f32 = 28.0; // offspring start energy: buffer so newborns establish before starving (raised: newborn die-off was R<1 driver pinning pop at floor)
+pub static REPRO_THRESHOLD: crate::tune::Knob = crate::tune::Knob::new("REPRO_THRESHOLD", 30.0); // eligibility energy. BELOW ~33-37 foraging energy so fed majority breeds -> R>1. Density taper + competition cap growth, not a high threshold.
+pub static REPRO_COST: crate::tune::Knob = crate::tune::Knob::new("REPRO_COST", 16.0); // energy parent spends per child (parent stays viable: 30->14)
+pub static BIRTH_ENERGY: crate::tune::Knob = crate::tune::Knob::new("BIRTH_ENERGY", 28.0); // offspring start energy: buffer so newborns establish before starving (raised: newborn die-off was R<1 driver pinning pop at floor)
 pub const P_REPRO_CREATURE: f32 = 0.025; // per-tick repro chance while eligible (x density taper)
 pub const REPRO_MIN_AGE: u32 = 180; // min ticks of life before breeding (newborns establish first; paces waves)
 pub const CREATURE_CAP: usize = 5000 * crate::sphere::AREA_X; // global pop SAFETY ceiling. Conserved chemistry is meant to be the real limiter, so a pop sitting EXACTLY on this number means the cap binds and the measurement is meaningless (same rule as PLANT_CAP). Raised 2000->5000 after diurnal temperature made the world productive enough to pin. Windowed viz draws every creature so high density costs FPS.
@@ -78,7 +78,7 @@ pub const ADIPOSITY_CAP: f32 = 1.2; // fat_cap mult span: cap = FAT_CAP*(0.4 + t
 
 // --- creature metabolism + movement ---
 pub const START_ENERGY: f32 = 30.0;
-pub const BASAL_COST: f32 = 0.5; // energy/sec just to live. Low so fed creature can coast/rest + competent forager is net-positive -> continuous persistence. Bad foragers still starve = selection.
+pub static BASAL_COST: crate::tune::Knob = crate::tune::Knob::new("BASAL_COST", 0.5); // energy/sec just to live. Low so fed creature can coast/rest + competent forager is net-positive -> continuous persistence. Bad foragers still starve = selection.
 pub const STARVE_FLOOR: f32 = 1.0; // energy below = STARVING (~3% of START_ENERGY). Pinned below for STARVE_TICKS straight = death (kills grass-trickle zombies clinging at ~0 energy).
 pub const STARVE_TICKS: u16 = 240; // consecutive starving ticks before death (~4s at 60/s): grace for forager bridging meals, lethal for one that never recovers.
 pub const TURN_EFFORT: f32 = 0.35; // rotational share of locomotion effort (see sim effort2). Turning was FREE, which made spin-in-place a costless policy selection could not punish.
@@ -107,7 +107,7 @@ pub const HEIGHT_COST: f32 = 0.7; // energy/sec upkeep per unit height (tall rea
 // the same term on both sides of the matchup and made predation unwinnable by construction. Now it prices
 // the one asymmetry real food webs run on: 0.5 * ln(2) = 0.35 edge for twice the prey's mass, and exactly
 // -0.35 for half. Scale-free, so it reads the same for grams or tonnes.
-pub const SIZE_COMBAT: f32 = 0.5;
+pub static SIZE_COMBAT: crate::tune::Knob = crate::tune::Knob::new("SIZE_COMBAT", 0.5);
 pub const SIZE_MOVE: f32 = 1.2;    // move cost mult scales (1 + this*size) (more mass to push)
 // Swim (aquatic): in water/wet lowland a swimmer moves faster + cheaper (exploits river + productive
 // moist shoreline -> "fish" niche); on dry high ground its fins are liability (move penalty).
@@ -194,12 +194,12 @@ pub const ATTACK_RADIUS: f32 = 1.6; // must be adjacent to attack
 // Defense (out[3]): bracing raises effective defense but immobilizes. Sprint (out[5]): burst chase/flee
 // speed, paid in fuel + fatigue. All single dials for tuning fight-vs-flight balance.
 pub const ATTACK_INTENT_THRESH: f32 = 0.5; // out[2] above this = creature hunting this tick
-pub const ATTACK_COST: f32 = 1.2; // energy/sec at full attack intent, paid whether attack lands or misses
+pub static ATTACK_COST: crate::tune::Knob = crate::tune::Knob::new("ATTACK_COST", 1.2); // energy/sec at full attack intent, paid whether attack lands or misses
 // Prey effective-defense bonus at full brace. Must stay BELOW ARMOR_DEF: bracing is an instantaneous
 // posture, armour is a grown, permanently-carried, permanently-paid-for structure, so a flinch outranking
 // plate is backwards. At 2.0 vs armour 1.1 it was the single largest term in the predation deficit
 // (measured brace 1.07 of a 1.25 adv gap) and it made predation arithmetically unwinnable.
-pub const BRACE_DEF: f32 = 0.6;
+pub static BRACE_DEF: crate::tune::Knob = crate::tune::Knob::new("BRACE_DEF", 0.6);
 pub const BRACE_DRAG: f32 = 0.7; // fraction of move speed lost at full brace (immobilize cost)
 pub const SPRINT_BOOST: f32 = 0.6; // max burst-speed mult added at full sprint
 pub const SPRINT_COST: f32 = 1.5; // extra energy/sec at full sprint
@@ -248,7 +248,7 @@ pub const GRASS_HAB_MIN: f32 = 0.25; // min plant_habitability to seed/keep gras
 // 12 -> 197 recalibrates the LEVEL for the new per-reference-mass meaning: intake_scale(0.09 kg) = 0.061,
 // so an unchanged 12 would have cut the staple to 6% and starved the world. Shape is physics, level is
 // calibration; this changes only the level.
-pub const CARPET_GRAZE: f32 = 197.0;
+pub static CARPET_GRAZE: crate::tune::Knob = crate::tune::Knob::new("CARPET_GRAZE", 197.0);
 // Energy per kg of ground cover grazed: the same density an average entity-plant bite yields
 // (EAT_GAIN x nutrient ~0.35 x (0.5 + quality ~0.45) ~= 0.33). Converts CARPET_GRAZE's energy intake into the
 // KG the sward actually loses, so the pasture depletes (chem::graze_cover) instead of feeding for free.
@@ -476,8 +476,8 @@ pub const MEAT_RESERVE: f32 = 0.5;      // flat reserve top-up (all nutrients) f
 
 // --- diet model (--diet): growth-load disease + aging (nutrient mechanics in Phase C block above) ---
 pub const G_DECAY: f32 = 0.015; // growth-load shed per tick (recovery when well-nourished)
-pub const DISEASE_K: f32 = 0.004; // per-tick disease mortality per unit growth-load
-pub const AGE_HAZARD: f32 = 0.02; // late-life mortality ceiling (decelerates -> ~plateau)
+pub static DISEASE_K: crate::tune::Knob = crate::tune::Knob::new("DISEASE_K", 0.004); // per-tick disease mortality per unit growth-load
+pub static AGE_HAZARD: crate::tune::Knob = crate::tune::Knob::new("AGE_HAZARD", 0.02); // late-life mortality ceiling (decelerates -> ~plateau)
 pub const AGE_SCALE: f32 = 2400.0; // ticks; age at which aging hazard reaches half its ceiling (longer lifespans)
 // Longevity gene: effective lifespan = AGE_SCALE * (0.4 + 1.2*longevity) (longevity 0.5 = baseline x1.0).
 // Long-lived body pays extra basal upkeep per unit lifespan above baseline -> slow-life (durable but
@@ -486,8 +486,8 @@ pub const LONGEVITY_COST: f32 = 1.1; // energy/sec extra basal at max lifespan m
 
 // --- generational GA ---
 pub const ELITE_FRAC: f32 = 0.3;
-pub const MUT_RATE: f32 = 0.12;
-pub const MUT_STD: f32 = 0.3;
+pub static MUT_RATE: crate::tune::Knob = crate::tune::Knob::new("MUT_RATE", 0.12);
+pub static MUT_STD: crate::tune::Knob = crate::tune::Knob::new("MUT_STD", 0.3);
 
 // --- lifetime learning (see 04 + 09) ---
 pub const LEARN_RATE: f32 = 0.04;
@@ -544,7 +544,7 @@ pub const PELT_UPKEEP: f32 = 0.2;      // energy/sec basal at full pelt (growing
 // (armadillos and turtles are still eaten). Paired cost is ARMOR_MOVE 0.8, raised to 1.4: plates are heavy
 // and the previous ratio made armour cheap enough to be a dominant strategy, which is the arms race that
 // defeated the bite-offence-only attempt (see predation_step).
-pub const ARMOR_DEF: f32 = 1.1;
+pub static ARMOR_DEF: crate::tune::Knob = crate::tune::Knob::new("ARMOR_DEF", 1.1);
 pub const ARMOR_MOVE: f32 = 1.4;  // move-cost mult add at full armor (heavy plates to push)
 pub const ARMOR_BASAL: f32 = 0.5; // energy/sec basal at full armor
 // venom: toxic flesh deters predators -> predator eating venomous prey gains far less (sickening kill).
@@ -601,7 +601,7 @@ pub const THREAT_RADIUS: f32 = 22.0; // bigger-combat creature within this sense
 // creature will cross the full 22-unit sense radius only for prey ~0.44 log-mass lighter (~1.5x), and takes
 // the near one otherwise.
 pub const PREY_TRIP_COST: f32 = 0.02;
-pub const THREAT_MARGIN: f32 = 0.4;  // combat edge neighbor needs over you to register as threat
+pub static THREAT_MARGIN: crate::tune::Knob = crate::tune::Knob::new("THREAT_MARGIN", 0.4);  // combat edge neighbor needs over you to register as threat
 // acoustics (M6): hearing = OMNIDIRECTIONAL sense (unlike vision cone). A listener hears an emitter loudest
 // when its hear_freq matches the emitter's size-pitch (1-size). Emission = NN out[7] (when/loud); emit pitch
 // anatomical. Predator-prey + communication arms-race lever. Genes: hearing (acuity/range), hear_freq (band).

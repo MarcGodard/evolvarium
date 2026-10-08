@@ -11,6 +11,7 @@
 // Bevy ECS systems take many args + complex query tuples. Silence clippy noise.
 #![allow(clippy::too_many_arguments, clippy::type_complexity)]
 mod audio;
+mod tune;
 mod build;
 mod camera;
 mod chem;
@@ -65,6 +66,36 @@ fn parse_or<T: std::str::FromStr>(args: &[String], pfx: &str, default: T) -> T {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    // --set=NAME=VALUE or --set NAME=VALUE (repeatable): runtime balance knobs (tune.rs), applied before any
+    // system reads them. Both spellings, and a bare trailing --set is an error: a silently ignored override
+    // turns an A/B into two identical arms.
+    let mut specs: Vec<&str> = Vec::new();
+    let mut it = args.iter().peekable();
+    while let Some(a) = it.next() {
+        if let Some(spec) = a.strip_prefix("--set=") {
+            specs.push(spec);
+        } else if a == "--set" {
+            match it.next() {
+                Some(spec) => specs.push(spec),
+                None => {
+                    eprintln!("--set needs NAME=VALUE");
+                    std::process::exit(2);
+                }
+            }
+        }
+    }
+    for spec in specs {
+        if let Err(e) = tune::set(spec) {
+            eprintln!("{e}");
+            std::process::exit(2);
+        }
+    }
+    for (k, v) in tune::overrides() {
+        eprintln!("knob override: {k} = {v}"); // stderr: tracing is not up yet, and runs log to one file anyway
+    }
+    for w in tune::invariant_warnings() {
+        eprintln!("knob warning: {w}");
+    }
     let headless = flag(&args, "--headless");
     // --profile: time each hot system over the run, print cumulative ranking periodically (Phase 0,
     // PARALLELIZATION.md). Headless only (perf target). Near-free otherwise (scope() = atomic load when off).

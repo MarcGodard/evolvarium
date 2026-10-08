@@ -6,6 +6,8 @@
 #   tools/ab.sh [--gens=20] [--seeds="1 5 9"] [--jobs=3] [--out=DIR] \
 #       [--bin-a=PATH] [--bin-b=PATH] [--a="flags"] [--b="flags"]
 #
+# Knob A/B without a rebuild: tools/ab.sh --b="--set=DISEASE_K=0.008". A bad --set exits 2 and lists the knob
+# names in that run's $out/<arm>-s<seed>.log.
 # Defaults: both arms use target/release/evolvarium; --jobs caps parallel sims (~0.5 GB each at 5k pop).
 # Copy a binary before rebuilding if one arm is the old build: cp target/release/evolvarium /tmp/evo-a
 # Paths (--bin-*, --out) are relative to the REPO root. Flag strings are word-split, never globbed.

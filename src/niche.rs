@@ -228,11 +228,11 @@ pub fn niche_step(
                 let k = (rng.f32() * banks.banks[i].len() as f32) as usize % banks.banks[i].len();
                 banks.banks[i][k].clone()
             };
-            child.mutate(&mut rng, MUT_RATE, MUT_STD);
+            child.mutate(&mut rng, MUT_RATE.get(), MUT_STD.get());
             let pos = crate::sim::loaded_creature_pos(&child, &mut rng); // habitat-matched placement
             // a rescued body is matter: fund it from the fauna pool, book any shortfall as minted
             bio.settle_fauna(crate::chem::creature_mass_kg(child.morph.map(|m| m.mass).unwrap_or_else(|| crate::morph::Morphometrics::of(&child.body).mass)));
-            crate::sim::spawn_creature(&mut commands, child, pos, &mut rng, BIRTH_ENERGY);
+            crate::sim::spawn_creature(&mut commands, child, pos, &mut rng, BIRTH_ENERGY.get());
         }
         tr.per_last_rescue[i] = tick;
         tr.total_rescues[i] += need as u32;

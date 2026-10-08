@@ -197,7 +197,7 @@ pub fn evolve_gym(pop_n: usize, gens: u32, steps: u32, seed: u64, save: Option<S
         while next.len() < pop_n {
             let p = &elite[(rng.f32() * elite_n as f32) as usize % elite_n];
             let mut c = p.clone();
-            c.mutate(&mut rng, MUT_RATE, MUT_STD); // drifts body + gait (+ net/traits, used on the planet)
+            c.mutate(&mut rng, MUT_RATE.get(), MUT_STD.get()); // drifts body + gait (+ net/traits, used on the planet)
             next.push(c);
         }
         pop = next;

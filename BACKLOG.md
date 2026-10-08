@@ -92,6 +92,9 @@ live in `config.rs`; the live conversion plan is `SPHERE-PLAN.md`.
       cached morph, so births were charged the wrong mass; (6) a restored save sealed against its own mint
       tallies. God key K now starves rather than flipping Alive (that skipped carrion and despawn).
 - [ ] God keys B and P (seed bursts) still spawn unfunded bodies (windowed only).
+- [x] **Runtime knobs** (`--set=NAME=VALUE`, src/tune.rs): 14 balance constants overridable without a rebuild,
+      recorded in --metrics world.knobs, invariant warnings on stderr. A/B one: `tools/ab.sh --b="--set=..."`.
+- [ ] Scenario result.json (scenario.rs) does not record knob overrides yet; only --metrics does.
 - [x] **GRAZE_CROWD_K deleted** (tools/ab.sh, seeds 1/2/5/9, 20 gens): pop 5171 -> 4392 mean, inside the
       3495..6612 per-seed spread; cover 0.123 -> 0.084 kg/m^2 on every seed, i.e. the real sward now does the
       limiting the penalty used to fake. Also drops a per-tick crowd-grid tally.

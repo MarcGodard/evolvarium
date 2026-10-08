@@ -367,7 +367,7 @@ pub fn spawn_scenario_world(
             }
             stats.cseeded.push(g.clone());
             let pos = place(&mut rng, crate::sim::CREATURE_Y);
-            crate::sim::spawn_creature(&mut commands, g, pos, &mut rng, crate::sim::BIRTH_ENERGY);
+            crate::sim::spawn_creature(&mut commands, g, pos, &mut rng, crate::sim::BIRTH_ENERGY.get());
         }
     }
     stats.cstarted = stats.cseeded.len();
@@ -375,7 +375,7 @@ pub fn spawn_scenario_world(
     // grazing pressure: random creatures in band. Continuous off -> they don't reseed.
     for _ in 0..w.grazers {
         let pos = place(&mut rng, crate::sim::CREATURE_Y);
-        crate::sim::spawn_creature(&mut commands, Genome::random(&mut rng), pos, &mut rng, crate::sim::BIRTH_ENERGY);
+        crate::sim::spawn_creature(&mut commands, Genome::random(&mut rng), pos, &mut rng, crate::sim::BIRTH_ENERGY.get());
     }
 }
 

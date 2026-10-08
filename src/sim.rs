@@ -193,6 +193,7 @@ pub fn world_metrics<'a>(
         "rescue_minted_p": fields.bio.rescue_minted.p,
         "reset_minted_p": fields.bio.reset_minted.p,
         "drift_ppm": { "c": drift.c, "n": drift.n, "p": drift.p },
+        "knobs": crate::tune::overrides().into_iter().map(|(k, v)| (k.to_string(), serde_json::json!(v.to_string().parse::<f64>().unwrap_or(v as f64)))).collect::<serde_json::Map<_, _>>(),
     })
 }
 
@@ -1052,7 +1053,7 @@ pub fn seed_burst(commands: &mut Commands, rng: &mut Rng, parents: &[Genome], n:
             c
         };
         let pos = rand_pos(rng, CREATURE_Y); // any land, scattered planet-wide
-        spawn_creature(commands, g, pos, rng, BIRTH_ENERGY);
+        spawn_creature(commands, g, pos, rng, BIRTH_ENERGY.get());
     }
 }
 
@@ -1084,7 +1085,7 @@ pub fn seed_planet(commands: &mut Commands, rng: &mut Rng, parents: &[Genome], _
             g.swim = 0.1;
         }
         g.temp_pref = (crate::sphere::base_temperature(d) + rng.normal() * 0.1).clamp(0.0, 1.0); // climate match
-        spawn_creature(commands, g, crate::sphere::surface_pos(d, CREATURE_Y), rng, BIRTH_ENERGY);
+        spawn_creature(commands, g, crate::sphere::surface_pos(d, CREATURE_Y), rng, BIRTH_ENERGY.get());
     }
     // plants: aquatic flora in water, land flora elsewhere; skip the barren abyss
     for _ in 0..n_plants {
@@ -2958,7 +2959,7 @@ pub fn predation_step(
             // index 3 is the prey's FAT FRACTION, not its energy total: what a carcass is worth to a predator
             // is how fatty it was, which is the rabbit-starvation axis. Energy total was never read.
             let fat_frac = (en.fat / fat_cap_of(g).max(0.01)).clamp(0.0, 1.0);
-            (e, t.translation, g.bite, fat_frac, signature(g), ARMOR_DEF * g.armor, g.venom, g.climb, b.attack, b.defend, body_kg, b.shelter)
+            (e, t.translation, g.bite, fat_frac, signature(g), ARMOR_DEF.get() * g.armor, g.venom, g.climb, b.attack, b.defend, body_kg, b.shelter)
         })
         .collect();
     if snap.len() < 2 {
@@ -3015,7 +3016,7 @@ pub fn predation_step(
             if apos.distance_squared(bpos) >= r2 {
                 continue;
             }
-            let eff_def = bdef + BRACE_DEF * b_def_intent;
+            let eff_def = bdef + BRACE_DEF.get() * b_def_intent;
             if best.is_none_or(|(bd, _)| eff_def < bd) {
                 best = Some((eff_def, bi));
             }
@@ -3038,7 +3039,7 @@ pub fn predation_step(
             // same edge whether the pair weighs grams or tonnes, and the term is symmetric (a mouse attacking
             // an elephant is penalised exactly as the elephant is favoured). This is what real food webs are
             // organised by, and it is the asymmetry the same-population identity above cannot supply.
-            let mass_edge = SIZE_COMBAT * (a_kg / b_kg.max(1e-6)).max(1e-6).ln();
+            let mass_edge = SIZE_COMBAT.get() * (a_kg / b_kg.max(1e-6)).max(1e-6).ln();
             // Armour is defeated by overwhelming SIZE: a shell stops a fox and not a bear, because plate
             // resists a bite of comparable force and bite force scales with the biter. Without this, armour
             // is protection no predator can ever out-evolve, so it becomes the one cheap universal lever and
@@ -3046,12 +3047,12 @@ pub fn predation_step(
             // offence having nothing left to win on). Diminishing rather than capped, so armour keeps its
             // full value against equals and simply stops being a defence against something far larger.
             let armour_eff = bdef / (1.0 + mass_edge.max(0.0));
-            let eff_def = armour_eff + BRACE_DEF * b_def_intent;
+            let eff_def = armour_eff + BRACE_DEF.get() * b_def_intent;
             let adv = abite + mass_edge - eff_def;
             let success = predation_success(adv, prey_kin, bclimb) * (1.0 - crate::build::NEST_COVER * b_shelter);
             adv_acc += adv;
             armor_acc += armour_eff; // armour AS IT LANDED, after the size-defeats-plate discount
-            brace_acc += BRACE_DEF * b_def_intent;
+            brace_acc += BRACE_DEF.get() * b_def_intent;
             kin_acc += prey_kin;
             climb_acc += bclimb;
             succ_acc += success;
@@ -3070,7 +3071,7 @@ pub fn predation_step(
                 // signal was +0.8 per engagement for the defender against -0.299 for the attacker, so every
                 // encounter taught never-attack / always-brace regardless of whether the brace did anything.
                 // That runaway, not any constant, is what pinned mean brace at 0.59 and adv at -1.4.
-                let averted = predation_success(adv + BRACE_DEF * b_def_intent, prey_kin, bclimb) - success;
+                let averted = predation_success(adv + BRACE_DEF.get() * b_def_intent, prey_kin, bclimb) - success;
                 defended.insert(be);
                 def_credit.insert(be, averted.max(0.0));
             }
@@ -3091,7 +3092,7 @@ pub fn predation_step(
     let continuous_live = gen.continuous && gen.generation >= WARMUP_GENS;
     for (e, t, mut energy, mut fit, mut alive, gen_e, mut brain, mut diet) in &mut cq {
         if engaged.contains(&e) {
-            energy.burn(ATTACK_COST * brain.attack * DT); // paid for the lunge itself, land or miss
+            energy.burn(ATTACK_COST.get() * brain.attack * DT); // paid for the lunge itself, land or miss
         }
         if let Some(&(meat_kg, fat_w, ven_w)) = gains.get(&e) {
             // A kill is FOOD, digested on the same terms as carrion. It used to credit a flat PREDATION_GAIN
@@ -3474,12 +3475,12 @@ pub fn live_step(
                 continue;
             }
             let d2 = pos.distance_squared(*p2);
-            if *c2 > my_combat + THREAT_MARGIN {
+            if *c2 > my_combat + THREAT_MARGIN.get() {
                 if d2 < threat_d2 {
                     threat_d2 = d2;
                     threat_pos = *p2;
                 }
-            } else if *c2 < my_combat - THREAT_MARGIN && d2 < THREAT_RADIUS * THREAT_RADIUS {
+            } else if *c2 < my_combat - THREAT_MARGIN.get() && d2 < THREAT_RADIUS * THREAT_RADIUS {
                 // Report the BEST prey, not the nearest. Nearest meant a hunter homed on whichever slightly
                 // smaller neighbour happened to be closest, so engagements ran between near-equals and the
                 // size advantage the world offers went unused: measured p90/p10 = 3.8x available (edge 0.67)
@@ -3842,7 +3843,7 @@ pub fn live_step(
         } else {
             0.0
         };
-        energy.burn((BASAL_COST * (1.0 - 0.6 * metab_f) // frugal metabolism lowers the cost of living
+        energy.burn((BASAL_COST.get() * (1.0 - 0.6 * metab_f) // frugal metabolism lowers the cost of living
             + WATT_TO_ENERGY * (basal_w + thermo_w) as f32 // real metabolic + thermoregulatory load
             + MOVE_COST * (1.0 + SIZE_MOVE * genome.size + ARMOR_MOVE * genome.armor + LIMB_MOVE_COST * genome.limbs + crate::build::TOOL_CARRY * brain.tool) * crate::thermo::locomotion_scale(body_kg) as f32 * effort2 // plates + legs to drive, whole cost on the same M^0.75 allometry as intake
             + BITE_COST * genome.bite
@@ -4141,7 +4142,7 @@ pub fn live_step(
             let gcell = grid_cell(np);
             let cover = crate::chem::graze_response(bio_r.cover01(gcell));
             if !crate::sphere::is_ocean(gdir) && cover > 0.0 {
-                let intake = CARPET_GRAZE * graze_scale * cover * dt;
+                let intake = CARPET_GRAZE.get() * graze_scale * cover * dt;
                 bat.cover_grazes.push((idx, gcell, (intake * herbivory / COVER_ENERGY_PER_KG) as f64)); // a carnivore's mouth crops little
                 let gain = intake * herbivory * genome.uptake[GRASS_FORAGE_IDX]; // grass: grazer staple where it's grassy
                 let hab = cover; // nutrient refill below scales with the crop actually there
@@ -4171,7 +4172,7 @@ pub fn live_step(
                 // exponential light attenuation without inventing a photic-depth constant.
                 let _ = depth; // photic falloff now shapes kelp GROWTH (chem::cover_habitat), so the crop carries it
                 let band = crate::chem::graze_response(bio_r.cover01(gcell));
-                let intake = CARPET_GRAZE * graze_scale * band * dt;
+                let intake = CARPET_GRAZE.get() * graze_scale * band * dt;
                 bat.cover_grazes.push((idx, gcell, (intake * herbivory / COVER_ENERGY_PER_KG) as f64));
                 let gain = intake * herbivory * genome.uptake[SEAWEED_FORAGE_IDX];
                 energy.add_sugar(gain, SUGAR_CAP, fat_max);
@@ -4217,8 +4218,8 @@ pub fn live_step(
             // immortal-if-fed. Ages staggered (warmup desync + spread-out births) so this does NOT sync-kill a
             // cohort. Turnover keeps gene pool flowing (old die, young replace) -> a true life cycle.
             let age_frac = diet.age as f32 / (AGE_SCALE * lifespan_mult); // longevity gene stretches lifespan
-            let aging = AGE_HAZARD * (age_frac / (age_frac + 1.0));
-            let p_death = (aging + DISEASE_K * diet.g + TOX_LOAD_HAZARD * diet.toxic_load) * dt;
+            let aging = AGE_HAZARD.get() * (age_frac / (age_frac + 1.0));
+            let p_death = (aging + DISEASE_K.get() * diet.g + TOX_LOAD_HAZARD * diet.toxic_load) * dt;
             if prng.f32() < p_death {
                 alive.0 = false; // old-age / disease / poisoning death
             }
@@ -4282,7 +4283,7 @@ pub fn live_step(
         // r = breed young/cheap/many fragile young; K = breed late/costly/few well-provisioned young. Density taper
         // bounds population.
         let k = genome.parental;
-        let repro_thr = REPRO_THRESHOLD * (0.8 + 0.4 * k);
+        let repro_thr = REPRO_THRESHOLD.get() * (0.8 + 0.4 * k);
         let repro_min_age = (REPRO_MIN_AGE as f32 * (0.6 + 0.8 * k) * genome.maturity_scale()) as u32; // big = slow to mature
         let ni = crate::niche::niche_of(genome).idx(); // breeder's niche -> its OWN carrying cap governs repro
         let ncap = NICHE_CAP[ni].max(1) as f32;
@@ -4297,7 +4298,7 @@ pub fn live_step(
             // re-enforces the hard caps in sorted order so births reproduce run-to-run.
             && prng.f32() < P_REPRO_CREATURE * (1.0 - niche_pop_start[ni] as f32 / ncap)
         {
-            energy.burn(REPRO_COST * (0.7 + 0.6 * k)); // K-parents spend more per child (parent's own energy, paid in decide)
+            energy.burn(REPRO_COST.get() * (0.7 + 0.6 * k)); // K-parents spend more per child (parent's own energy, paid in decide)
             // mating mode: cross with nearest genetically-similar mate (assortative -> reproductive
             // isolation/speciation); else single-parent budding if no compatible mate nearby.
             let mut child = if gen.mating {
@@ -4316,9 +4317,9 @@ pub fn live_step(
             } else {
                 genome.clone()
             };
-            child.mutate(&mut prng, MUT_RATE, MUT_STD);
+            child.mutate(&mut prng, MUT_RATE.get(), MUT_STD.get());
             let cp = disperse_pos(&mut prng, ct.translation, 2.0, CREATURE_Y); // child appears beside the parent
-            let birth_e = BIRTH_ENERGY * (0.7 + 0.6 * k); // K-young start better-provisioned (survive); r-young cheap + fragile
+            let birth_e = BIRTH_ENERGY.get() * (0.7 + 0.6 * k); // K-young start better-provisioned (survive); r-young cheap + fragile
             // birth intent -> spawned in apply (sorted by parent index, running cap, deterministic new entity index)
             bat.births.push((idx, child, cp, birth_e, ni));
         }
@@ -4718,7 +4719,7 @@ pub fn generation_step(
             let pick = |f: f32| masses.get(((masses.len() as f32 * f) as usize).min(masses.len().saturating_sub(1))).copied().unwrap_or(0.0);
             let (m_p10, m_p90) = (pick(0.10), pick(0.90));
             // best edge on offer: what the heaviest decile gains attacking the lightest
-            let mass_edge_avail = SIZE_COMBAT * (m_p90 / m_p10.max(1e-6)).max(1.0).ln();
+            let mass_edge_avail = SIZE_COMBAT.get() * (m_p90 / m_p10.max(1e-6)).max(1.0).ln();
             let plant_n = pq.iter().len().max(1);
             let avg_def: f32 = pq.iter().map(|(g, _)| g.defense).sum::<f32>() / plant_n as f32;
             let avg_nut: f32 = pq.iter().map(|(g, _)| g.nutrient).sum::<f32>() / plant_n as f32;
@@ -4903,7 +4904,7 @@ pub fn generation_step(
     for _ in 0..n {
         let parent = &elites[(rng.f32() * elite_count as f32) as usize % elite_count];
         let mut child = parent.clone();
-        child.mutate(&mut rng, MUT_RATE, MUT_STD);
+        child.mutate(&mut rng, MUT_RATE.get(), MUT_STD.get());
         next.push(child);
     }
 
@@ -5031,14 +5032,14 @@ mod tests {
         // adv for two creatures of the SAME mass, carrying measured typical armour and brace. Equals must
         // stay near-inedible on armour and brace ALONE: that is the anti-cannibalism guard, and it is why
         // PREDATION_BIAS could be deleted rather than merely lowered.
-        let (armour, brace) = (ARMOR_DEF * 0.7, BRACE_DEF * 0.5);
+        let (armour, brace) = (ARMOR_DEF.get() * 0.7, BRACE_DEF.get() * 0.5);
         let peer_adv = 0.15 - armour - brace;
         let fair = predation_success(peer_adv, 0.0, 0.0);
         assert!(fair < 0.05, "an equal must be a poor meal, got {fair}");
 
         // a genuine SIZE advantage must pay, or no predator lineage can ever form. Three times the prey's
         // mass, which a real food web supplies easily; the old bias needed sevenfold merely to break even.
-        let mass_edge = SIZE_COMBAT * 3.0f32.ln();
+        let mass_edge = SIZE_COMBAT.get() * 3.0f32.ln();
         let hunter_adv = 0.15 + mass_edge - armour / (1.0 + mass_edge) - brace;
         let hunt = predation_success(hunter_adv, 0.5, 0.0);
         assert!(hunt > 0.05, "a 3x-heavier hunter scores only {hunt}: predation still unreachable");

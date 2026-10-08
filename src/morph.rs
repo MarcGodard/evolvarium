@@ -1019,7 +1019,7 @@ mod drift_probe {
                 );
             }
             for g in pop.iter_mut() {
-                g.mutate(&mut rng, crate::config::MUT_RATE, crate::config::MUT_STD);
+                g.mutate(&mut rng, crate::config::MUT_RATE.get(), crate::config::MUT_STD.get());
             }
         }
     }
