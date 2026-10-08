@@ -3475,11 +3475,16 @@ pub fn live_step(
         // threat/prey only count inside THREAT_RADIUS (see below), so only those bins are scanned
         let mut near = Vec::new();
         near_sorted(&cstart, &cidx, pos, THREAT_RADIUS, &mut near);
-        for (e2, p2, _, c2, _) in near.iter().map(|&i| &cre_snap[i]) {
+        let mut sick_acc = 0.0f32; // nearby sickness brain input: load x (1 - d/SICK_SENSE_R) within SICK_SENSE_R
+        for &ni in &near {
+            let (e2, p2, _, c2, _) = &cre_snap[ni];
             if *e2 == entity {
                 continue;
             }
             let d2 = pos.distance_squared(*p2);
+            if d2 < SICK_SENSE_R * SICK_SENSE_R {
+                sick_acc += cre_inf[ni] * (1.0 - d2.sqrt() / SICK_SENSE_R);
+            }
             if *c2 > my_combat + THREAT_MARGIN.get() {
                 if d2 < threat_d2 {
                     threat_d2 = d2;
@@ -3613,6 +3618,12 @@ pub fn live_step(
         assert_eq!(input.len(), n_s * SIG_PER_SENSOR + crate::genome::IN_TOOL + 1, "tool global off its column");
         input.push(gw.cell[here_cell]);
         assert_eq!(input.len(), n_s * SIG_PER_SENSOR + crate::genome::IN_WATER + 1, "water global off its column");
+        // sickness globals (LAST): own load, and nearby load summed over creatures within SICK_SENSE_R, each
+        // weighted 1 - d/R (a cough across the field reads fainter than one at arm's length), squashed to 0..1
+        input.push(diet.infection);
+        assert_eq!(input.len(), n_s * SIG_PER_SENSOR + crate::genome::IN_SICK_SELF + 1, "sick-self global off its column");
+        input.push(sick_acc / (1.0 + sick_acc)); // summed in the threat/prey scan (SICK_SENSE_R < THREAT_RADIUS)
+        assert_eq!(input.len(), n_s * SIG_PER_SENSOR + crate::genome::IN_SICK_NEAR + 1, "sick-near global off its column");
 
         // think (per-life learned brain, dynamic topology matching this genome's sensor count)
         let (h, out) = forward(&brain.net, &input);

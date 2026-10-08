@@ -85,7 +85,7 @@ fn nest_bowl_mesh() -> Mesh {
             let (s, c) = th.sin_cos();
             pos.push([rad * c, h, rad * s]);
             nrm.push([nr / len * c, ny / len, nr / len * s]);
-            let strand = ((k as u32 * 2654435761u32 ^ (r as u32 * 40503)) >> 24) as f32 / 255.0;
+            let strand = (((k as u32).wrapping_mul(2654435761) ^ (r as u32 * 40503)) >> 24) as f32 / 255.0;
             let rim = if (3..=4).contains(&r) { 0.12 } else { 0.0 };
             let shade = 0.78 + 0.22 * strand + rim;
             col.push([0.66 * shade, 0.53 * shade, 0.30 * shade, 1.0]);

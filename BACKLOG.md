@@ -100,8 +100,10 @@ live in `config.rs`; the live conversion plan is `SPHERE-PLAN.md`.
       death hazard; immunity costs IMMUNE_UPKEEP every tick. Knobs INFECT_BETA / INFECT_SPILL (0 = off).
       A/B (seeds 1/2/5/9, 20 gens, off vs on): pop 5831 -> 5196 (inside spread), endemic 3-25% sick with real
       epidemic waves (seed 2: 32% peak, immunity 0.22 -> 0.44, burns down to 3%); drift ~0.08 ppm unchanged.
-- [ ] Disease is not sensed: no input for own/neighbour sickness, so avoidance cannot evolve, only immunity.
-      A sick-neighbour input (brain shape change) and infectious fresh corpses are the next steps.
+- [x] **Disease is sensed**: two brain inputs, own infection load and distance-weighted sick neighbours within
+      `SICK_SENSE_R`, so avoidance can evolve alongside immunity. Old nets migrate (inputs padded before bias).
+      A/B (seeds 1/2/5/9, 20 gens, stopped at 88-100% of ticks): last pop A 5654/3828/5680/6381, B 6954/8599/6038/6290.
+- [ ] Infectious fresh corpses (carrion spillover exists, corpse-to-scavenger contact does not).
 - [ ] Sick creatures are not drawn differently yet (viz tint/pallor).
 - [x] **GRAZE_CROWD_K deleted** (tools/ab.sh, seeds 1/2/5/9, 20 gens): pop 5171 -> 4392 mean, inside the
       3495..6612 per-seed spread; cover 0.123 -> 0.084 kg/m^2 on every seed, i.e. the real sward now does the

@@ -47,15 +47,21 @@ pub const SIG_PER_SENSOR: usize = 2; // each sensor reports [inv-dist, food type
 // creature's own field cell, the quality of the tool it carries, and that cell's ground water, 0..1. Water
 // is what makes a dam worth heaping: without it 77/80 dams landed on dry ground where retention buys nothing.
 pub const BUILD_INPUTS: usize = 4;
-pub const GLOBAL_INPUTS: usize = 17 + MEM_CELLS + BUILD_INPUTS;
+// + sickness globals [own infection load, nearby sickness] (LAST): own load lets sickness behaviour (rest,
+// stay put) evolve; nearby sickness (summed load of creatures within SICK_SENSE_R, distance-weighted) lets
+// avoiding the sick evolve. Both 0 = pad fill = a healthy world, so migrated nets behave as before.
+pub const SICK_INPUTS: usize = 2;
+pub const GLOBAL_INPUTS: usize = 17 + MEM_CELLS + BUILD_INPUTS + SICK_INPUTS;
 // Offsets WITHIN the global block (add n_sensors*SIG_PER_SENSOR for the input column). Named so a new global
 // appended at the end cannot silently shift a reflex prior onto the wrong column.
-pub const IN_PREY_D: usize = GLOBAL_INPUTS - BUILD_INPUTS - 2;
+pub const IN_PREY_D: usize = GLOBAL_INPUTS - SICK_INPUTS - BUILD_INPUTS - 2;
 pub const IN_PREY_B: usize = IN_PREY_D + 1;
-pub const IN_SHELTER: usize = GLOBAL_INPUTS - 4;
-pub const IN_EARTH: usize = GLOBAL_INPUTS - 3;
-pub const IN_TOOL: usize = GLOBAL_INPUTS - 2;
-pub const IN_WATER: usize = GLOBAL_INPUTS - 1;
+pub const IN_SHELTER: usize = GLOBAL_INPUTS - SICK_INPUTS - 4;
+pub const IN_EARTH: usize = GLOBAL_INPUTS - SICK_INPUTS - 3;
+pub const IN_TOOL: usize = GLOBAL_INPUTS - SICK_INPUTS - 2;
+pub const IN_WATER: usize = GLOBAL_INPUTS - SICK_INPUTS - 1;
+pub const IN_SICK_SELF: usize = GLOBAL_INPUTS - 2;
+pub const IN_SICK_NEAR: usize = GLOBAL_INPUTS - 1;
 pub const CONE_HALF: f32 = 0.7; // sensor FOV half-angle (rad)
 const RANGE_MIN: f32 = 4.0;
 const RANGE_MAX: f32 = 48.0; // long-range vision possible (big world); energy cost = trade-off (see sim SENSE_COST)
@@ -943,7 +949,7 @@ mod tests {
         let mut rng = Rng::seed(7);
         let mut g = Genome::random(&mut rng);
         let want = n_inputs(g.n_sensors());
-        let strip = 8; // 5 M4 globals + 2 magneto globals + 1 flight global
+        let strip = 8; // the LAST 8 global cols (were M4+magneto+flight, now sickness/build/prey): shape restore only
         for row in g.net.ih.iter_mut().chain(g.plast.ih.iter_mut()) {
             let at = row.len() - 1 - strip; // before trailing bias
             row.drain(at..at + strip);
@@ -1011,6 +1017,38 @@ mod tests {
     }
 
     #[test]
+    fn ensure_net_shape_migrates_pre_sickness_nets() {
+        // a seed saved before the sickness inputs existed: its outputs must be unchanged in a healthy world
+        // (sickness inputs 0 = the pad fill), and nothing else may move.
+        let mut rng = Rng::seed(23);
+        let mut g = Genome::random(&mut rng);
+        g.ensure_net_shape();
+        let want = n_inputs(g.n_sensors());
+        let mut old = g.net.clone();
+        for row in old.ih.iter_mut() {
+            let at = row.len() - 1 - SICK_INPUTS;
+            row.drain(at..at + SICK_INPUTS);
+        }
+        let mut input = vec![0.37f32; want];
+        input[want - SICK_INPUTS..].fill(0.0);
+        let (_, before) = forward(&old, &input[..want - SICK_INPUTS]);
+        let mut m = g.clone();
+        m.net = old;
+        for row in m.plast.ih.iter_mut() {
+            let at = row.len() - 1 - SICK_INPUTS;
+            row.drain(at..at + SICK_INPUTS);
+        }
+        m.ensure_net_shape();
+        for (row, prow) in m.net.ih.iter().zip(m.plast.ih.iter()) {
+            assert_eq!(row.len(), want + 1, "sickness cols restored");
+            assert_eq!(row[want - SICK_INPUTS..want], [0.0, 0.0], "new net weights must be 0: no instinct until learned");
+            assert_eq!(prow[want - SICK_INPUTS..want], [0.2, 0.2], "new plast cols take the learnable fill");
+        }
+        let (_, after) = forward(&m.net, &input);
+        assert_eq!(before, after, "a migrated net must act identically while nobody is sick");
+    }
+
+    #[test]
     fn ensure_net_shape_migrates_pre_construction_nets() {
         // a seed saved before build/dig existed: strip the BUILD_INPUTS read cols + the 2 build output rows.
         // Migrated creatures must never construct (both outputs well under BUILD_GATE) and must lose nothing else.
@@ -1019,9 +1057,10 @@ mod tests {
         g.ensure_net_shape();
         let want = n_inputs(g.n_sensors());
         let before = g.net.clone();
+        let tail = BUILD_INPUTS + SICK_INPUTS; // a pre-construction seed predates both blocks
         for row in g.net.ih.iter_mut().chain(g.plast.ih.iter_mut()) {
-            let at = row.len() - 1 - BUILD_INPUTS;
-            row.drain(at..at + BUILD_INPUTS);
+            let at = row.len() - 1 - tail;
+            row.drain(at..at + tail);
         }
         g.net.ho.truncate(OUT_BUILD);
         g.plast.ho.truncate(OUT_BUILD);
@@ -1029,11 +1068,11 @@ mod tests {
         assert_eq!(g.net.ho.len(), OUTPUTS);
         for (r, row) in g.net.ih.iter().enumerate() {
             assert_eq!(row.len(), want + 1);
-            assert_eq!(row[..want - BUILD_INPUTS], before.ih[r][..want - BUILD_INPUTS], "old input weights moved");
+            assert_eq!(row[..want - tail], before.ih[r][..want - tail], "old input weights moved");
             assert_eq!(row[want], before.ih[r][want], "bias column moved");
         }
         let mut input = vec![0.3f32; want];
-        for k in want - BUILD_INPUTS..want {
+        for k in want - tail..want - SICK_INPUTS {
             input[k] = 1.0; // a full nest + full dam underfoot + a tool in hand must not trigger making either
         }
         let (_, out) = forward(&g.net, &input);
