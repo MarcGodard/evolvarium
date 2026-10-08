@@ -160,6 +160,7 @@ pub fn world_metrics<'a>(
     creatures: impl Iterator<Item = (&'a Genome, &'a Brain)>,
     flora_mass: impl Iterator<Item = f32>,
     fields: &FieldGrids,
+    drift: crate::chem::Elements, // ledger drift, ppm (same accounting as the gen log line)
 ) -> serde_json::Value {
     let (mut n, mut carn, mut bld, mut tool, mut size, mut endo, mut flight, mut swim) = (0.0f64, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
     for (g, b) in creatures {
@@ -190,6 +191,8 @@ pub fn world_metrics<'a>(
         "fire_mean": fields.fire.avg(),
         "wear_mean": fields.wear.avg(),
         "rescue_minted_p": fields.bio.rescue_minted.p,
+        "reset_minted_p": fields.bio.reset_minted.p,
+        "drift_ppm": { "c": drift.c, "n": drift.n, "p": drift.p },
     })
 }
 
@@ -4802,7 +4805,9 @@ pub fn generation_step(
             }
             if let Some(mpath) = &gen.metrics {
                 let avg_e = if pop > 0 { cq.iter().map(|(_, en, ..)| en.total()).sum::<f32>() / pop as f32 } else { 0.0 };
-                let world = world_metrics(cq.iter().map(|(_, _, _, _, _, g, b, ..)| (g, b)), pf.iter().map(|(_, st, ..)| st.mass), &fields);
+                let fauna_alive: f64 = cq.iter().filter(|(_, _, _, _, a, ..)| a.0).map(|(_, _, _, _, _, g, ..)| crate::chem::creature_mass_kg(g.morph.map(|m| m.mass).unwrap_or_else(|| crate::morph::Morphometrics::of(&g.body).mass))).sum();
+                let drift = fields.bio.drift_ppm(living_flora + crate::chem::ANIMAL_COMP * fauna_alive);
+                let world = world_metrics(cq.iter().map(|(_, _, _, _, _, g, b, ..)| (g, b)), pf.iter().map(|(_, st, ..)| st.mass), &fields, drift);
                 crate::niche::write_metrics(mpath, sustained, gen.tick, pop, avg_e, &niche, Some(world));
             }
             info!("continuous headless done at tick {} (pop {})", gen.tick, pop);
@@ -4919,6 +4924,24 @@ pub fn generation_step(
     // random starting energy + life-age so they don't all hit breed threshold / min-age / death on the same tick.
     // Synchronized cohorts breed in one burst -> newborn wave starves together -> boom-bust extinction. Staggering
     // spreads births + deaths so the population can overlap.
+    // --metrics on a generational exit must describe the generation that just LIVED: snapshot it here, before
+    // the reset below revives every placeholder (pop, energy and genes would otherwise always read as a fresh
+    // cohort, so an extinct run scored healthy). niche_step idles in warm-up, so niche counts are filled here.
+    let final_metrics = gen.metrics.clone().filter(|_| gen.headless && gen.generation + 1 >= gen.max_gens).map(|mpath| {
+        let body_kg = |g: &Genome| crate::chem::creature_mass_kg(g.morph.map(|m| m.mass).unwrap_or_else(|| crate::morph::Morphometrics::of(&g.body).mass));
+        let alive = || cq.iter().filter(|(_, _, _, _, a, ..)| a.0);
+        let pop = alive().count();
+        let avg_e = if pop > 0 { alive().map(|(_, en, ..)| en.total()).sum::<f32>() / pop as f32 } else { 0.0 };
+        let fauna_alive: f64 = alive().map(|(_, _, _, _, _, g, ..)| body_kg(&g)).sum();
+        let drift = fields.bio.drift_ppm(living_flora + crate::chem::ANIMAL_COMP * fauna_alive);
+        let world = world_metrics(alive().map(|(_, _, _, _, _, g, b, ..)| (&*g, &*b)), pf.iter().map(|(_, st, ..)| st.mass), &fields, drift);
+        let mut tr = niche.clone();
+        tr.counts = [0; crate::niche::NICHE_COUNT];
+        for (_, _, _, _, _, g, ..) in alive() {
+            tr.counts[crate::niche::niche_of(&g).idx()] += 1;
+        }
+        (mpath, pop, avg_e, tr, world)
+    });
     let desync = gen.continuous && gen.generation + 1 >= WARMUP_GENS;
     for ((mut t, mut energy, mut fit, mut head, mut alive, mut g, mut brain, mut diet, mut loco), child) in
         cq.iter_mut().zip(next)
@@ -4965,6 +4988,10 @@ pub fn generation_step(
                 path,
                 &crate::persist::Snapshot { generation: gen.generation, creatures: ranked, plants, world: None },
             );
+        }
+        // --metrics must land on EVERY headless exit, or an agent scoring a short (warm-up only) run gets no file
+        if let Some((mpath, pop, avg_e, tr, world)) = final_metrics {
+            crate::niche::write_metrics(&mpath, false, gen.tick, pop, avg_e, &tr, Some(world));
         }
         info!("headless run done after {} generations", gen.generation);
         exit.write(AppExit::Success);

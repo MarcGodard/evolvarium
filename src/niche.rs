@@ -92,7 +92,7 @@ pub struct NicheBanks {
 }
 
 // Rescue bookkeeping + self-sustain clock.
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Clone)]
 pub struct NicheTracker {
     pub started: bool,           // armed on first continuous tick (window counts from continuous start)
     pub last_rescue_tick: u32,   // ANY-niche last rescue; self-sustain = now - this >= NICHE_SUSTAIN_WINDOW
