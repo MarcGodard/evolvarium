@@ -1858,6 +1858,7 @@ pub fn spawn_world_render(
     mut gen: ResMut<GenState>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
     mut soil: ResMut<Soil>,
     mut gw: ResMut<GroundWater>,
     mut climate: ResMut<Climate>,
@@ -1917,7 +1918,7 @@ pub fn spawn_world_render(
             cap: meshes.add(crate::viz::dome_mesh()), // domed mushroom cap
         });
     }
-    commands.insert_resource(crate::viz::tree_meshes(&mut meshes));
+    commands.insert_resource(crate::viz::tree_meshes(&mut meshes, &mut images));
     // fallen-log prop dropped where a tree dies (viz::spawn_logs_on_tree_death): shared cylinder, per-log color.
     commands.insert_resource(crate::viz::LogProps {
         mesh: meshes.add(Cylinder::new(0.2, 2.2)),

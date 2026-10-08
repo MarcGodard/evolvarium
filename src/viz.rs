@@ -39,6 +39,8 @@ pub mod matv {
     pub const EYE: u8 = 10; // sclera: faint glow + wet glint
     pub const PUPIL: u8 = 11;
     pub const WING: u8 = 12; // double-sided membrane, rough 0.75
+    pub const LEAFCARD: u8 = 13; // leaf_cluster_image cutout, no cull, normals kept (see get_card)
+    pub const NEEDLECARD: u8 = 14; // needle_spray_image cutout, same contract
 }
 
 impl MatCache {
@@ -70,6 +72,22 @@ impl MatCache {
         let h = mats.add(m);
         self.0.insert(key, h.clone());
         h
+    }
+
+    /// Foliage-card material (`variant` LEAFCARD/NEEDLECARD, one sprite each): `color` tints the sprite. cull_mode None but NOT
+    /// double_sided: double-sided negates back-face normals, and card normals are the crown's outward
+    /// direction, so flipping them would black out every card seen from behind.
+    pub fn get_card(&mut self, mats: &mut Assets<StandardMaterial>, color: Color, variant: u8, tex: &Handle<Image>) -> Handle<StandardMaterial> {
+        let probe = self.get(mats, color, variant); // quantized key + slot; texture + mask set on first use
+        if let Some(mut m) = mats.get_mut(&probe) {
+            if m.base_color_texture.is_none() {
+                m.base_color_texture = Some(tex.clone());
+                m.alpha_mode = AlphaMode::Mask(0.5);
+                m.cull_mode = None;
+                m.perceptual_roughness = 0.85;
+            }
+        }
+        probe
     }
 }
 
@@ -976,15 +994,24 @@ pub struct TreeMeshes {
     pub trunk: Vec<Handle<Mesh>>,
     pub broadleaf: Vec<Handle<Mesh>>,
     pub conifer: Vec<Handle<Mesh>>, // drooping scalloped fir skirts, base at y=0
+    pub leaves: Vec<Handle<Mesh>>,  // leaf-card shells over the broadleaf cores (sprite foliage edge)
+    pub leaf_tex: Handle<Image>,
+    pub needles: Vec<Handle<Mesh>>, // needle-spray cards on conifer tier rims, paired with `conifer` by index
+    pub needle_tex: Handle<Image>,
     pub vine: Handle<Mesh>,         // helix vine spiraling up trunk (only some trees)
 }
 
 // Bake the tree mesh variants. Seeds are arbitrary but FIXED: baked once at startup, so --capture diffs
 // stay comparable run to run.
-pub fn tree_meshes(meshes: &mut Assets<Mesh>) -> TreeMeshes {
+// Broadleaf = shrunken lobe core (blocks sky through the crown) + leaf-card shell (the visible edge).
+pub fn tree_meshes(meshes: &mut Assets<Mesh>, images: &mut Assets<Image>) -> TreeMeshes {
     TreeMeshes {
         trunk: (0..5).map(|i| meshes.add(crate::viz_flora::tree_trunk_mesh(11 + i * 613))).collect(),
-        broadleaf: (0..4).map(|i| meshes.add(crate::viz_flora::tree_canopy_mesh(7 + (i as usize) % 3, 1.0, 2 + i * 977))).collect(),
+        broadleaf: (0..4).map(|i| meshes.add(crate::viz_flora::tree_canopy_mesh(5 + (i as usize) % 3, 0.78, 2 + i * 977))).collect(),
+        leaves: (0..3).map(|i| meshes.add(crate::viz_flora::leaf_cards_mesh(1.0, 56, 5 + i * 419))).collect(),
+        leaf_tex: images.add(crate::viz_flora::leaf_cluster_image(128, 17)),
+        needles: (0..3).map(|i| meshes.add(crate::viz_flora::conifer_cards_mesh(7 + i * 331))).collect(),
+        needle_tex: images.add(crate::viz_flora::needle_spray_image(128, 23)),
         conifer: (0..3).map(|i| meshes.add(crate::viz_flora::conifer_mesh(7 + i * 331))).collect(),
         vine: meshes.add(vine_mesh(0.16)), // helix vine hugging the trunk (radius ~ trunk)
     }
@@ -1023,6 +1050,7 @@ fn add_plant_visuals(
             // broadleaf crown centered (sits high in canopy); stacked-cone conifer base at y=0 rests on
             // trunk top (lower attach). Trunk centered (half-height 1.0); canopies attach to envelop most
             // of trunk, leaving short bare-trunk stub -> a tree, not a hat on a pole.
+            const CONIFER_Y: f32 = -0.6; // skirt and needle cards share it: they ride the same tier rims
             let (canopy, cmat, cy) = if t.edible {
                 (tm.broadleaf[(h as usize) % tm.broadleaf.len()].clone(), cache.get(mats, plant_color(g), matv::PLAIN), 1.0)
             } else {
@@ -1031,12 +1059,23 @@ fn add_plant_visuals(
                 // sky. Evergreen needle-green: brighter blue-green reads as foliage not black blob;
                 // roughness 0.6 near foliage default (0.5) so sun catches soft sheen like broadleaf.
                 let m = cache.get(mats, Color::srgb(0.16, 0.52, 0.30), matv::NOCULL06);
-                (tm.conifer[(h as usize >> 5) % tm.conifer.len()].clone(), m, -0.6)
+                let ci = (h as usize >> 5) % tm.conifer.len();
+                let needles = cache.get_card(mats, Color::srgb(0.20, 0.55, 0.32), matv::NEEDLECARD, &tm.needle_tex);
+                let cards = commands.spawn((Mesh3d(tm.needles[ci].clone()), MeshMaterial3d(needles), Transform::from_xyz(0.0, CONIFER_Y, 0.0))).id();
+                commands.entity(e).add_child(cards);
+                (tm.conifer[ci].clone(), m, CONIFER_Y)
             };
             let child = commands
                 .spawn((Mesh3d(canopy), MeshMaterial3d(cmat), Transform::from_xyz(0.0, cy, 0.0)))
                 .id();
             commands.entity(e).add_child(child);
+            if t.edible {
+                let leaf = cache.get_card(mats, plant_color(g), matv::LEAFCARD, &tm.leaf_tex);
+                let cards = commands
+                    .spawn((Mesh3d(tm.leaves[(h as usize >> 7) % tm.leaves.len()].clone()), MeshMaterial3d(leaf), Transform::from_xyz(0.0, cy, 0.0)))
+                    .id();
+                commands.entity(e).add_child(cards);
+            }
             // flowering (blossom) fruit tree gets ring of bloom blobs in crown
             if t.edible && g.flower > 0.4 {
                 let fmat = cache.get(mats, flower_color(g), matv::DOUBLE);
@@ -3179,12 +3218,20 @@ fn ocean_opacity(
 fn update_aurora_curtains(
     gen: Res<GenState>,
     offset: Res<SunOffset>,
+    mode: Res<crate::camera::CameraMode>,
+    walkers: Query<&crate::camera::WalkCam>,
     mut mats: ResMut<Assets<StandardMaterial>>,
     mut q: Query<(&AuroraCurtain, &MeshMaterial3d<StandardMaterial>, &mut Transform)>,
 ) {
     let vtick = (gen.tick as i64 + offset.0).max(0) as u32;
     let t = gen.tick as f32;
     let base_r = crate::sphere::PLANET_R + AURORA_LIFT;
+    // A walker under a daylit sky sees no aurora even where the curtain itself is in night: the bright sky
+    // drowns it (midday shots showed green shafts on the horizon). Orbit sees from space: curtain night only.
+    let sky_dark = match (*mode, walkers.single()) {
+        (crate::camera::CameraMode::Walk, Ok(w)) => 1.0 - crate::sphere::daylight_at(w.dir, vtick),
+        _ => 1.0,
+    };
     let substorm = ((t * 0.0009).sin() * 0.5 + 0.5).powf(3.0); // shared planet-wide activity surge
     const CURTAIN_H: f32 = 11.0; // curtain height (mesh unit-tall; this scales it). Shorter now the base is high
     const FOLD_AMP: f32 = 0.10; // mag-latitude wave amplitude (radians) -> serpentine draperies
@@ -3211,7 +3258,7 @@ fn update_aurora_curtains(
         // Gate on the CURTAIN's own sky, not the magnetic pole's: keying off the pole switched the whole oval
         // on together, so curtains on the sunlit half of the ring hung as green shafts over daylit ground.
         // Daylight drowns real aurora.
-        let night = 1.0 - crate::sphere::daylight_at(dirp, vtick);
+        let night = (1.0 - crate::sphere::daylight_at(dirp, vtick)) * sky_dark;
         let n = dirp; // radial up (curtain rises along this = local Y)
         let tang = pole.cross(dirp).normalize(); // around-oval tangent (curtain width = local X)
         let bin = tang.cross(n); // local Z, RIGHT-HANDED (X x Y = Z) so quaternion is real rotation, not mirror

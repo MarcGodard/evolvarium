@@ -60,6 +60,11 @@ live in `config.rs`; the live conversion plan is `SPHERE-PLAN.md`.
 - [x] `--cap-creature` frames the nearest living LAND creature from its face (`--cap-yaw` swings round it), falling
       back to any living creature in an all-aquatic world.
 - [ ] Aurora curtains read as green spikes on the limb from orbit; fine at night, odd on a day-side limb.
+- [x] Sprite foliage: broadleaf crowns are a small lobe core inside ~56 alpha-masked leaf-cluster cards, conifers
+      a slimmer skirt under drooping needle-spray cards. Both sprites are generated at startup with baked mips.
+- [x] Aurora fades by the walker's own daylight too, so no green shafts hang in a daylit sky.
+- [ ] Aurora from orbit is a scatter of crossed sheets that reads as blocks; one continuous folded ribbon mesh
+      per pole would look like real aurora (widths and CURTAIN_H also predate WORLD_SCALE 2).
 - [x] Carried stone tools show as a flint flake at the jaw, sized by `Brain.tool` quality, hidden below 0.05.
 - [ ] Generation reset rewrites the genome in place but keeps the old body mesh, eyes, ears and flake anchor
       (`add_creature_visuals` only runs on entities without `Mesh3d`); only colour follows the new genome.

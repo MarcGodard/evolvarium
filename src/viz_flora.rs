@@ -388,6 +388,15 @@ pub fn tree_canopy_mesh(lobes: usize, radius: f32, seed: u32) -> Mesh {
     b.finish()
 }
 
+// Tier i of `tiers`: (top y, height, rim radius, rim droop). Shared by the solid skirts and the needle cards
+// so the cards ride the same rims.
+fn conifer_tier(seed: u32, i: usize, tiers: usize) -> (f32, f32, f32, f32) {
+    let top_y = 0.90 + 0.42 * i as f32;
+    let h = 0.62 - 0.05 * i as f32;
+    let big = 0.22 + 1.28 * (1.0 - i as f32 / tiers as f32).powf(0.9); // 1.5 at the ground tier
+    (top_y, h, big, rng(seed, 10 + i as u32, 0.14, 0.26))
+}
+
 // Conifer, seeded. Base at y=0, apex ~2.5, widest ~1.5: same envelope the stacked-cone version had, so
 // the y=-0.6 parent offset in add_plant_visuals still lands the skirt on the trunk foot.
 //
@@ -426,10 +435,8 @@ pub fn conifer_mesh(seed: u32) -> Mesh {
         let ii = i as u32;
         // stack offsets keep the LOWEST rim at y >= 0 once droop is subtracted: the mesh is parented 0.1
         // above the trunk foot, so a rim below 0 sinks into the terrain
-        let top_y = 0.90 + 0.42 * i as f32;
-        let h = 0.62 - 0.05 * i as f32;
-        let big = 0.22 + 1.28 * (1.0 - i as f32 / tiers as f32).powf(0.9); // 1.5 at the ground tier
-        let droop = rng(seed, 10 + ii, 0.14, 0.26);
+        let (top_y, h, big, droop) = conifer_tier(seed, i, tiers);
+        let big = big * 0.80; // solid skirt sits inside the needle cards (conifer_cards_mesh), which make the rim
         let whorls = 5.0 + (rnd(seed, 30 + ii) * 2.0).floor(); // 5..6 branch bulges; sectors=16 resolves that
         let tph = rng(seed, 50 + ii, 0.0, 6.28);
         // two incommensurate frequencies: a single cos gives an evenly-lobed flower, real branch tips are
@@ -512,4 +519,207 @@ mod tests {
             assert!(cy.1 > 2.2 && cy.1 < 2.8, "conifer height drifted: {}", cy.1);
         }
     }
+}
+
+// ---------- broadleaf leaf cards ----------
+
+/// Leaf-cluster sprite for broadleaf crown cards: ~40 pointed leaves on a transparent disc, RGBA, alpha
+/// masked at 0.5. Value only (grey-green): material base_color carries the genome leaf hue, vertex colour the
+/// crown shading. Full mip chain baked here, Bevy builds none at runtime and unmipped cutouts sparkle at
+/// range. Each level's alpha is boosted so coverage survives minification instead of crowns thinning to twigs.
+pub fn leaf_cluster_image(size: usize, seed: u32) -> Image {
+    let size = size.next_power_of_two().max(16);
+    // (centre, unit axis, half length, half width, value)
+    let leaves: Vec<(Vec2, Vec2, f32, f32, f32)> = (0..40u32)
+        .map(|k| {
+            let r = 0.40 * rnd(seed, k * 7).sqrt(); // uniform over the disc
+            let a = rng(seed, k * 7 + 1, 0.0, std::f32::consts::TAU);
+            let c = Vec2::new(0.5 + r * a.cos(), 0.5 + r * a.sin());
+            // leaves point roughly away from the cluster centre (twig radiating out), with scatter
+            let dir = Vec2::from_angle(a + rng(seed, k * 7 + 2, -0.9, 0.9));
+            let half_l = rng(seed, k * 7 + 3, 0.07, 0.11);
+            (c, dir, half_l, half_l * rng(seed, k * 7 + 4, 0.38, 0.5), rng(seed, k * 7 + 5, 0.62, 1.0))
+        })
+        .collect();
+    let mut level: Vec<[f32; 4]> = vec![[0.0; 4]; size * size];
+    for y in 0..size {
+        for x in 0..size {
+            let p = Vec2::new((x as f32 + 0.5) / size as f32, (y as f32 + 0.5) / size as f32);
+            // later leaves overdraw earlier ones: last hit wins, like a real overlapping spray
+            for &(c, dir, hl, hw, val) in leaves.iter().rev() {
+                let d = p - c;
+                let (u, v) = (d.dot(dir) / hl, d.perp_dot(dir) / hw); // -1..1 inside along/across
+                if u.abs() < 1.0 && v.abs() < 1.0 - u * u {
+                    let rib = if v.abs() < 0.10 { 0.78 } else { 1.0 }; // midrib groove
+                    let tip = 0.82 + 0.18 * (u * 0.5 + 0.5); // base shaded, tip catches light
+                    let g = val * rib * tip;
+                    level[y * size + x] = [0.62 * g, 0.80 * g, 0.48 * g, 1.0];
+                    break;
+                }
+            }
+        }
+    }
+    image_with_mips(size, level)
+}
+
+/// Leaf cards over a broadleaf crown of `radius` (origin-centred, same dome as `tree_canopy_mesh`): `cards`
+/// quads textured with `leaf_cluster_image`. Vertex NORMAL is the outward crown direction, not the card
+/// plane, so the crown shades as one soft volume and cards never flash dark when seen edge-on (standard
+/// foliage-card trick). Vertex colour: lit top, deep underside, like the lobes.
+pub fn leaf_cards_mesh(radius: f32, cards: u32, seed: u32) -> Mesh {
+    let deep = [0.30f32, 0.38, 0.28];
+    let lit = [1.18f32, 1.14, 0.80];
+    let mut b = Buf::new();
+    for k in 0..cards {
+        // golden-spiral directions over the upper ~80% of a sphere, squashed into the crown's wide dome
+        let f = (k as f32 + 0.5) / cards as f32;
+        let y = 1.0 - 1.75 * f; // 1 .. -0.75: skip the bare underside
+        let ring = (1.0 - y * y).max(0.0).sqrt();
+        let a = k as f32 * 2.39996 + rng(seed, k * 5, -0.25, 0.25);
+        let out = Vec3::new(ring * a.cos(), y, ring * a.sin()).normalize();
+        let reach = radius * rng(seed, k * 5 + 1, 0.72, 1.0);
+        let c = Vec3::new(out.x * 1.12, out.y * 0.82 - 0.10, out.z * 1.12) * reach;
+        // card faces roughly outward, tilted at random so the crown edge breaks up into sprays
+        let tilt = Quat::from_axis_angle(out.any_orthonormal_vector(), rng(seed, k * 5 + 2, -0.7, 0.7))
+            * Quat::from_axis_angle(out, rng(seed, k * 5 + 3, 0.0, std::f32::consts::TAU));
+        let face = tilt * out;
+        let (u_ax, v_ax) = face.any_orthonormal_pair();
+        let half = radius * rng(seed, k * 5 + 4, 0.40, 0.55);
+        let v01 = (0.55 + 0.45 * out.y).clamp(0.0, 1.0) * rng(seed, k * 5 + 5, 0.85, 1.1);
+        let col = lerp3(deep, lit, v01.clamp(0.0, 1.0));
+        let base = b.len();
+        for (su, sv) in [(-1.0f32, -1.0f32), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
+            let p = c + (u_ax * su + v_ax * sv) * half;
+            b.vert(p, out, [su * 0.5 + 0.5, sv * 0.5 + 0.5], col);
+        }
+        // cull_mode None (get_card): either winding renders, and the outward normal lights both faces
+        b.idx.extend_from_slice(&[base, base + 1, base + 2, base + 1, base + 3, base + 2]);
+    }
+    b.finish()
+}
+
+// ---------- conifer needle cards ----------
+
+/// Needle-spray sprite: a twig along +u (left to right) with paired needles swept toward the tip, shorter
+/// near the tip. Same alpha-mask + baked-mip contract as `leaf_cluster_image`.
+pub fn needle_spray_image(size: usize, seed: u32) -> Image {
+    let size = size.next_power_of_two().max(16);
+    let mut level: Vec<[f32; 4]> = vec![[0.0; 4]; size * size];
+    // segments (a, b, half width, value)
+    let mut segs: Vec<(Vec2, Vec2, f32, f32)> = vec![(Vec2::new(0.04, 0.5), Vec2::new(0.96, 0.5), 0.016, 0.55)];
+    let n = 26u32;
+    for k in 0..n {
+        let t = 0.08 + 0.86 * k as f32 / n as f32;
+        let base = Vec2::new(0.04 + 0.92 * t, 0.5);
+        let len = 0.30 * (1.0 - 0.6 * t) * rng(seed, k * 3, 0.8, 1.1);
+        for side in [-1.0f32, 1.0] {
+            let ang = side * rng(seed, k * 3 + 1 + (side > 0.0) as u32, 0.75, 1.05); // swept forward ~45-60 deg
+            let dir = Vec2::from_angle(ang);
+            segs.push((base, base + dir * len, 0.010, rng(seed, k * 3 + 2, 0.7, 1.0)));
+        }
+    }
+    for y in 0..size {
+        for x in 0..size {
+            let p = Vec2::new((x as f32 + 0.5) / size as f32, (y as f32 + 0.5) / size as f32);
+            for &(a, b, hw, val) in &segs {
+                let ab = b - a;
+                let t = ((p - a).dot(ab) / ab.length_squared()).clamp(0.0, 1.0);
+                if (p - (a + ab * t)).length() < hw * (1.0 - 0.5 * t) {
+                    let g = val * (0.75 + 0.25 * t); // needle tips lighter
+                    level[y * size + x] = [0.42 * g, 0.66 * g, 0.40 * g, 1.0];
+                    break;
+                }
+            }
+        }
+    }
+    image_with_mips(size, level)
+}
+
+/// Needle cards on each conifer tier rim (same tiers as `conifer_mesh`): drooping sprays pointing out
+/// past the solid skirt. Normals = outward-and-up crown direction, as for broadleaf cards.
+pub fn conifer_cards_mesh(seed: u32) -> Mesh {
+    let tiers = 5usize;
+    let mut b = Buf::new();
+    for i in 0..tiers {
+        let (top_y, h, big, droop) = conifer_tier(seed, i, tiers);
+        let sprays = (6.0 + 8.0 * big) as u32; // wide low tiers carry more branches
+        for k in 0..sprays {
+            let kk = i as u32 * 97 + k;
+            let th = std::f32::consts::TAU * (k as f32 + rng(seed, kk * 7, -0.3, 0.3)) / sprays as f32;
+            let radial = Vec3::new(th.cos(), 0.0, th.sin());
+            let len = big * rng(seed, kk * 7 + 1, 0.55, 0.75);
+            // spray root inside the skirt, tip past the rim, drooping below the rim line
+            let root = radial * big * 0.45 + Vec3::Y * (top_y - h * 0.55);
+            let dip = (h * 0.45 + droop) / len * rng(seed, kk * 7 + 2, 0.8, 1.2);
+            let along = (radial - Vec3::Y * dip).normalize();
+            let side = Vec3::Y.cross(radial).normalize(); // tangent around the trunk
+            let roll = Quat::from_axis_angle(along, rng(seed, kk * 7 + 3, -0.5, 0.5)); // sprays not all flat
+            let across = roll * side;
+            let half_w = len * 0.30;
+            let n = (radial + Vec3::Y * 0.6).normalize();
+            let v = rng(seed, kk * 7 + 4, 0.85, 1.12) * (0.80 + 0.12 * i as f32);
+            let col = [v * 0.92, v, v * 0.88];
+            let base = b.len();
+            for (su, sv) in [(0.0f32, -1.0f32), (1.0, -1.0), (0.0, 1.0), (1.0, 1.0)] {
+                b.vert(root + along * len * su + across * half_w * sv, n, [su, sv * 0.5 + 0.5], col);
+            }
+            b.idx.extend_from_slice(&[base, base + 1, base + 2, base + 1, base + 3, base + 2]);
+        }
+    }
+    b.finish()
+}
+
+// sRGB RGBA8 image + full box-filtered mip chain from a linear RGBA level (alpha-weighted colour so clear
+// texels do not darken cutout edges; alpha boosted 1.3x per level, capped 2x, so coverage survives distance).
+fn image_with_mips(size: usize, level: Vec<[f32; 4]>) -> Image {
+    use bevy::image::{ImageSampler, ImageSamplerDescriptor};
+    use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+    let to_srgb = |c: f32| if c <= 0.003_130_8 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 };
+    let mut data = Vec::new();
+    let (mut s, mut lv, mut boost) = (size, level, 1.0f32);
+    let mut mips = 0u32;
+    loop {
+        for px in &lv {
+            data.extend_from_slice(&[
+                (to_srgb(px[0]) * 255.0) as u8,
+                (to_srgb(px[1]) * 255.0) as u8,
+                (to_srgb(px[2]) * 255.0) as u8,
+                ((px[3] * boost).min(1.0) * 255.0) as u8,
+            ]);
+        }
+        mips += 1;
+        if s == 1 {
+            break;
+        }
+        // 2x2 box down in LINEAR, colour weighted by alpha so transparent black does not darken leaf edges
+        let n = s / 2;
+        let mut next = vec![[0.0f32; 4]; n * n];
+        for y in 0..n {
+            for x in 0..n {
+                let mut acc = [0.0f32; 4];
+                for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                    let q = lv[(2 * y + dy) * s + 2 * x + dx];
+                    for c in 0..3 {
+                        acc[c] += q[c] * q[3];
+                    }
+                    acc[3] += q[3];
+                }
+                let a = acc[3].max(1e-6);
+                next[y * n + x] = [acc[0] / a, acc[1] / a, acc[2] / a, acc[3] / 4.0];
+            }
+        }
+        lv = next;
+        s = n;
+        boost = (boost * 1.3).min(2.0); // uncapped, the last mips go fully opaque: far cards become solid squares
+    }
+    let mut img = Image::new_uninit(
+        Extent3d { width: size as u32, height: size as u32, depth_or_array_layers: 1 },
+        TextureDimension::D2,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    img.data = Some(data);
+    img.texture_descriptor.mip_level_count = mips;
+    img.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor::linear());
+    img
 }
