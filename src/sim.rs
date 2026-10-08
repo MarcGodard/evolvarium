@@ -348,7 +348,7 @@ pub fn grid_cell(pos: Vec3) -> usize {
 
 // Food spatial grid (perf): bin foods into FGRID^2 cells -> creature scans nearby cells, not all ~1900 foods.
 // NEAR_QUERY = min query radius so global-nearest always found (plants dense -> nearest within a few units).
-const FGRID: usize = 20;
+const FGRID: usize = (40.0 * crate::sphere::WORLD_SCALE) as usize; // ~6.3 m lat bins at any planet size
 const NEAR_QUERY: f32 = 24.0;
 fn fcell(w: f32) -> usize {
     (((w + WORLD_HALF) / (2.0 * WORLD_HALF)) * FGRID as f32).clamp(0.0, (FGRID - 1) as f32) as usize
@@ -673,29 +673,61 @@ fn plant_gene_dist(a: &PlantGenome, b: &PlantGenome) -> f32 {
 // Nearest cross-compatible mate for a seeding plant: same repro class (plant vs tree), within PLANT_MATE_RADIUS,
 // gene dist under PLANT_SPECIES_SIM, not self. None -> selfing. pool = (entity, pos, is_tree, genome), built
 // once per tick only in --mating mode.
-fn find_plant_mate<'a>(
-    pool: &'a [(Entity, Vec3, bool, PlantGenome)],
-    me: Entity,
-    pos: Vec3,
-    g: &PlantGenome,
-    is_tree: bool,
-) -> Option<&'a PlantGenome> {
+// --mating pool binned by crowd cell (CSR): a seeding plant scans the ring2 block around its own cell, not every
+// plant on the planet (was O(seeders x plants) per tick). Crowd cells are ~PLANT_MATE_RADIUS wide.
+// ponytail: ring2 can miss a mate in the last metre of the radius in the smallest face-corner cells; exact search
+// would need a 2-cell ring, not worth it for pollen reach.
+struct MatePool<'a> {
+    start: Vec<u32>, // cell c's items are items[start[c]..start[c+1]]
+    items: Vec<(Entity, Vec3, bool, &'a PlantGenome)>,
+}
+
+impl<'a> MatePool<'a> {
+    fn build(plants: impl Iterator<Item = (Entity, Vec3, bool, &'a PlantGenome)>) -> Self {
+        let g = crate::grid::crowd();
+        let tagged: Vec<(usize, (Entity, Vec3, bool, &'a PlantGenome))> = plants.map(|p| (g.cell(p.1), p)).collect();
+        let mut start = vec![0u32; g.len() + 1];
+        for (c, _) in &tagged {
+            start[c + 1] += 1;
+        }
+        for c in 0..g.len() {
+            start[c + 1] += start[c];
+        }
+        let mut fill = start.clone();
+        let mut items = vec![None; tagged.len()];
+        for (c, p) in tagged {
+            items[fill[c] as usize] = Some(p); // stable within a cell: query order, as the old flat scan
+            fill[c] += 1;
+        }
+        MatePool { start, items: items.into_iter().map(|x| x.unwrap()).collect() }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+}
+
+fn find_plant_mate<'a>(pool: &MatePool<'a>, me: Entity, pos: Vec3, g: &PlantGenome, is_tree: bool) -> Option<&'a PlantGenome> {
     let r2 = PLANT_MATE_RADIUS * PLANT_MATE_RADIUS;
-    pool.iter()
-        .filter(|(e, p, t, mg)| {
-            *e != me && *t == is_tree && pos.distance_squared(*p) < r2 && plant_gene_dist(g, mg) < PLANT_SPECIES_SIM
-        })
-        .min_by(|a, b| {
-            pos.distance_squared(a.1).partial_cmp(&pos.distance_squared(b.1)).unwrap()
-        })
-        .map(|(_, _, _, mg)| mg)
+    let grid = crate::grid::crowd();
+    let (cells, k) = grid.ring2(grid.cell(pos));
+    let mut best: Option<(f32, &'a PlantGenome)> = None;
+    for &c in &cells[..k] {
+        for &(e, p, t, mg) in &pool.items[pool.start[c] as usize..pool.start[c + 1] as usize] {
+            let d2 = pos.distance_squared(p);
+            if e != me && t == is_tree && d2 < r2 && best.is_none_or(|(bd, _)| d2 < bd) && plant_gene_dist(g, mg) < PLANT_SPECIES_SIM {
+                best = Some((d2, mg));
+            }
+        }
+    }
+    best.map(|(_, mg)| mg)
 }
 
 // Child genome for a SEEDING plant/tree: --mating crosses with nearest compatible mate (else self), then mutate.
 // Empty pool (no --mating) -> always selfing (single-parent path). is_tree routes mate class + mutation kind
 // (mutate_tree vs mutate).
 fn mate_or_self(
-    pool: &[(Entity, Vec3, bool, PlantGenome)],
+    pool: &MatePool,
     me: Entity,
     pos: Vec3,
     g: &PlantGenome,
@@ -758,7 +790,7 @@ pub(crate) fn niche_pos(rng: &mut Rng, low_elev: bool, target_lat: f32, offset: 
         }
         let (_lon, lat) = crate::sphere::dir_to_lonlat(d);
         let elev = crate::sphere::elevation(d);
-        let elev_ok = if low_elev { elev < 3.0 } else { elev >= 1.0 };
+        let elev_ok = if low_elev { elev < 3.0 * crate::sphere::WORLD_SCALE } else { elev >= crate::sphere::WORLD_SCALE };
         if (lat.abs() - target_lat).abs() < 0.3 && elev_ok {
             return crate::sphere::surface_pos(d, offset);
         }
@@ -2209,8 +2241,7 @@ pub fn plant_step(
     mut soil: ResMut<Soil>,
     gw: Res<GroundWater>,
     climate: Res<Climate>,
-    fire: Res<Fire>,
-    wear: Res<Wear>,
+    (fire, wear): (Res<Fire>, Res<Wear>), // tuple: plant_step is past bevy's 16-param limit
     mut tree_bites: ResMut<TreeBites>,
     mut bio: ResMut<crate::chem::Biosphere>,
     mut grants: ResMut<GrowthGrants>,
@@ -2221,6 +2252,7 @@ pub fn plant_step(
     pclim: Option<Res<crate::climate::PlanetClimate>>,
     mut cover_hab: Local<(u32, Vec<f32>)>, // (tick computed, per-cell cover habitat): slow field, refreshed every COVER_HAB_REFRESH
     mut q: Query<(Entity, &mut PlantState, &PlantGenome, &Transform, Option<&Tree>), (Without<Rot>, Without<Grass>)>, // not carrion, not grass (grass_step owns grass)
+    gq: Query<(Entity, &Transform, &PlantGenome, Has<Tree>), (Without<Rot>, Without<Grass>)>, // read-only twin of q: mate pool borrows genomes instead of cloning them
 ) {
     let _g = crate::profile::scope("plant");
     // CO2 fertilization scales BOTH the per-plant ceiling and the per-cell light budget: carboxylation is
@@ -2255,11 +2287,7 @@ pub fn plant_step(
     // mating mode (--mating, shared with creatures): pool of (entity, pos, is_tree, genome) so a seeding
     // plant/tree finds a nearby genetically-similar MATE to cross. Built only when --mating (cloning every plant
     // genome each tick isn't free); else empty -> reproduction is single-parent budding.
-    let mate_pool: Vec<(Entity, Vec3, bool, PlantGenome)> = if gen.mating {
-        q.iter().map(|(e, _, g, tf, tree)| (e, tf.translation, tree.is_some(), g.clone())).collect()
-    } else {
-        Vec::new()
-    };
+    let mate_pool = MatePool::build(gen.mating.then(|| gq.iter().map(|(e, tf, g, tree)| (e, tf.translation, tree, g))).into_iter().flatten());
     let seed = gen.seed;
     let tick = gen.tick;
     // read-only snapshots for the parallel decide (soil/tree_bites not mutated until the serial apply below)
@@ -2270,7 +2298,7 @@ pub fn plant_step(
     let wear_r: &Wear = &wear;
     let bites_r: &TreeBites = &tree_bites;
     let tpos_r: &[Vec3] = &tree_positions;
-    let pool_r: &[(Entity, Vec3, bool, PlantGenome)] = &mate_pool;
+    let pool_r: &MatePool = &mate_pool;
     // DECIDE (parallel): each plant/tree updates its OWN mass/age in place; every side effect (despawn, soil
     // deposit, detritus, fruit drop, birth, tree birth, dormant seed) is pushed as an intent carrying the
     // parent's entity index. RNG is per-entity (for_entity) -> order-independent. Caps + scenario stats +
@@ -3187,11 +3215,24 @@ pub fn live_step(
     } else {
         Vec::new()
     };
-    // bin food indices into the spatial grid (built once per tick)
-    let mut fgrid: Vec<Vec<u32>> = vec![Vec::new(); FGRID * FGRID];
-    for (i, f) in foods.iter().enumerate() {
+    // bin food indices into the spatial grid (built once per tick). CSR: bin b's foods are
+    // fgrid[fstart[b]..fstart[b+1]], in food order (as the old per-bin Vec pushes).
+    let fbins: Vec<u32> = foods.iter().map(|f| {
         let (fu, fv) = fcell_uv(f.1);
-        fgrid[fv * FGRID + fu].push(i as u32);
+        (fv * FGRID + fu) as u32
+    }).collect();
+    let mut fstart = vec![0u32; FGRID * FGRID + 1];
+    for &b in &fbins {
+        fstart[b as usize + 1] += 1;
+    }
+    for b in 0..FGRID * FGRID {
+        fstart[b + 1] += fstart[b];
+    }
+    let mut fgrid = vec![0u32; foods.len()];
+    let mut ffill = fstart.clone();
+    for (i, &b) in fbins.iter().enumerate() {
+        fgrid[ffill[b as usize] as usize] = i as u32;
+        ffill[b as usize] += 1;
     }
     // start-of-tick population snapshots: parallel decide reads these fixed counts (social-density drain + repro
     // taper); running caps re-enforced serially in apply. pop/niche_pop no longer mutate during the step.
@@ -3238,19 +3279,26 @@ pub fn live_step(
         let morph = genome.morph.unwrap_or_else(|| crate::morph::Morphometrics::of(&genome.body));
         let wing_load = wing_loading(&morph) * genome.size_scale(); // size folds in: bigger body -> higher loading
         let flier = is_flier(genome.flight, wing_load); // bird: flight gene AND wings; picks fruit from canopy
-        let _r = max_range.max(NEAR_QUERY);
-        // scan a neighborhood of food-grid (lon/lat) cells around this creature. SPAN cells each way covers
-        // sensor + near-query radius at this grid res. (Longitude doesn't wrap here + pole cells narrow -> minor
-        // perception approximation near date line/poles; food dense so fine.)
-        const SPAN: usize = 3;
+        // scan the food bins within this creature's own reach (widest sensor, floor NEAR_QUERY so the nearest
+        // food for eating/approach is still found). Lat bins are fixed metres; lon bins shrink by cos(lat), so
+        // the lon span widens poleward (whole ring at the pole) and wraps the date line.
+        let reach = max_range.max(NEAR_QUERY);
         let (pu, pv) = fcell_uv(pos);
-        let (cu0, cu1) = (pu.saturating_sub(SPAN), (pu + SPAN).min(FGRID - 1));
-        let (cv0, cv1) = (pv.saturating_sub(SPAN), (pv + SPAN).min(FGRID - 1));
         let pdir = pos.normalize_or_zero();
+        let lat_bin_m = std::f32::consts::PI * crate::sphere::PLANET_R / FGRID as f32;
+        let sv = (reach * crate::sphere::PLANET_R / (crate::sphere::PLANET_R - crate::sphere::ELEV_MAX) / lat_bin_m).ceil() as usize;
+        let lat_far = (pdir.y.clamp(-1.0, 1.0).asin().abs() + reach / (crate::sphere::PLANET_R - crate::sphere::ELEV_MAX)).min(std::f32::consts::FRAC_PI_2); // inner radius: seabed creatures span more angle
+        let lon_bin_m = std::f32::consts::TAU * crate::sphere::PLANET_R / FGRID as f32 * lat_far.cos();
+        let su = if lon_bin_m > 1e-3 { ((reach / lon_bin_m).ceil() as usize).min(FGRID / 2) } else { FGRID / 2 };
+        let (cv0, cv1) = (pv.saturating_sub(sv), (pv + sv).min(FGRID - 1));
+        let cols = (2 * su + 1).min(FGRID);
+        let cu_first = (pu + FGRID - su % FGRID) % FGRID;
         let (east, north) = crate::sphere::tangent_frame(pdir);
         for cv in cv0..=cv1 {
-            for cu in cu0..=cu1 {
-                for &fi in &fgrid[cv * FGRID + cu] {
+            for k in 0..cols {
+                let cu = (cu_first + k) % FGRID;
+                let b = cv * FGRID + cu;
+                for &fi in &fgrid[fstart[b] as usize..fstart[b + 1] as usize] {
                     let i = fi as usize;
                     let f = &foods[i];
                     // parallel decide reads start-of-tick food snapshot (no within-tick eaten set); same-tick

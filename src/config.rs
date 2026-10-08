@@ -3,7 +3,7 @@
 
 // --- world + run length ---
 pub const POP: usize = 90; // founder/generational pop. Near continuous carrying capacity (~50-70) so warmup->continuous handoff is gentle settle, not 140->K crash that overshoots to extinction on some seeds.
-pub const FOOD: usize = 480;
+pub const FOOD: usize = 480 * crate::sphere::AREA_X; // founding plants: per-m2 density held as the planet grows
 pub const WORLD_HALF: f32 = 80.0; // square arena [-H, H] in x,z
 pub const GEN_TICKS: u32 = 4800; // steps/gen (generational mode) + log interval = 2 full days (see DAY_TICKS). Longer lives -> creatures span several day/night cycles so rest-timing pays off.
 pub const MAX_GEN_HEADLESS: u32 = 40; // default headless run length in gens (override: --gens=N)
@@ -38,15 +38,15 @@ pub const REPRO_COST: f32 = 16.0; // energy parent spends per child (parent stay
 pub const BIRTH_ENERGY: f32 = 28.0; // offspring start energy: buffer so newborns establish before starving (raised: newborn die-off was R<1 driver pinning pop at floor)
 pub const P_REPRO_CREATURE: f32 = 0.025; // per-tick repro chance while eligible (x density taper)
 pub const REPRO_MIN_AGE: u32 = 180; // min ticks of life before breeding (newborns establish first; paces waves)
-pub const CREATURE_CAP: usize = 5000; // global pop SAFETY ceiling. Conserved chemistry is meant to be the real limiter, so a pop sitting EXACTLY on this number means the cap binds and the measurement is meaningless (same rule as PLANT_CAP). Raised 2000->5000 after diurnal temperature made the world productive enough to pin. Windowed viz draws every creature so high density costs FPS.
-pub const SOCIAL_DENSITY_REF: f32 = 2000.0; // pop that counts as "crowded" for the loneliness drain. Split from CREATURE_CAP so raising a SAFETY ceiling can't silently retune sociality.
+pub const CREATURE_CAP: usize = 5000 * crate::sphere::AREA_X; // global pop SAFETY ceiling. Conserved chemistry is meant to be the real limiter, so a pop sitting EXACTLY on this number means the cap binds and the measurement is meaningless (same rule as PLANT_CAP). Raised 2000->5000 after diurnal temperature made the world productive enough to pin. Windowed viz draws every creature so high density costs FPS.
+pub const SOCIAL_DENSITY_REF: f32 = 2000.0 * crate::sphere::AREA_X as f32; // a DENSITY: scales with planet area // pop that counts as "crowded" for the loneliness drain. Split from CREATURE_CAP so raising a SAFETY ceiling can't silently retune sociality.
 // Per-niche carrying capacity (repro tapers on the breeder's OWN niche fill, not global pop) -> each habitat
 // fills independently so no single niche soaks the shared cap (was winner-take-all: one niche -> ~83% planet,
 // which one is seed-stochastic). Order = Niche::idx [aquatic,aerial,highland,cold,warm,land]. Aquatic biggest
 // (ocean ~half planet) but ~30% not 83%. Scaled ~7x from [45,15,16,18,22,36] for the ~1000-pop world; ratios
 // preserved across every rescale so habitat balance holds. Scaled with CREATURE_CAP (x2.5, 2000->5000): sum
 // (~4839) sits just UNDER the global cap, both SAFETY ceilings the element budget should stay below on its own.
-pub const NICHE_CAP: [usize; 6] = [1433, 478, 510, 573, 700, 1145];
+pub const NICHE_CAP: [usize; 6] = { let a = crate::sphere::AREA_X; [1433 * a, 478 * a, 510 * a, 573 * a, 700 * a, 1145 * a] }; // x AREA_X: per-planet counts, density-tuned
 pub const WARMUP_GENS: u32 = 12; // generational warm-up before continuous birth/death kicks in
 pub const CONT_LOG_TICKS: u32 = 600; // continuous-mode stats log interval (fine enough to watch a crash unfold)
 
@@ -231,7 +231,7 @@ pub const PLANT_MIN_MASS: f32 = 0.15; // below this a grazed plant fully consume
 
 // --- grass: render-only whole-planet ground cover (NOT in food scan -> cheap at high counts). Edible
 // only as thin POSITION-based fallback (live_step): hungry creature on grass-bearing soil nibbles. ---
-pub const GRASS_CAP: usize = 8000; // target tuft count for whole-planet cover (render only; size set at attach)
+pub const GRASS_CAP: usize = 8000 * crate::sphere::AREA_X; // target tuft count for whole-planet cover (render only; size set at attach)
 pub const GRASS_START_MASS: f32 = 0.4;
 pub const GRASS_HAB_MIN: f32 = 0.25; // min plant_habitability to seed/keep grass = "soil capable of plants"
 // Energy/sec a REFERENCE-MASS (3.75 kg, see chem::creature_mass_kg) hungry grazer crops from the
@@ -260,7 +260,7 @@ pub const GRASS_COVER_BARE: f32 = 0.08;
 
 // --- seaweed/kelp: OCEAN analog of grass. Own cap + lifecycle (seaweed_step); blankets submerged band
 // (above abyssal floor) -> reliable food carpet for swimmers (position-based ocean graze). ---
-pub const SEAWEED_CAP: usize = 3500; // target frond count across submerged band (ocean ~half the planet)
+pub const SEAWEED_CAP: usize = 3500 * crate::sphere::AREA_X; // target frond count across submerged band (ocean ~half the planet)
 pub const SEAWEED_START_MASS: f32 = 0.5;
 // Grazing FORAGE nutrient: grass + seaweed each carry ONE fixed nutrient axis, so grazer can TUNE gut
 // (uptake at that index) to live off carpet alone: specialty, not free lunch. Graze refills that reserve
@@ -283,8 +283,8 @@ pub const ROCK_GRASS_FRAC: f32 = 0.15; // chance rocky-ground sample still seeds
 pub const ROCK_GRASS_HAB: f32 = 0.28;  // survival-habitability floor for grass on rocky ground (keeps sparse rocky tufts alive, not churning)
 
 // --- trees: long-lived, near-uneatable plants ---
-pub const N_TREES: usize = 240; // initial trees (whole-planet seeding, scattered worldwide)
-pub const TREE_CAP: usize = 480; // max trees (whole-planet forests; ambient repro fills toward this)
+pub const N_TREES: usize = 240 * crate::sphere::AREA_X; // initial trees (whole-planet seeding, scattered worldwide)
+pub const TREE_CAP: usize = 480 * crate::sphere::AREA_X; // max trees (whole-planet forests; ambient repro fills toward this)
 pub const TREE_MATURITY: f32 = 14.0; // trees grow large before reproducing
 pub const P_TREE_REPRO: f32 = 0.004; // slow reproduction (long-lived, sparse)
 pub const TREE_DENSITY_R: f32 = 18.0; // trees self-limit clustering within this radius
@@ -334,7 +334,7 @@ pub const HYDRO_COAST_BAND: f32 = 0.06;     // elevation01 band above sea level 
 // dormancy (seed bank): fraction of seeds wait DORMANT in soil, germinate later -> patch wiped by
 // fire/drought/grazing re-greens from buried bank. Bank persists independent of surface plants.
 pub const DORMANCY_FRAC: f32 = 0.7;         // at dormancy=1, this fraction of seeds go to bank instead of sprouting
-pub const SEED_BANK_CAP: usize = 6000;      // max buried seeds tracked (drop new ones when full)
+pub const SEED_BANK_CAP: usize = 6000 * crate::sphere::AREA_X;      // max buried seeds tracked (drop new ones when full)
 pub const DORMANT_TICKS_MIN: u32 = 200;     // shortest a seed waits buried before germinating
 pub const DORMANT_TICKS_MAX: u32 = 1600;    // longest a seed waits buried (staggers recruitment over time)
 // plant + tree mating (--mating mode, shared with creatures): seeding plant crosses with nearest

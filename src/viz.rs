@@ -20,7 +20,7 @@ use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 // right because a leaf seen from behind should be lit from behind.
 // Shared materials for the flora. Bevy batches draws only across entities sharing BOTH mesh and material, and
 // every plant used to `materials.add` its own: ~29k materials, nothing batched, ~25 ms frames at ~900 creatures.
-// Colours are quantized to 6 bits/channel (invisible on foliage) and keyed with a variant id so identical-looking
+// Colours are quantized to 5 bits/channel (invisible on foliage) and keyed with a variant id so identical-looking
 // plants share one handle. Never mutate a cached material in place: it is shared (rot stages swap handles).
 #[derive(Resource, Default)]
 pub struct MatCache(std::collections::HashMap<u64, Handle<StandardMaterial>>);
@@ -44,12 +44,14 @@ pub mod matv {
 impl MatCache {
     pub fn get(&mut self, mats: &mut Assets<StandardMaterial>, color: Color, variant: u8) -> Handle<StandardMaterial> {
         let c = color.to_srgba();
-        let q = |x: f32| ((x.clamp(0.0, 1.0) * 63.0).round() as u64) & 63;
+        // 32 levels/channel: a 1/32 sRGB step between two individuals is invisible, and 64 levels let every new
+        // genome mint a material (cache grew without plateau, batches split).
+        let q = |x: f32| ((x.clamp(0.0, 1.0) * 31.0).round() as u64) & 63;
         let key = (variant as u64) << 24 | q(c.red) << 12 | q(c.green) << 6 | q(c.blue);
         if let Some(h) = self.0.get(&key) {
             return h.clone();
         }
-        let base = Color::srgb(q(c.red) as f32 / 63.0, q(c.green) as f32 / 63.0, q(c.blue) as f32 / 63.0);
+        let base = Color::srgb(q(c.red) as f32 / 31.0, q(c.green) as f32 / 31.0, q(c.blue) as f32 / 31.0);
         let m = match variant {
             matv::BODY => StandardMaterial { base_color: base, perceptual_roughness: 0.9, ..default() },
             matv::LEAFY => StandardMaterial { base_color: base, perceptual_roughness: 0.9, double_sided: true, cull_mode: None, ..default() },
@@ -212,7 +214,7 @@ const MM_STATIC: usize = 4; // first dynamic field index
 const MM_RES: usize = 64; // globe lat bands (small: minimap is tiny)
 const MM_SIZE: f32 = 200.0; // viewport square, logical px
 const MM_MARGIN: f32 = 10.0;
-const MM_DIST: f32 = 215.0; // minimap cam distance from globe center (PLANET_R=80 -> whole globe framed)
+const MM_DIST: f32 = crate::sphere::PLANET_R * 2.69; // minimap cam distance from globe center: whole globe framed
 const MM_DENSITY_FULL: f32 = 5.0; // creatures per LEGACY (~78 m^2) cell that reads as full "life" brightness
 const MM_SOIL_MAX: f32 = 2.5; // soil overlay normalizer (> FERT_CAP so death-spike fertility shows above baseline)
 
@@ -595,29 +597,52 @@ const BODY_CACHE_CAP: usize = 512;
 pub struct BodyMeshCache {
     map: std::collections::HashMap<u64, Handle<Mesh>>,
     order: std::collections::VecDeque<u64>,
+    pending: std::collections::HashMap<u64, bevy::tasks::Task<Mesh>>,
 }
+// SDF meshing runs on the async compute pool: at ~2000 creatures nearly every newborn is a new graph, and
+// meshing inline cost ~30 ms of main thread per frame. Bounded so a fresh world's ~140 graphs queue, not flood.
+const MAX_PENDING_BODIES: usize = 32;
 impl BodyMeshCache {
     // Generative mesh for this genome's body (built once per unique graph). center_y vertically centers the
     // body on the entity origin (so feet hang below + head above, like the old centered capsule).
-    // Returns (mesh, built): built=true means a cache MISS just ran the SDF mesher (the expensive path).
-    // Caller budgets misses per frame so a fresh world's ~140 unique bodies stream in instead of stalling.
-    fn get_or_build(&mut self, g: &Genome, meshes: &mut Assets<Mesh>) -> (Handle<Mesh>, bool) {
+    // None = mesh still building off-thread; the creature stays undressed and is retried next frame.
+    fn get_or_queue(&mut self, g: &Genome) -> Option<Handle<Mesh>> {
         let key = crate::morph::body_hash(&g.body);
         if let Some(h) = self.map.get(&key) {
-            return (h.clone(), false);
+            return Some(h.clone());
         }
-        let pheno = crate::morph::develop(&g.body);
-        let m = crate::morph::Morphometrics::from_phenotype(&pheno);
-        let center_y = (m.bbox_min.y + m.bbox_max.y) * 0.5;
-        let h = meshes.add(crate::morph::build_body_mesh(&pheno, center_y));
-        self.map.insert(key, h.clone());
-        self.order.push_back(key);
-        if self.order.len() > BODY_CACHE_CAP {
-            if let Some(old) = self.order.pop_front() {
-                self.map.remove(&old);
+        if !self.pending.contains_key(&key) && self.pending.len() < MAX_PENDING_BODIES {
+            let body = g.body.clone();
+            let task = bevy::tasks::AsyncComputeTaskPool::get().spawn(async move {
+                let pheno = crate::morph::develop(&body);
+                let m = crate::morph::Morphometrics::from_phenotype(&pheno);
+                crate::morph::build_body_mesh(&pheno, (m.bbox_min.y + m.bbox_max.y) * 0.5)
+            });
+            self.pending.insert(key, task);
+        }
+        None
+    }
+
+    // Move finished off-thread meshes into assets + the LRU map.
+    fn collect(&mut self, meshes: &mut Assets<Mesh>) {
+        let mut done = Vec::new();
+        self.pending.retain(|&k, t| match bevy::tasks::futures::check_ready(t) {
+            Some(mesh) => {
+                done.push((k, mesh));
+                false
+            }
+            None => true,
+        });
+        done.sort_by_key(|d| d.0); // HashMap order is random; keep LRU eviction order reproducible
+        for (key, mesh) in done {
+            self.map.insert(key, meshes.add(mesh));
+            self.order.push_back(key);
+            if self.order.len() > BODY_CACHE_CAP {
+                if let Some(old) = self.order.pop_front() {
+                    self.map.remove(&old);
+                }
             }
         }
-        (h, true)
     }
 }
 
@@ -704,33 +729,25 @@ fn add_creature_visuals(
     mut mat_cache: ResMut<MatCache>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut q: Query<(Entity, &Genome, &mut Transform), (With<Creature>, Without<Mesh3d>)>,
+    mut q: Query<(Entity, &Genome, &mut Transform, &crate::components::Alive), (With<Creature>, Without<Mesh3d>)>,
 ) {
     let Some(parts) = parts else { return };
-    let mut built = 0; // SDF mesh builds (cache misses) this frame; cap so a fresh world streams in vs stalls
-    for (e, g, mut tf) in &mut q {
+    cache.collect(&mut meshes);
+    for (e, g, mut tf, alive) in &mut q {
+        if !alive.0 {
+            continue; // died before its mesh was ready: don't spend a build slot on a corpse
+        }
         // GENERATIVE BODY: one merged mesh grown from the body-graph (morph.rs). Genome hue rides the
         // entity material base_color; the mesh's per-part vertex colors shade it (limbs darker, belly lighter).
         let (color, _) = creature_look(g);
         tf.scale = Vec3::splat(body_scale(g));
-        let (body_mesh, was_built) = cache.get_or_build(g, &mut meshes);
-        commands.entity(e).insert((Mesh3d(body_mesh), MeshMaterial3d(materials.add(color))));
+        let Some(body_mesh) = cache.get_or_queue(g) else { continue };
+        commands.entity(e).insert((Mesh3d(body_mesh), MeshMaterial3d(mat_cache.get(&mut materials, color, matv::PLAIN))));
         spawn_eyes(&mut commands, &mut mat_cache, e, g, &parts.eye, &mut materials);
         spawn_ears(&mut commands, &mut mat_cache, e, g, &parts.ear, &mut materials); // all creatures, sized by hearing gene
         spawn_wings(&mut commands, &mut mat_cache, e, g, &parts.wing, &mut materials); // fliers only (gene + wing loading)
-        if was_built {
-            built += 1;
-            if built >= MAX_BODY_BUILDS_PER_FRAME {
-                break; // rest stay un-dressed (Without<Mesh3d>) -> picked up next frame
-            }
-        }
     }
 }
-
-// Per-frame cap on fresh SDF body meshes. A new world has ~140 unique bodies; building all on frame 1 is the
-// load stall. Cap -> window opens immediately, creatures stream in over a handful of frames (juvenile grow-in
-// masks the pop). Cache HITS (clones) are free + not counted, so steady-state births are unaffected.
-const MAX_BODY_BUILDS_PER_FRAME: usize = 6;
 
 // Spawn the emissive eye spheres as children of `parent`, anchored to the head surface (morph::eye_anchor),
 // NOT the whole-body bbox -> no floating ahead of a tapering body.
@@ -756,16 +773,22 @@ fn spawn_eyes(commands: &mut Commands, cache: &mut MatCache, parent: Entity, g: 
         let pos = head + out * (a.radius * 0.92);
         let rot = Quat::from_rotation_arc(Vec3::Z, out); // pupil (+Z) looks along the sensor's axis
         let eye = commands
-            .spawn((Mesh3d(eye_mesh.clone()), MeshMaterial3d(eye_mat.clone()), Transform { translation: pos, rotation: rot, scale: Vec3::splat(eye_d) }))
+            .spawn((Mesh3d(eye_mesh.clone()), MeshMaterial3d(eye_mat.clone()), Transform { translation: pos, rotation: rot, scale: Vec3::splat(eye_d) }, DETAIL_RANGE, bevy::light::NotShadowCaster))
             .id();
         // pupil: dark sphere set into the front of the eye (child, so it inherits the eye's scale + facing)
         let pupil = commands
-            .spawn((Mesh3d(eye_mesh.clone()), MeshMaterial3d(pupil_mat.clone()), Transform { translation: Vec3::new(0.0, 0.0, 0.3), scale: Vec3::splat(0.5), ..default() }))
+            .spawn((Mesh3d(eye_mesh.clone()), MeshMaterial3d(pupil_mat.clone()), Transform { translation: Vec3::new(0.0, 0.0, 0.3), scale: Vec3::splat(0.5), ..default() }, DETAIL_RANGE, bevy::light::NotShadowCaster))
             .id();
         commands.entity(eye).add_child(pupil);
         commands.entity(parent).add_child(eye);
     }
 }
+
+// Eyes, pupils, ears: centimetre parts, sub-pixel past ~70 m and their shadows unreadable at any range. Culling
+// them past range + skipping shadow passes cuts ~7 draws per creature from every far creature and every cascade.
+// Abrupt (start == end): a crossfade range made frames take seconds with ~45k ranged entities.
+const DETAIL_RANGE: bevy::camera::visibility::VisibilityRange =
+    bevy::camera::visibility::VisibilityRange { start_margin: 0.0..0.0, end_margin: 70.0..70.0, use_aabb: false };
 
 // Unit pointed ear: cone apex up (+Y), base at the head. Scaled + splayed per-creature by spawn_ears.
 pub fn ear_mesh() -> Mesh {
@@ -797,6 +820,8 @@ fn spawn_ears(commands: &mut Commands, cache: &mut MatCache, parent: Entity, g: 
                     scale: Vec3::new(ew, eh, ew * 0.5), // thin front-to-back
                     ..default()
                 },
+                DETAIL_RANGE,
+                bevy::light::NotShadowCaster,
             ))
             .id();
         commands.entity(parent).add_child(ear);
@@ -1554,9 +1579,15 @@ fn add_grass_visuals(
         tf.translation = base + up * 0.02; // roots on surface
         commands
             .entity(e)
-            .insert((Mesh3d(mesh.0.clone()), MeshMaterial3d(mat.0.clone())));
+            .insert((Mesh3d(mesh.0.clone()), MeshMaterial3d(mat.0.clone()), TURF_RANGE, bevy::light::NotShadowCaster));
     }
 }
+
+// Turf (grass + seaweed) is decor: tufts are ~1 m, sub-pixel past ~60 m, and walk horizon on the planet is ~30 m.
+// Distance-culling drops ~45k planet-wide tufts to the few thousand near the camera. Abrupt: a crossfade range
+// made frames take seconds. Thin blades cast no readable shadow, so turf skips every shadow cascade.
+const TURF_RANGE: bevy::camera::visibility::VisibilityRange =
+    bevy::camera::visibility::VisibilityRange { start_margin: 0.0..0.0, end_margin: 60.0..60.0, use_aabb: false };
 
 // Seaweed = ocean grass: attach shared kelp-frond mesh, size each by mass + DEPTH. Deeper kelp grows
 // taller (long stipes reaching light) -> underwater forest; shallow fronds stubby.
@@ -1580,7 +1611,7 @@ fn add_seaweed_visuals(
         tf.translation = base + up * 0.02;
         commands
             .entity(e)
-            .insert((Mesh3d(mesh.0.clone()), MeshMaterial3d(mat.0.clone())));
+            .insert((Mesh3d(mesh.0.clone()), MeshMaterial3d(mat.0.clone()), TURF_RANGE, bevy::light::NotShadowCaster));
     }
 }
 
@@ -1716,7 +1747,7 @@ fn fade_sky_stars(
 fn position_sky_planets(gen: Res<GenState>, offset: Res<SunOffset>, mut q: Query<(&SkyPlanet, &mut Transform)>) {
     let vtick = (gen.tick as i64 + offset.0).max(0) as u32;
     let tau = crate::sphere::t_years(vtick);
-    let r = crate::sphere::PLANET_R * 85.0 * 0.97; // just inside the star shell
+    let r = crate::sphere::SKY_SHELL_R * 0.97; // just inside the star shell
     for (p, mut tf) in &mut q {
         let ecl = crate::orrery::geocentric_dir(p.idx, tau);
         tf.translation = crate::sphere::ecliptic_to_sky(ecl, vtick) * r;
@@ -1836,7 +1867,7 @@ fn walk_ambient(
 // noise; the globe's vertex colours already carry vegetation (biome + grazing tint) at that scale. Small flora
 // hides past ORBIT_DETAIL_DIST (trees, creatures and structures stay), and comes back as the camera zooms in
 // or walks. Toggles only on a state flip; plants spawned while hidden are caught via Added<Mesh3d>.
-const ORBIT_DETAIL_DIST: f32 = 165.0;
+const ORBIT_DETAIL_DIST: f32 = crate::sphere::PLANET_R * 2.06;
 fn orbit_flora_lod(
     mode: Res<crate::camera::CameraMode>,
     cams: Query<&crate::camera::OrbitCam>,
@@ -2211,7 +2242,7 @@ fn update_clouds(
         // Sized against the PLANET, not just the walk view: the cluster mesh spans ~2 units, so the old 10.0
         // put a single puff ~29 units across on an R=80 world (~40 deg of arc) and from orbit the deck hung
         // far past the limb. Coverage is made up with a denser grid in spawn_clouds instead.
-        let s = (1.0 + 6.0 * puff.grow) * puff.scale_var;
+        let s = (1.0 + 6.0 * puff.grow) * puff.scale_var * crate::sphere::WORLD_SCALE; // fixed puff grid: puffs grow with the planet to keep deck cover
         tf.scale = Vec3::new(s, s * puff.flat, s); // squash along local up (set by tf.rotation) = flat cloud
     }
 }
@@ -2670,7 +2701,7 @@ fn meteor_visuals(
             return; // daytime sky: no visible shooting stars
         }
     }
-    const SHELL: f32 = crate::sphere::PLANET_R * 85.0; // matches the planet sky-star shell
+    const SHELL: f32 = crate::sphere::SKY_SHELL_R;
     const N: u32 = 7; // meteor slots (sparse -> the occasional shooting star, not a constant shower)
     const STREAK: u32 = 220; // ticks a streak is visible (quick flash)
     // hashed unit vector per seed (sky start point / sweep reference)
@@ -2723,14 +2754,17 @@ fn log_viz_help() {
 // scale, so on any frame the scheduler happened to run this last, every juvenile snapped to adult size for
 // that frame. Changed<Genome> fires for the whole population at startup, which is why it read as every
 // animal's size jumping around for the first moments after launch.
+// Body materials are SHARED via MatCache (bodies batch): swap the handle, never mutate the material.
 fn restyle_creatures(
     mut mats: ResMut<Assets<StandardMaterial>>,
-    q: Query<(&Genome, &MeshMaterial3d<StandardMaterial>), Changed<Genome>>,
+    mut cache: ResMut<MatCache>,
+    mut q: Query<(&Genome, &mut MeshMaterial3d<StandardMaterial>), Changed<Genome>>,
 ) {
-    for (g, mm) in &q {
+    for (g, mut mm) in &mut q {
         let (color, _) = creature_look(g); // skin_hue/sat, venom warning, fur/armor tint (multiplies vertex colors)
-        if let Some(mut m) = mats.get_mut(&mm.0) {
-            m.base_color = color;
+        let h = cache.get(&mut mats, color, matv::PLAIN);
+        if mm.0 != h {
+            mm.0 = h;
         }
     }
 }

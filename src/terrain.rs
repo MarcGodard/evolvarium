@@ -4,7 +4,7 @@ use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
-pub const HEIGHT_MAX: f32 = 12.0; // peak terrain elev above sea sphere (world units). sphere::ELEV_MAX aliases this
+pub const HEIGHT_MAX: f32 = 12.0 * crate::sphere::WORLD_SCALE; // peak terrain elev above sea sphere (world units). sphere::ELEV_MAX aliases this
 // Render-only ocean-floor drop: shallow shelf (elevation ~0 at coast) would otherwise sit a hair below the
 // translucent ocean shell (~PLANET_R+0.16) -> z-fight shimmer seen through the water in orbit. Drop the whole
 // ocean floor by this so the shelf clears the shell with margin. Sim bathymetry (sphere::elevation) untouched.

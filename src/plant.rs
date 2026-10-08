@@ -6,7 +6,7 @@ use crate::rng::Rng;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-pub const PLANT_CAP: usize = 12000; // PERF ceiling only, not a balance knob: under conserved chemistry the
+pub const PLANT_CAP: usize = 12000 * crate::sphere::AREA_X; // x area so the ceiling sits at the same per-m2 density on any planet size. PERF ceiling only, not a balance knob: under conserved chemistry the
                                     // flora count is limited by the soil N and P budget (seedlings must be FUNDED
                                     // to establish), so this should sit well ABOVE the equilibrium and never bind.
                                     // If plant counts sit exactly at this number, the budget is not limiting and

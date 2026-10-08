@@ -131,7 +131,12 @@ fn main() {
     // --cap-lon=DEG: longitude for --cap-lat (sphere::dir_to_lonlat convention, atan2(z, x)); default homeland meridian.
     let cap_lon = val(&args, "--cap-lon=").and_then(|s| s.parse::<f32>().ok());
     let cap_orbit = flag(&args, "--cap-orbit") || cap_lat.is_some();
-    let cap_dist = parse_or(&args, "--cap-dist=", 140.0f32);
+    // orbit: default 1.75 R, floored above the peaks (never inside the globe). Orrery: its own space, from the orrery focus.
+    let cap_dist = if flag(&args, "--cap-orrery") {
+        parse_or(&args, "--cap-dist=", 140.0f32)
+    } else {
+        parse_or(&args, "--cap-dist=", sphere::PLANET_R * 1.75).max(sphere::PLANET_R + sphere::ELEV_MAX + 3.0)
+    };
     // --cap-water: submerge capture camera in deep ocean (verify swim view + underwater tint).
     let cap_water = flag(&args, "--cap-water");
     // --cap-orrery: capture the TSN solar-system (orrery) view instead of the planet.
@@ -391,7 +396,7 @@ fn setup_scene(
     let ground_tex = images.add(ground_img);
     let ground_nrm = images.add(ground_nrm);
     commands.spawn((
-        Mesh3d(meshes.add(terrain::build_globe(160))),
+        Mesh3d(meshes.add(terrain::build_globe((160.0 * sphere::WORLD_SCALE) as usize))),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::WHITE, // texture x vertex colour x base all multiply; white keeps biome hue
             base_color_texture: Some(ground_tex),
@@ -575,7 +580,7 @@ fn setup_scene(
     // rotated each frame about the spin axis by viz::rotate_sky_stars so constellations wheel with the day.
     // Built in EQUATORIAL coords -> celestial pole = planet +Y; the ecliptic sun/moon/planets carry the
     // obliquity instead, so they drift against the fixed stars (= seasons + wandering planets).
-    let sky_r = sphere::PLANET_R * 85.0; // ~6800, inside the 12k camera far clip
+    let sky_r = sphere::SKY_SHELL_R;
     let (sky_mesh, _hip) = stars::build_starfield(sky_r);
     commands.spawn((
         Mesh3d(meshes.add(sky_mesh)),
@@ -594,7 +599,7 @@ fn setup_scene(
     // in front of it; still inside the 12k far clip. Centered on the walker each frame, not on the planet, so
     // the gradient sits on the viewer's own horizon. Walk-only: orbit keeps the near-black ClearColor.
     commands.spawn((
-        Mesh3d(meshes.add(viz_sky::sky_dome_mesh(24, 48, sphere::PLANET_R * 140.0))),
+        Mesh3d(meshes.add(viz_sky::sky_dome_mesh(24, 48, sphere::SKY_DOME_R))),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::WHITE, // vertex colours carry the whole sky
             unlit: true,

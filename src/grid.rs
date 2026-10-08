@@ -11,17 +11,18 @@
 use bevy::prelude::*;
 use std::f32::consts::FRAC_PI_4;
 
-/// Field grid cells per face edge. 32 -> 6144 cells, ~13 m^2 (~3.6 m) on the 80 m planet: 6x the old 1024.
-pub const FIELD_N: usize = 32;
+/// Field grid cells per face edge. 32 per WORLD_SCALE -> ~13 m^2 (~3.6 m) cells at any planet size.
+pub const FIELD_N: usize = (32.0 * crate::sphere::WORLD_SCALE) as usize;
 /// Crowding grid: density-dependent grazing was tuned per ~78 m^2 cell (old 32x32 lon/lat mean). 13 -> 1014
 /// cells keeps that spatial scale, so finer FIELDS do not silently strengthen or weaken crowding.
-pub const CROWD_N: usize = 13;
+pub const CROWD_N: usize = (13.0 * crate::sphere::WORLD_SCALE) as usize;
 
 pub struct CubeGrid {
     pub n: usize,
     center: Vec<Vec3>,
     area: Vec<f64>, // unit-sphere solid angle (sr); x R^2 for m^2
     nbr: Vec<[u32; 4]>,
+    edges: Vec<f32>, // n+1 bin edges in gnomonic (tan) space: exact boundaries for the fast bin
 }
 
 fn edge(n: usize, k: usize) -> f32 {
@@ -56,22 +57,34 @@ impl CubeGrid {
         // neighbours: step one cell along the FACE axes (u, v), not east/north (which are diagonal to the grid
         // off the equatorial faces). Past a face edge the extended gnomonic plane still maps to a real dir, and
         // re-binning it lands on the adjacent face's edge cell, so no per-face orientation tables are needed.
+        let edges: Vec<f32> = (0..=n).map(|k| edge(n, k)).collect();
         let ang = |k: i32| (-FRAC_PI_4 + std::f32::consts::FRAC_PI_2 * (k as f32 + 0.5) / n as f32).tan();
         let mut nbr = Vec::with_capacity(cells);
         for face in 0..6 {
             for j in 0..n as i32 {
                 for i in 0..n as i32 {
-                    let at = |ii: i32, jj: i32| Self::bin(n, crate::sphere::face_dir(face, ang(ii), ang(jj))) as u32;
+                    let at = |ii: i32, jj: i32| Self::bin(n, &edges, crate::sphere::face_dir(face, ang(ii), ang(jj))) as u32;
                     nbr.push([at(i + 1, j), at(i - 1, j), at(i, j + 1), at(i, j - 1)]);
                 }
             }
         }
-        CubeGrid { n, center, area, nbr }
+        CubeGrid { n, center, area, nbr, edges }
     }
 
-    fn bin(n: usize, d: Vec3) -> usize {
+    // Hot path (every plant/creature/deposit, many times a tick). Polynomial atan guess (|err| < 0.004 rad, under
+    // a quarter cell for n <= 96) lands within one bin; exact tan-space edges settle it. No atan call.
+    fn bin(n: usize, edges: &[f32], d: Vec3) -> usize {
         let (face, u, v) = crate::sphere::dir_face_uv(d);
-        let k = |w: f32| (((w.atan() / FRAC_PI_4 + 1.0) * 0.5 * n as f32) as usize).min(n - 1);
+        let k = |w: f32| {
+            let a = FRAC_PI_4 * w + 0.273 * w * (1.0 - w.abs());
+            let mut k = (((a / FRAC_PI_4 + 1.0) * 0.5 * n as f32) as usize).min(n - 1);
+            if k > 0 && w < edges[k] {
+                k -= 1;
+            } else if k + 1 < n && w >= edges[k + 1] {
+                k += 1;
+            }
+            k
+        };
         face * n * n + k(v) * n + k(u)
     }
 
@@ -83,7 +96,7 @@ impl CubeGrid {
         if !(p.length_squared() > 1e-12) {
             return 0;
         }
-        Self::bin(self.n, p)
+        Self::bin(self.n, &self.edges, p)
     }
     /// Unit surface dir at cell centre.
     pub fn center(&self, c: usize) -> Vec3 {
@@ -103,6 +116,27 @@ impl CubeGrid {
     pub fn neighbors(&self, c: usize) -> [usize; 4] {
         self.nbr[c].map(|x| x as usize)
     }
+    /// Cell `c` plus neighbours-of-neighbours (deduped, first `len` entries valid): the 3x3 block around `c`
+    /// plus the 4 cells two steps out along the axes. Covers every point within one cell width of `c`, except
+    /// near cube corners where 3 faces meet.
+    pub fn ring2(&self, c: usize) -> ([usize; 21], usize) {
+        let mut cand = [usize::MAX; 21];
+        let mut k = 0;
+        let mut push = |x: usize| {
+            if !cand[..k].contains(&x) {
+                cand[k] = x;
+                k += 1;
+            }
+        };
+        push(c);
+        for a in self.neighbors(c) {
+            push(a);
+            for b in self.neighbors(a) {
+                push(b);
+            }
+        }
+        (cand, k)
+    }
     /// Smooth sample of a per-cell field at dir `d`: compact radial kernel (radius one cell width) over the
     /// 2-ring neighbourhood. Continuous everywhere, face edges included: a cell's weight reaches 0 before it
     /// can leave the candidate set (any centre within one width of `d` is at most a diagonal away from the
@@ -121,21 +155,7 @@ impl CubeGrid {
         let dn = d.normalize_or_zero();
         let r = std::f32::consts::FRAC_PI_2 / self.n as f32; // < 1 width: near cube corners (3 faces meet) a 2-ring misses some cells within a full width
         let inv_r2 = 1.0 / (r * r);
-        let mut cand = [usize::MAX; 21];
-        let mut k = 0;
-        let push = |x: usize, cand: &mut [usize; 21], k: &mut usize| {
-            if !cand[..*k].contains(&x) {
-                cand[*k] = x;
-                *k += 1;
-            }
-        };
-        push(c, &mut cand, &mut k);
-        for a in self.neighbors(c) {
-            push(a, &mut cand, &mut k);
-            for b in self.neighbors(a) {
-                push(b, &mut cand, &mut k);
-            }
-        }
+        let (cand, k) = self.ring2(c);
         let mut out = Vec::with_capacity(k);
         for &x in &cand[..k] {
             let ang2 = 2.0 * (1.0 - self.center[x].dot(dn)).max(0.0); // chord^2 ~ angle^2
@@ -151,14 +171,14 @@ impl CubeGrid {
     }
 }
 
-/// Cell count of the retired 32x32 lon/lat grid. Point-deposit amounts (wear per footfall, fertility per
-/// corpse) were tuned against its MEAN cell; `legacy_area_ratio` carries them to any grid.
-const LEGACY_CELLS: f64 = 1024.0;
+/// Mean cell area of the retired 32x32 lon/lat grid on the 80 m planet. Point-deposit amounts (wear per footfall,
+/// fertility per corpse) were tuned against it; `legacy_area_ratio` carries them to any grid. Fixed m^2, not
+/// planet area / 1024: a bigger planet must not inflate every deposit.
+const LEGACY_CELL_M2: f64 = 4.0 * std::f64::consts::PI * 80.0 * 80.0 / 1024.0;
 
 /// legacy mean cell area / area of field cell `c`: multiply a per-legacy-cell point deposit by this.
 pub fn legacy_area_ratio(c: usize) -> f32 {
-    let g = field();
-    (g.mean_area_m2() * g.len() as f64 / LEGACY_CELLS / g.area_m2(c)) as f32
+    (LEGACY_CELL_M2 / field().area_m2(c)) as f32
 }
 
 static FIELD: std::sync::OnceLock<CubeGrid> = std::sync::OnceLock::new();
@@ -184,6 +204,27 @@ mod tests {
             assert!((total - 4.0 * std::f64::consts::PI).abs() < 1e-6, "solid angle sums to {total}");
             let (lo, hi) = (0..g.len()).fold((f64::MAX, 0.0f64), |(lo, hi), c| (lo.min(g.area[c]), hi.max(g.area[c])));
             assert!(hi / lo < 1.5, "area spread {}", hi / lo);
+        }
+    }
+
+    #[test]
+    fn fast_bin_matches_exact_atan_bin() {
+        let mut rng = crate::rng::Rng::seed(7);
+        for g in [field(), crowd()] {
+            let n = g.n;
+            let exact = |d: Vec3| {
+                let (face, u, v) = crate::sphere::dir_face_uv(d);
+                let k = |w: f32| (((w.atan() / FRAC_PI_4 + 1.0) * 0.5 * n as f32) as usize).min(n - 1);
+                face * n * n + k(v) * n + k(u)
+            };
+            let mut off = 0;
+            for _ in 0..200_000 {
+                let d = Vec3::new(rng.range(-1.0, 1.0), rng.range(-1.0, 1.0), rng.range(-1.0, 1.0));
+                if g.cell(d) != exact(d) {
+                    off += 1; // only f32 ties exactly on an edge may differ
+                }
+            }
+            assert!(off <= 2, "{off} of 200k dirs binned differently at n={n}");
         }
     }
 

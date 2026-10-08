@@ -293,7 +293,7 @@ fn pick_shot(
     }
     if last != Some(Kind::Overview) {
         let breathe = if n % 4 == 3 { 4.0 } else { 0.9 };
-        consider(breathe, Shot { kind: Kind::Overview, target: Target::Planet, dur: 18.0, age: 0.0, dist: 230.0, height: 0.0, spin: 0.06, phase: hash01(n, 6) * 6.28 }, &mut best);
+        consider(breathe, Shot { kind: Kind::Overview, target: Target::Planet, dur: 18.0, age: 0.0, dist: crate::sphere::PLANET_R * 2.875, height: 0.0, spin: 0.06, phase: hash01(n, 6) * 6.28 }, &mut best);
     }
     if let Some((_, shot)) = best {
         d.shot = Some(shot);

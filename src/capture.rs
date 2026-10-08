@@ -23,7 +23,7 @@ pub struct CaptureCfg {
     pub off: i64,     // --cap-off: raw sun-tick offset, overrides `when` when nonzero, dials sun angle
     pub pitch: f32,   // --cap-pitch: cam pitch. negative = look down
     pub orbit: bool,  // --cap-orbit: capture from orbit (space) not walk (surface)
-    pub dist: f32,    // --cap-dist: orbit distance from planet center (95..420). zoom test for eclipse-disc regression
+    pub dist: f32,    // --cap-dist: orbit: distance from planet center (floored above the peaks); orrery: distance from the orrery focus. zoom test for eclipse-disc regression
     pub underwater: bool, // --cap-water: submerge in deep ocean. verifies swim view + blue tint
     pub lat: Option<f32>, // --cap-lat: top-down orbit view at this latitude (deg, +90 = north pole, -90 = south)
     pub lon: Option<f32>, // --cap-lon: longitude for --cap-lat (deg); None = homeland meridian

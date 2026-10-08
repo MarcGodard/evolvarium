@@ -25,6 +25,7 @@ fn frame_probe(
     mut p: Local<Probe>,
     meshes: Query<(), With<Mesh3d>>,
     mats: Res<Assets<StandardMaterial>>,
+    kinds: Query<(Has<crate::components::Grass>, Has<crate::components::Seaweed>, Has<crate::components::Food>, Has<crate::components::Creature>)>,
 ) {
     if p.skip < 30 {
         p.skip += 1;
@@ -43,10 +44,19 @@ fn frame_probe(
     let mean = v.iter().sum::<f32>() / n as f32;
     let p95 = v[((n as f32 * 0.95) as usize).min(n - 1)];
     let worst = *v.last().unwrap_or(&0.0);
+    let mut k = [0usize; 4]; // grass, seaweed, other food/plants, creatures (roots only; their parts are extra meshes)
+    for (g, w, f, c) in &kinds {
+        let i = if g { 0 } else if w { 1 } else if f { 2 } else if c { 3 } else { continue };
+        k[i] += 1;
+    }
     info!(
-        "perf: frame mean {mean:.2} ms ({:.0} fps) p95 {p95:.2} worst {worst:.2} | mesh entities {} | materials {}",
+        "perf: frame mean {mean:.2} ms ({:.0} fps) p95 {p95:.2} worst {worst:.2} | mesh entities {} | materials {} | grass {} seaweed {} plants {} creatures {}",
         1000.0 / mean.max(1e-3),
         meshes.iter().count(),
-        mats.len()
+        mats.len(),
+        k[0],
+        k[1],
+        k[2],
+        k[3]
     );
 }

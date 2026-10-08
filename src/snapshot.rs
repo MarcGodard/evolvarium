@@ -86,7 +86,7 @@ pub fn snapshot_capture(
     let pole = Vec3::new(0.15, 1.0, 0.0).normalize();
     let views: [(&str, Cam); 4] = [
         ("globe", Cam { eye: home * (PLANET_R * 3.0), target: Vec3::ZERO, fov_deg: 36.0 }),
-        ("homeland", Cam { eye: home * (PLANET_R + 55.0), target: home * PLANET_R, fov_deg: 48.0 }),
+        ("homeland", Cam { eye: home * (PLANET_R + 55.0 * crate::sphere::WORLD_SCALE), target: home * PLANET_R, fov_deg: 48.0 }),
         ("farside", Cam { eye: -home * (PLANET_R * 3.0), target: Vec3::ZERO, fov_deg: 36.0 }),
         ("pole", Cam { eye: pole * (PLANET_R * 3.0), target: Vec3::ZERO, fov_deg: 36.0 }),
     ];

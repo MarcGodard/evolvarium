@@ -8,7 +8,16 @@
 use crate::terrain::HEIGHT_MAX;
 use bevy::prelude::*;
 
-pub const PLANET_R: f32 = 80.0; // radius (world units). Matches old WORLD_HALF so creature scale + costs carry over.
+/// Linear size vs the original 80 m worldlet. Planet is a MAGNIFIED copy: radius, terrain height, field-grid and
+/// crowd-grid resolution all scale together, so cell size in metres (every per-cell calibration: fire spread,
+/// crowding, deposits) and slopes stay as tuned. Area-bound caps scale by AREA_X.
+pub const WORLD_SCALE: f32 = 2.0;
+pub const AREA_X: usize = (WORLD_SCALE * WORLD_SCALE) as usize;
+pub const PLANET_R: f32 = 80.0 * WORLD_SCALE; // radius (world units = metres). Creature scale unchanged.
+/// Star shell + sky dome radii: absolute, NOT PLANET_R-scaled. Must stay inside the 12k camera far clip and far
+/// enough from the orrery parked at 30k that neither scene enters the other's clip.
+pub const SKY_SHELL_R: f32 = 6800.0;
+pub const SKY_DOME_R: f32 = 11200.0;
 pub const ELEV_MAX: f32 = HEIGHT_MAX; // max terrain elevation above sea sphere (reuses flat-world peak)
 pub const SEA_LEVEL: f32 = 0.41; // normalized elev (0..1) below this floods (ocean) -> ~50% sea
 pub const SEA_FLOOR_MAX: f32 = 9.0; // max ocean DEPTH below sea surface at abyssal center (world units)
@@ -26,7 +35,7 @@ pub const DESERT_FLORA_FLOOR: f32 = 0.12;
 // --- celestial bodies (Earth proportions, distances stylized down to stay visible) ---
 pub const MOON_R: f32 = 0.27 * PLANET_R; // moon ~1/4 planet radius (Earth: 0.273)
 pub const MOON_ORBIT: f32 = 6.0 * PLANET_R; // orbit radius (Earth ~60 R; compressed so framed)
-pub const SUN_DIST: f32 = 60.0 * PLANET_R; // sun far (directional light); billboard sized to match moon angular size
+pub const SUN_DIST: f32 = 4800.0; // absolute (was 60 R at R=80): must stay inside SKY_SHELL_R or stars draw over the sun. Billboard sized to match moon angular size
 pub const SUN_R: f32 = SUN_DIST / MOON_ORBIT * MOON_R; // billboard radius -> same on-sky size as moon
 pub const DAY_TICKS: u32 = 2400; // ticks per planet rotation (one day). Same cadence as old flat day.
 // Period of the BIOLOGICAL wet/dry season, decoupled from the astronomical year (sky keeps the true Tychos

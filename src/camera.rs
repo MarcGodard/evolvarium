@@ -101,8 +101,8 @@ pub struct WalkCam {
     pub eye_alt: f32, // eye height above terrain at `dir`; WALK_EYE on land, swim-controlled in water
 }
 
-const MIN_DIST: f32 = 95.0; // just above surface (planet radius ~80 + terrain)
-const MAX_DIST: f32 = 420.0;
+const MIN_DIST: f32 = crate::sphere::PLANET_R + crate::sphere::ELEV_MAX + 3.0; // just above the peaks
+const MAX_DIST: f32 = crate::sphere::PLANET_R * 5.25;
 pub const WALK_EYE: f32 = 2.5; // eye height above terrain surface (rides elevation)
 const WALK_SPEED: f32 = 14.0; // units/sec; Shift runs
 const WALK_TURN: f32 = 1.6; // keyboard look speed (rad/sec)
@@ -129,7 +129,7 @@ fn spawn_camera(mut commands: Commands) {
         Projection::from(PerspectiveProjection { far: 12000.0, ..default() }),
         // soft ambient (per-camera in 0.18) so night side not pitch black
         AmbientLight { brightness: 220.0, ..default() },
-        OrbitCam { yaw: lon, pitch: lat.clamp(-1.3, 1.3), dist: 230.0 },
+        OrbitCam { yaw: lon, pitch: lat.clamp(-1.3, 1.3), dist: crate::sphere::PLANET_R * 2.875 },
         OrreryCam { yaw: 0.6, pitch: 0.5, dist: 1500.0 }, // framed on the inner system (Sun..Jupiter)
         WalkCam { dir: hl.normalize_or_zero(), yaw: 0.0, pitch: 0.0, eye_alt: WALK_EYE },
         // shadow softness: swapped per mode in update_shadow_mode (orbit = soft Gaussian, walk = crisp)
@@ -217,8 +217,8 @@ fn orbit_keys(mode: Res<CameraMode>, keys: Res<ButtonInput<KeyCode>>, time: Res<
     if keys.pressed(KeyCode::KeyD) { cam.yaw -= 0.8 * dt * boost; }
     if keys.pressed(KeyCode::KeyQ) { cam.pitch = (cam.pitch + 0.8 * dt * boost).clamp(-1.45, 1.45); }
     if keys.pressed(KeyCode::KeyE) { cam.pitch = (cam.pitch - 0.8 * dt * boost).clamp(-1.45, 1.45); }
-    if keys.pressed(KeyCode::KeyW) { cam.dist = (cam.dist - 60.0 * dt * boost).clamp(MIN_DIST, MAX_DIST); }
-    if keys.pressed(KeyCode::KeyS) { cam.dist = (cam.dist + 60.0 * dt * boost).clamp(MIN_DIST, MAX_DIST); }
+    if keys.pressed(KeyCode::KeyW) { cam.dist = (cam.dist - 60.0 * crate::sphere::WORLD_SCALE * dt * boost).clamp(MIN_DIST, MAX_DIST); }
+    if keys.pressed(KeyCode::KeyS) { cam.dist = (cam.dist + 60.0 * crate::sphere::WORLD_SCALE * dt * boost).clamp(MIN_DIST, MAX_DIST); }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -235,7 +235,7 @@ fn zoom(
         return;
     }
     let Ok(mut cam) = q.single_mut() else { return };
-    let new = cam.dist - scroll.delta.y * 12.0;
+    let new = cam.dist - scroll.delta.y * 12.0 * crate::sphere::WORLD_SCALE;
     if new < MIN_DIST {
         // zoom IN past the closest orbit -> drop onto the surface under the camera (WALK; no zoom there).
         let dir = Vec3::new(cam.pitch.cos() * cam.yaw.cos(), cam.pitch.sin(), cam.pitch.cos() * cam.yaw.sin());
@@ -478,7 +478,7 @@ fn update_shadow_cascade(
             overlap_proportion: 0.2,
         }
     } else {
-        let dist = orbit.single().map(|o| o.dist).unwrap_or(230.0);
+        let dist = orbit.single().map(|o| o.dist).unwrap_or(crate::sphere::PLANET_R * 2.875);
         let r = crate::sphere::PLANET_R;
         let near = (dist - r - 30.0).max(0.5); // shadows start just in front of near surface
         let far = dist + r + 20.0; // reach far edge of visible near hemisphere
