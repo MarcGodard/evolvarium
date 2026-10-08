@@ -104,7 +104,8 @@ live in `config.rs`; the live conversion plan is `SPHERE-PLAN.md`.
       `SICK_SENSE_R`, so avoidance can evolve alongside immunity. Old nets migrate (inputs padded before bias).
       A/B (seeds 1/2/5/9, 20 gens, stopped at 88-100% of ticks): last pop A 5654/3828/5680/6381, B 6954/8599/6038/6290.
 - [ ] Infectious fresh corpses (carrion spillover exists, corpse-to-scavenger contact does not).
-- [ ] Sick creatures are not drawn differently yet (viz tint/pallor).
+- [x] Sick creatures fade toward a sallow pallor in 3 steps above the 0.1 sick line (body only; eyes/ears/wings keep
+      their colour). `SOCIAL_SAFETY` is a `--set` knob for the herd-safety A/B.
 - [x] **GRAZE_CROWD_K deleted** (tools/ab.sh, seeds 1/2/5/9, 20 gens): pop 5171 -> 4392 mean, inside the
       3495..6612 per-seed spread; cover 0.123 -> 0.084 kg/m^2 on every seed, i.e. the real sward now does the
       limiting the penalty used to fake. Also drops a per-tick crowd-grid tally.
@@ -295,7 +296,9 @@ pholmq/TSN (GPL-2.0) @ commit 49fd49c (pinned in `orrery.rs` + `stars.rs` commen
       at the `[~] Armor` entry below. Avoiding death outweighs any marginal energy cost, so a defense gene
       pegs high regardless of price. What DOES work: fix the reinforcement that rewards it (defect 3) or the
       magnitude it grants (defect 4).
-- [ ] **Carnivory still 0.02-0.03: the world has no SIZE ASYMMETRY.** With predator and prey drawn from one
+- [x] **SUPERSEDED 2026-10-08: size structure exists now.** 20-gen runs at 4k-7k pop show carn 0.13-0.27, mass p10..p90
+      0.4..3.7 kg (4-9x), mass edge 0.7-1.1 via `SIZE_COMBAT` log mass ratio. Herd-safety follow-up below.
+      Original diagnosis: **Carnivory still 0.02-0.03: the world has no SIZE ASYMMETRY.** With predator and prey drawn from one
       population the mean matchup is a fair fight against an equal, so adv stays negative by exactly the
       prey's armour + brace. `PREDATION_BIAS` 2.2 caps even a perfectly fair fight at sigmoid(-2.2) ~= 0.10,
       and `kin` sits pegged at 0.95 so `SOCIAL_SAFETY` halves whatever survives that. Making fair fights
@@ -759,7 +762,8 @@ the recovery only shows past ~20 gens.
 ### Perf findings (2026-06-23 session) — for future tuning
 - [x] Headless skips render-only grass + seaweed (`gen.headless` early-return in grass_step/seaweed_step):
       ~1.37x faster headless tick (5785->4223 us @ pop 1100). Windowed/capture/shots keep the carpets.
-- [ ] **Creature spatial grid: NOT worth it at ~1100** (tried + reverted). The O(n^2) social/threat/collision
+- [x] **SUPERSEDED 2026-10-07: creature scans are binned now** (CSR `bin_csr`/`near_sorted`, 4k+ creatures). Old note:
+      **Creature spatial grid: NOT worth it at ~1100** (tried + reverted). The O(n^2) social/threat/collision
       scans are already parallel, so at 16 cores they're only ~225 us -- the grid's per-tick build + per-creature
       candidate-gather overhead exceeded the saving (tick got SLOWER). Revisit ONLY at ~10k+ creatures where
       O(n^2) re-dominates. Don't re-attempt below that without a profile showing the scans dominate.
@@ -768,7 +772,8 @@ the recovery only shows past ~20 gens.
       STATIC per-tuft field samples (base_temperature/moisture/rockiness/elevation are position-only -> compute
       once at spawn, store on the tuft; re-sample only the dynamic groundwater/fire/daylight/soil) for a
       behavior-preserving ~30% grass cut. Lower priority given the headless skip + render-bound windowed.
-- [ ] **live_step now dominates the tick at 1100** (~2300 us, top system). Cost is per-creature food-sensing +
+- [x] **SUPERSEDED 2026-10-07: live 23 -> 8 ms at ~4400** (binned scans, cached genome reads). Old note:
+      **live_step now dominates the tick at 1100** (~2300 us, top system). Cost is per-creature food-sensing +
       brain forward()/learn(), all O(n) + already parallel. Next real lever would be cheaper brains (the evolved
       nets grew ~2x -> bird seed is 12MB); a soft brain-size cost/cap could trim both perf + seed size, but it's
       balance-sensitive (changes what evolves) -> needs the multi-seed equivalence fan-out before committing.

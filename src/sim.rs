@@ -2923,7 +2923,7 @@ pub fn meat_gut_of(carnivory: f32) -> f32 {
 /// matchup is negative by exactly the prey's armour + brace, which IS the anti-cannibalism guard: equals
 /// sit near sigmoid(-8) without any extra penalty being imposed on top.
 pub fn predation_success(adv: f32, prey_kin: f32, prey_climb: f32) -> f32 {
-    sigmoid(BITE_K * adv) * (1.0 - SOCIAL_SAFETY * prey_kin) * (1.0 - CLIMB_EVADE * prey_climb)
+    sigmoid(BITE_K * adv) * (1.0 - SOCIAL_SAFETY.get() * prey_kin) * (1.0 - CLIMB_EVADE * prey_climb)
 }
 
 pub fn predation_step(

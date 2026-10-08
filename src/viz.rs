@@ -742,7 +742,7 @@ fn add_creature_visuals(
         let (color, _) = creature_look(g);
         tf.scale = Vec3::splat(body_scale(g));
         let Some(body_mesh) = cache.get_or_queue(g) else { continue };
-        commands.entity(e).insert((Mesh3d(body_mesh), MeshMaterial3d(mat_cache.get(&mut materials, color, matv::PLAIN))));
+        commands.entity(e).insert((Mesh3d(body_mesh), MeshMaterial3d(mat_cache.get(&mut materials, color, matv::PLAIN)), SickShade(0)));
         spawn_eyes(&mut commands, &mut mat_cache, e, g, &parts.eye, &mut materials);
         spawn_ears(&mut commands, &mut mat_cache, e, g, &parts.ear, &mut materials); // all creatures, sized by hearing gene
         spawn_wings(&mut commands, &mut mat_cache, e, g, &parts.wing, &mut materials); // fliers only (gene + wing loading)
@@ -2755,16 +2755,36 @@ fn log_viz_help() {
 // that frame. Changed<Genome> fires for the whole population at startup, which is why it read as every
 // animal's size jumping around for the first moments after launch.
 // Body materials are SHARED via MatCache (bodies batch): swap the handle, never mutate the material.
+// Sickness tint rides the same path: infection quantized to 4 steps (0 below the metrics' 0.1 "sick" line) so
+// only a step change swaps the handle and the cache gains at most 3 pallid copies per skin colour. SickShade is
+// inserted with the body mesh, never later: a mid-life archetype move reorders sim queries (generation reset
+// zips cq.iter_mut() with the children), making windowed runs of one seed diverge by frame timing.
+#[derive(Component)]
+struct SickShade(u8);
+
+fn sick_step(infection: f32) -> u8 {
+    if infection < 0.1 { 0 } else { 1 + ((infection - 0.1) / 0.3).min(2.0) as u8 }
+}
+
 fn restyle_creatures(
     mut mats: ResMut<Assets<StandardMaterial>>,
     mut cache: ResMut<MatCache>,
-    mut q: Query<(&Genome, &mut MeshMaterial3d<StandardMaterial>), Changed<Genome>>,
+    mut q: Query<(Ref<Genome>, &DietState, &Alive, &mut SickShade, &mut MeshMaterial3d<StandardMaterial>)>,
 ) {
-    for (g, mut mm) in &mut q {
-        let (color, _) = creature_look(g); // skin_hue/sat, venom warning, fur/armor tint (multiplies vertex colors)
+    for (g, diet, alive, mut shade, mut mm) in &mut q {
+        let step = if alive.0 { sick_step(diet.infection) } else { 0 };
+        if !g.is_changed() && step == shade.0 {
+            continue;
+        }
+        let (color, _) = creature_look(&g); // skin_hue/sat, venom warning, fur/armor tint (multiplies vertex colors)
+        // pallor: wash toward sallow grey-green, ~0.2 per step (0.6 at full load still shows the skin hue)
+        let color = Color::from(color.to_srgba().mix(&Srgba::rgb(0.66, 0.68, 0.50), 0.2 * step as f32)); // sRGB, not HSL: no hue sweep
         let h = cache.get(&mut mats, color, matv::PLAIN);
         if mm.0 != h {
             mm.0 = h;
+        }
+        if shade.0 != step {
+            shade.0 = step;
         }
     }
 }

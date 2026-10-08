@@ -216,7 +216,7 @@ pub const SOCIAL_RADIUS: f32 = 13.0; // distance kin count as company (wide: eas
 pub const SOCIAL_SIM: f32 = 0.7; // max signature distance to count as KIN (smaller = stricter species)
 pub const SOCIAL_TARGET: f32 = 2.0; // just 2 kin nearby satisfies (avoids Allee death-spiral at low density)
 pub const SOCIAL_COST: f32 = 0.6; // energy/sec loneliness drain at full social gene + full isolation. MILD: flavor pressure + herd benefit, NOT pop killer (strong drain spirals spread-out pop to extinction).
-pub const SOCIAL_SAFETY: f32 = 0.5; // max predation-success reduction for prey surrounded by kin (herd safety). Softened from 0.7 so active defense (brace) competes with passive herd-hiding.
+pub static SOCIAL_SAFETY: crate::tune::Knob = crate::tune::Knob::new("SOCIAL_SAFETY", 0.5); // max predation-success reduction for prey surrounded by kin (herd safety). Softened from 0.7 so active defense (brace) competes with passive herd-hiding.
 // Body collision (M4): creatures solid, don't pass through each other. Two bodies whose collision radii
 // overlap get soft tangential SHOVE apart (no hard stacking) + pay jostle energy cost scaled by
 // penetration depth. SOCIAL creatures crowd-tolerant (herd animals pack tight) so cost is x(1-social):

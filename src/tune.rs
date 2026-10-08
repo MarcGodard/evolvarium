@@ -24,7 +24,7 @@ impl Knob {
 use crate::config as c;
 pub static ALL: &[&Knob] = &[
     &c::MUT_RATE, &c::MUT_STD, &c::REPRO_THRESHOLD, &c::REPRO_COST, &c::BIRTH_ENERGY, &c::BASAL_COST, &c::CARPET_GRAZE,
-    &c::ATTACK_COST, &c::SIZE_COMBAT, &c::ARMOR_DEF, &c::BRACE_DEF, &c::DISEASE_K, &c::AGE_HAZARD, &c::THREAT_MARGIN, &c::INFECT_BETA, &c::INFECT_SPILL,
+    &c::ATTACK_COST, &c::SIZE_COMBAT, &c::ARMOR_DEF, &c::BRACE_DEF, &c::DISEASE_K, &c::AGE_HAZARD, &c::THREAT_MARGIN, &c::INFECT_BETA, &c::INFECT_SPILL, &c::SOCIAL_SAFETY,
 ];
 
 /// Apply one `NAME=VALUE`. Err names every knob so a typo is caught, not ignored.
