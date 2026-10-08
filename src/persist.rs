@@ -56,6 +56,8 @@ pub struct SavedCreature {
     pub fatigue: f32,
     pub starve: u16,
     pub toxic_load: f32,
+    #[serde(default)]
+    pub infection: f32,
 }
 
 // One plant-class entity (living plant, tree, carrion, ferment, fallen fruit). Grass + seaweed carpets are

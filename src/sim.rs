@@ -163,6 +163,7 @@ pub fn world_metrics<'a>(
     drift: crate::chem::Elements, // ledger drift, ppm (same accounting as the gen log line)
 ) -> serde_json::Value {
     let (mut n, mut carn, mut bld, mut tool, mut size, mut endo, mut flight, mut swim) = (0.0f64, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    let mut imm = 0.0f64;
     for (g, b) in creatures {
         n += 1.0;
         carn += g.carnivory as f64;
@@ -172,6 +173,7 @@ pub fn world_metrics<'a>(
         endo += g.endothermy as f64;
         flight += g.flight as f64;
         swim += g.swim as f64;
+        imm += g.immunity as f64;
     }
     let m = |x: f64| if n > 0.0 { x / n } else { 0.0 };
     let area = 4.0 * std::f64::consts::PI * (crate::sphere::PLANET_R as f64).powi(2);
@@ -180,7 +182,7 @@ pub fn world_metrics<'a>(
     let clim = fields.pclim.as_deref();
     serde_json::json!({
         "creatures": n,
-        "mean": { "carnivory": m(carn), "builder": m(bld), "tool": m(tool), "size": m(size), "endothermy": m(endo), "flight": m(flight), "swim": m(swim) },
+        "mean": { "carnivory": m(carn), "builder": m(bld), "tool": m(tool), "size": m(size), "endothermy": m(endo), "flight": m(flight), "swim": m(swim), "immunity": m(imm) },
         "flora_kg_m2": flora_kg / area,
         "cover_kg_m2": (0..fields.bio.soil.len()).map(|c| fields.bio.cover_kg(c)).sum::<f64>() / area,
         "building": { "nest_kg": nest_kg, "dam_cells": fields.earth.built_cells(0.1), "wet_dam_frac": fields.wet_dam_frac() },
@@ -948,7 +950,7 @@ pub(crate) fn loaded_creature_pos(g: &Genome, rng: &mut Rng) -> Vec3 {
 
 fn diet_state(_g: &Genome) -> DietState {
     // newborns start with reserves stocked to satisfaction (RESERVE_REQ) -> not instantly deficient
-    DietState { reserves: [RESERVE_REQ; NUTRIENTS], g: 0.0, age: 0, fatigue: 0.0, starve: 0, toxic_load: 0.0 }
+    DietState { reserves: [RESERVE_REQ; NUTRIENTS], g: 0.0, age: 0, fatigue: 0.0, starve: 0, toxic_load: 0.0, infection: 0.0 }
 }
 
 // Eat plant matter: absorb each nutrient into reserves (delivered = plant baseline x soil fertility, gated by
@@ -1401,6 +1403,7 @@ pub(crate) fn saved_creature(
         fatigue: diet.fatigue,
         starve: diet.starve,
         toxic_load: diet.toxic_load,
+        infection: diet.infection,
     }
 }
 
@@ -1496,7 +1499,7 @@ pub fn restore_full_world(
         for (i, r) in c.reserves.iter().take(NUTRIENTS).enumerate() {
             reserves[i] = *r;
         }
-        let diet = DietState { reserves, g: c.diet_g, age: c.age, fatigue: c.fatigue, starve: c.starve, toxic_load: c.toxic_load };
+        let diet = DietState { reserves, g: c.diet_g, age: c.age, fatigue: c.fatigue, starve: c.starve, toxic_load: c.toxic_load, infection: c.infection };
         commands.spawn((
             Creature,
             g,
@@ -3289,6 +3292,8 @@ pub fn live_step(
             (e, t.translation, signature(g), kg.max(1e-6).ln(), body_radius(g))
         })
         .collect();
+    // infection load per cre_snap entry (same alive filter, same order): collision contacts read it to transmit
+    let cre_inf: Vec<f32> = cq.iter().filter(|(_, _, _, _, _, a, ..)| a.0).map(|(_, _, _, _, _, _, _, _, d, _)| d.infection).collect();
     // voice snapshot for the hearing sense: (entity, pos, emit_pitch=1-size, loudness=last-tick call). Emission
     // is computed INSIDE the parallel loop below, so listeners read LAST tick's call from Brain.voice (1-tick
     // delay, same pattern as prev_dist). Only actual callers (voice>0) -> cheap scan.
@@ -3763,15 +3768,20 @@ pub fn live_step(
         let my_r = body_radius(genome);
         let mut push = Vec3::ZERO;
         let mut overlap_sum = 0.0f32;
+        let mut contact_load = 0.0f32; // summed infection of bodies touching this one (disease transmission)
         let mut near = Vec::new();
         near_sorted(&cstart, &cidx, np, my_r + max_body_r, &mut near);
-        for (e2, p2, _, _, r2) in near.iter().map(|&i| &cre_snap[i]) {
+        for &ni in &near {
+            let (e2, p2, _, _, r2) = &cre_snap[ni];
             if *e2 == entity {
                 continue;
             }
             let to = np - *p2;
             let d2 = to.length_squared();
             let rr = my_r + *r2;
+            if d2 < rr * rr {
+                contact_load += cre_inf[ni];
+            }
             if d2 < rr * rr && d2 > 1e-6 {
                 let d = d2.sqrt();
                 let depth = rr - d;
@@ -4068,6 +4078,9 @@ pub fn live_step(
                         }
                         // rot toxin + unconvertible-protein ammonia -> accumulating toxic load
                         diet.toxic_load = (diet.toxic_load + toxin * TOX_LOAD_GAIN + protein_wasted * PROTEIN_TOX).min(TOX_LOAD_CAP);
+                        // spillover: a rotting carcass is the pathogen reservoir, so scavenging carries real risk. Scales
+                        // with ROT only: a fresh corpse of a sick creature is not infectious (load is not carried over)
+                        diet.infection = (diet.infection + INFECT_SPILL.get() * f * (1.0 - genome.immunity)).min(1.0);
                         eat_reward = freshness * 2.0 - 1.0; // fresh -> +1 (good), rotten -> -1 (avoid)
                     } else {
                         // regular plant: strip a fraction set by `regrow`: carrot (~whole) vs berry bush (small
@@ -4202,6 +4215,10 @@ pub fn live_step(
             }
             diet.g = (diet.g - G_DECAY).max(0.0);
         }
+        // contagious disease (constants block in config.rs): transmission from touching bodies, logistic
+        // replication, immune clearance. Immunity upkeep is paid every tick, sick or not: that is its cost.
+        diet.infection = infection_step(diet.infection, genome.immunity, contact_load, dt);
+        energy.burn((INFECT_DRAIN * diet.infection + IMMUNE_UPKEEP * genome.immunity) * dt);
         // toxic load: clear slowly each tick (faster with detox gene). While loaded drains energy + raises disease
         // load; acute death hazard added in the mortality block. Runs in ALL modes so meat/ferment poisons bite
         // even in legacy --no-diet runs.
@@ -4219,7 +4236,7 @@ pub fn live_step(
             // cohort. Turnover keeps gene pool flowing (old die, young replace) -> a true life cycle.
             let age_frac = diet.age as f32 / (AGE_SCALE * lifespan_mult); // longevity gene stretches lifespan
             let aging = AGE_HAZARD.get() * (age_frac / (age_frac + 1.0));
-            let p_death = (aging + DISEASE_K.get() * diet.g + TOX_LOAD_HAZARD * diet.toxic_load) * dt;
+            let p_death = (aging + DISEASE_K.get() * diet.g + TOX_LOAD_HAZARD * diet.toxic_load + INFECT_HAZARD * diet.infection) * dt;
             if prng.f32() < p_death {
                 alive.0 = false; // old-age / disease / poisoning death
             }
@@ -4507,6 +4524,13 @@ fn fat_cap(g: &Genome, body_kg: f64) -> f32 {
     FAT_CAP * (0.4 + ADIPOSITY_CAP * g.adiposity) * mass_frac
 }
 
+/// One tick of infection load (config.rs disease block): contact transmission + logistic replication - clearance.
+pub(crate) fn infection_step(l: f32, immunity: f32, contact_load: f32, dt: f32) -> f32 {
+    let open = 1.0 - immunity;
+    let dl = INFECT_BETA.get() * open * contact_load + INFECT_GROW * open * l * (1.0 - l) - (INFECT_CLEAR_BASE + INFECT_CLEAR * immunity) * l;
+    (l + dl * dt).clamp(0.0, 1.0)
+}
+
 // Collision body radius (~visual half-width): build factor (sensor count + size) x COLLIDE_R. Matches rendered
 // girth so bodies stop just shy of visible overlap. Shared by snapshot + move loop.
 fn body_radius(g: &Genome) -> f32 {
@@ -4660,7 +4684,10 @@ pub fn generation_step(
             // well the success formula behaves. This is the number that says whether a food web has
             // structure or just an average.
             let mut masses: Vec<f32> = Vec::with_capacity(pop);
+            let (mut sick, mut imm_sum) = (0u32, 0.0f32); // disease prevalence (load > 0.1) + mean immunity
             for (t, en, fit, _h, _a, g, b, diet, l) in cq.iter() {
+                sick += (diet.infection > 0.1) as u32;
+                imm_sum += g.immunity;
                 if diet.age > 200 {
                     masses.push(crate::chem::creature_mass_kg(
                         g.morph.map(|m| m.mass).unwrap_or_else(|| crate::morph::Morphometrics::of(&g.body).mass),
@@ -4759,7 +4786,8 @@ pub fn generation_step(
                     living_flora
                         + crate::chem::ANIMAL_COMP * cont_fauna_kg,
                     cont_fauna_kg,
-                ) + &fields.climate_line() + &fields.build_line(Some((bld / n, tool / n))),
+                ) + &fields.climate_line() + &fields.build_line(Some((bld / n, tool / n)))
+                    + &format!(" | SICK {:.1}% imm {:.2}", 100.0 * sick as f32 / pop.max(1) as f32, imm_sum / pop.max(1) as f32),
                 fields.bio.p_breakdown()
             );
             // Track best healthy snapshot for --save. Score = pop, gated on well-fed (avg energy >= 30) so we never
@@ -4945,6 +4973,7 @@ pub fn generation_step(
         diet.g = 0.0;
         diet.age = if desync { (rng.f32() * 600.0) as u32 } else { 0 };
         diet.fatigue = 0.0;
+        diet.infection = 0.0; // a fresh life starts healthy
         // the reset rewrites the body in place with no birth to fund it. A survivor's body just changes mass; a
         // DEAD entity's old body already left as carrion (live_step), so its revival is a whole new body.
         let body_kg = |g: &Genome| crate::chem::creature_mass_kg(g.morph.map(|m| m.mass).unwrap_or_else(|| crate::morph::Morphometrics::of(&g.body).mass));
@@ -5002,6 +5031,21 @@ fn wrap_angle(a: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn infection_is_endemic_without_immunity_and_cleared_with_it() {
+        let run = |imm: f32, contact: f32| {
+            let mut l = 0.05;
+            for _ in 0..200_000 {
+                l = super::infection_step(l, imm, contact, crate::config::DT);
+            }
+            l
+        };
+        assert!(run(0.0, 0.0) > 0.5, "no immunity: replication must outpace base clearance (endemic)");
+        assert!(run(0.5, 0.0) < 1e-3, "mid immunity must clear an isolated infection");
+        assert!(run(0.5, 0.5) > run(0.5, 0.0), "touching infected bodies must raise the load");
+        assert!(run(1.0, 1.0) < 1e-6, "full immunity: transmission term vanishes, clearance wins");
+    }
 
     // An omnivore must be a VIABLE intermediate, not a creature that is bad at both. A linear tradeoff makes
     // the midpoint strictly worse than either end at its own job, which is a fitness valley evolution cannot

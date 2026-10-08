@@ -518,6 +518,21 @@ pub const TOX_CLEAR_DETOX: f32 = 0.6;    // extra load cleared/sec at full detox
 pub const TOX_LOAD_DRAIN: f32 = 0.25;    // energy/sec drained per unit toxic load (feeling sick)
 pub const TOX_LOAD_G: f32 = 0.02;        // growth-load (disease) accrued/sec per unit toxic load
 pub const TOX_LOAD_HAZARD: f32 = 0.0008; // death/sec per unit toxic load (acute poisoning)
+
+// --- contagious disease (sim live_step). Load 0..1 per creature. dL/dt = transmission + replication - clearance:
+//   transmission = INFECT_BETA * (1 - immunity) * summed load of bodies TOUCHING this one (collision contacts)
+//   replication  = INFECT_GROW * (1 - immunity) * L * (1 - L)   (logistic within-host growth)
+//   clearance    = (INFECT_CLEAR_BASE + INFECT_CLEAR * immunity) * L
+// Endemic at zero immunity (GROW > CLEAR_BASE), cleared above immunity ~0.25: the gene buys recovery, paid in
+// IMMUNE_UPKEEP whether sick or not. Density-dependent by construction (contacts), so it regulates crowds.
+pub static INFECT_BETA: crate::tune::Knob = crate::tune::Knob::new("INFECT_BETA", 0.6);
+pub const INFECT_GROW: f32 = 0.05;
+pub const INFECT_CLEAR_BASE: f32 = 0.01;
+pub const INFECT_CLEAR: f32 = 0.12;
+pub static INFECT_SPILL: crate::tune::Knob = crate::tune::Knob::new("INFECT_SPILL", 0.25); // 0 = no disease ever seeds. Load caught from one bite of fully rotten carrion (spillover reservoir)
+pub const INFECT_DRAIN: f32 = 0.5;  // energy/sec at full load (fever); BASAL_COST is 0.5
+pub const INFECT_HAZARD: f32 = 0.003; // death/sec at full load
+pub const IMMUNE_UPKEEP: f32 = 0.08; // energy/sec at full immunity, every tick
 // rabbit starvation: carcass usable ENERGY is its FAT (carried per-carcass = prey fatness at death). LEAN
 // meat mostly PROTEIN, converting protein to usable energy/fat needs CARBS (eater's sugar). So eating lean
 // prey with no carbs yields little energy AND dumps unconvertible protein as toxic load (ammonia) ->

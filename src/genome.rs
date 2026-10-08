@@ -127,6 +127,8 @@ pub struct Genome {
     pub venom: f32,          // 0..1 toxic flesh: predator eating it takes toxic_load hit (deterrent); costs basal + aposematic look. Default 0.
     #[serde(default = "d40")]
     pub limbs: f32,          // 0..1 -> 2..8 legs: more = land traction (speed/stability on rough ground); costs move energy per limb. Default 0.4 (~4 legs).
+    #[serde(default = "d30")]
+    pub immunity: f32,       // 0..1 immune investment: resists catching an infection + clears it faster (sim disease block). Costs IMMUNE_UPKEEP energy every tick, sick or not. Default 0.3 (loaded seeds keep a baseline defence).
     #[serde(default = "zero")]
     pub builder: f32,        // 0..1 construction skill: kg/s woven or heaped when the brain fires OUT_BUILD/OUT_DIG (build.rs). Costs BUILDER_UPKEEP (manipulative + cognitive machinery) every tick, built or not. Default 0 = cannot build.
     #[serde(default = "zero")]
@@ -371,6 +373,7 @@ impl Genome {
             limbs: rng.f32(),         // span few..many limbs
             climb: rng.f32() * 0.4,   // mostly ground-dwellers, few climbers
             builder: if rng.f32() < 0.3 { rng.f32() * 0.5 } else { 0.0 }, // ~30% founders carry some skill to select on
+            immunity: rng.f32() * 0.6, // span cheap-and-vulnerable .. well-defended
             eyes: rng.f32(),          // span eye counts
             head: rng.range(0.3, 0.7),// mid heads (brain housing)
             skin_hue: rng.f32(),      // span color wheel
@@ -590,6 +593,7 @@ impl Genome {
         c.limbs = pick(rng, a.limbs, b.limbs);
         c.climb = pick(rng, a.climb, b.climb);
         c.builder = pick(rng, a.builder, b.builder);
+        c.immunity = pick(rng, a.immunity, b.immunity);
         c.eyes = pick(rng, a.eyes, b.eyes);
         c.head = pick(rng, a.head, b.head);
         c.skin_hue = pick(rng, a.skin_hue, b.skin_hue);
@@ -717,6 +721,9 @@ impl Genome {
         }
         if rng.f32() < rate {
             self.builder = (self.builder + rng.normal() * 0.12).clamp(0.0, 1.0);
+        }
+        if rng.f32() < rate {
+            self.immunity = (self.immunity + rng.normal() * 0.12).clamp(0.0, 1.0);
         }
         if rng.f32() < rate {
             self.eyes = (self.eyes + rng.normal() * 0.12).clamp(0.0, 1.0);

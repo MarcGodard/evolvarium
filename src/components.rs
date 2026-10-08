@@ -214,6 +214,9 @@ pub struct DietState {
     // hit. Drains energy + drives disease + death hazard while high; cleared slow each tick (faster w/ detox
     // gene). Poisons accumulate + linger like real toxic load.
     pub toxic_load: f32,
+    // contagious INFECTION load 0..INFECT_CAP: caught by body contact with infected neighbours and by eating
+    // rotten carrion, replicates in the host, cleared by the `immunity` gene. Drains energy + raises death hazard.
+    pub infection: f32,
 }
 
 #[cfg(test)]
