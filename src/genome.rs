@@ -146,7 +146,7 @@ pub struct Genome {
     #[serde(default = "d40")]
     pub skin_hue: f32,       // 0..1 base body hue (render). Default 0.4.
     #[serde(default = "half")]
-    pub skin_sat: f32,       // 0..1 body saturation (render). Default 0.5.
+    pub skin_sat: f32,       // 0..1 skin vividness: mate display dulled by infection, costs DISPLAY_UPKEEP; low = sickness hidden from neighbours. Default 0.5.
     #[serde(default = "zero")]
     pub pattern: f32,        // 0..1 markings intensity: stripes/spots (render). Default 0.
     // Body-plan render genes (cosmetic, NO sim/balance effect): drive silhouette variety so creatures read

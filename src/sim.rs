@@ -3293,7 +3293,9 @@ pub fn live_step(
         })
         .collect();
     // infection load per cre_snap entry (same alive filter, same order): collision contacts read it to transmit
-    let cre_inf: Vec<f32> = cq.iter().filter(|(_, _, _, _, _, a, ..)| a.0).map(|(_, _, _, _, _, _, _, _, d, _)| d.infection).collect();
+    // cre_seen = what others SEE of it: skin vividness is the display sickness dulls, so a plain creature hides its load
+    let (cre_inf, cre_seen): (Vec<f32>, Vec<f32>) =
+        cq.iter().filter(|(_, _, _, _, _, a, ..)| a.0).map(|(_, _, _, _, _, _, g, _, d, _)| (d.infection, d.infection * g.skin_sat)).unzip();
     // voice snapshot for the hearing sense: (entity, pos, emit_pitch=1-size, loudness=last-tick call). Emission
     // is computed INSIDE the parallel loop below, so listeners read LAST tick's call from Brain.voice (1-tick
     // delay, same pattern as prev_dist). Only actual callers (voice>0) -> cheap scan.
@@ -3328,8 +3330,9 @@ pub fn live_step(
     }
     // mating mode: pool of (entity, pos, signature, genome) so a breeding creature finds a nearby
     // genetically-similar MATE to cross. Same creatures + order as cre_snap (alive only); genomes borrowed.
-    let mate_pool: Vec<(Entity, Vec3, [f32; 10], &Genome)> = if gen.mating {
-        cre_snap.iter().filter_map(|&(e, p, sig, _, _)| mq.get(e).ok().map(|g| (e, p, sig, g))).collect()
+    // Last field = display a chooser sees: skin vividness dulled by infection (honest signal, Hamilton-Zuk).
+    let mate_pool: Vec<(Entity, Vec3, [f32; 10], &Genome, f32)> = if gen.mating {
+        cre_snap.iter().zip(&cre_inf).filter_map(|(&(e, p, sig, _, _), &inf)| mq.get(e).ok().map(|g| (e, p, sig, g, g.skin_sat * (1.0 - inf)))).collect()
     } else {
         Vec::new()
     };
@@ -3475,7 +3478,7 @@ pub fn live_step(
         // threat/prey only count inside THREAT_RADIUS (see below), so only those bins are scanned
         let mut near = Vec::new();
         near_sorted(&cstart, &cidx, pos, THREAT_RADIUS, &mut near);
-        let mut sick_acc = 0.0f32; // nearby sickness brain input: load x (1 - d/SICK_SENSE_R) within SICK_SENSE_R
+        let mut sick_acc = 0.0f32; // nearby VISIBLE sickness (cre_seen) x (1 - d/SICK_SENSE_R) within SICK_SENSE_R
         for &ni in &near {
             let (e2, p2, _, c2, _) = &cre_snap[ni];
             if *e2 == entity {
@@ -3483,7 +3486,7 @@ pub fn live_step(
             }
             let d2 = pos.distance_squared(*p2);
             if d2 < SICK_SENSE_R * SICK_SENSE_R {
-                sick_acc += cre_inf[ni] * (1.0 - d2.sqrt() / SICK_SENSE_R);
+                sick_acc += cre_seen[ni] * (1.0 - d2.sqrt() / SICK_SENSE_R);
             }
             if *c2 > my_combat + THREAT_MARGIN.get() {
                 if d2 < threat_d2 {
@@ -4229,7 +4232,7 @@ pub fn live_step(
         // contagious disease (constants block in config.rs): transmission from touching bodies, logistic
         // replication, immune clearance. Immunity upkeep is paid every tick, sick or not: that is its cost.
         diet.infection = infection_step(diet.infection, genome.immunity, contact_load, dt);
-        energy.burn((INFECT_DRAIN * diet.infection + IMMUNE_UPKEEP * genome.immunity) * dt);
+        energy.burn((INFECT_DRAIN * diet.infection + IMMUNE_UPKEEP * genome.immunity + DISPLAY_UPKEEP.get() * genome.skin_sat) * dt);
         // toxic load: clear slowly each tick (faster with detox gene). While loaded drains energy + raises disease
         // load; acute death hazard added in the mortality block. Runs in ALL modes so meat/ferment poisons bite
         // even in legacy --no-diet runs.
@@ -4327,19 +4330,20 @@ pub fn live_step(
             && prng.f32() < P_REPRO_CREATURE * (1.0 - niche_pop_start[ni] as f32 / ncap)
         {
             energy.burn(REPRO_COST.get() * (0.7 + 0.6 * k)); // K-parents spend more per child (parent's own energy, paid in decide)
-            // mating mode: cross with nearest genetically-similar mate (assortative -> reproductive
-            // isolation/speciation); else single-parent budding if no compatible mate nearby.
+            // mating mode: cross with the most VIVID genetically-similar mate in reach (assortative -> speciation;
+            // vividness dulled by infection -> choosers pick healthy mates). Distance only breaks exact ties (all
+            // skin_sat 0); any display gap wins across the whole reach. Else budding if no compatible mate nearby.
             let mut child = if gen.mating {
                 let my_sig = signature(genome);
                 let r2 = SOCIAL_RADIUS * SOCIAL_RADIUS;
                 let mate = mate_pool
                     .iter()
-                    .filter(|(e, p, s, _)| *e != entity && ct.translation.distance_squared(*p) < r2 && sig_dist(&my_sig, s) < SOCIAL_SIM)
+                    .filter(|(e, p, s, _, _)| *e != entity && ct.translation.distance_squared(*p) < r2 && sig_dist(&my_sig, s) < SOCIAL_SIM)
                     .min_by(|a, b| {
-                        ct.translation.distance_squared(a.1).partial_cmp(&ct.translation.distance_squared(b.1)).unwrap()
+                        b.4.total_cmp(&a.4).then(ct.translation.distance_squared(a.1).total_cmp(&ct.translation.distance_squared(b.1)))
                     });
                 match mate {
-                    Some((_, _, _, mg)) => Genome::crossover(genome, mg, &mut prng),
+                    Some((_, _, _, mg, _)) => Genome::crossover(genome, mg, &mut prng),
                     None => genome.clone(),
                 }
             } else {

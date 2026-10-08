@@ -2772,7 +2772,7 @@ fn restyle_creatures(
     mut q: Query<(Ref<Genome>, &DietState, &Alive, &mut SickShade, &mut MeshMaterial3d<StandardMaterial>)>,
 ) {
     for (g, diet, alive, mut shade, mut mm) in &mut q {
-        let step = if alive.0 { sick_step(diet.infection) } else { 0 };
+        let step = if alive.0 { sick_step(diet.infection * g.skin_sat) } else { 0 }; // shows only what the display shows: plain creatures look fine
         if !g.is_changed() && step == shade.0 {
             continue;
         }

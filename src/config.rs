@@ -533,6 +533,10 @@ pub static INFECT_SPILL: crate::tune::Knob = crate::tune::Knob::new("INFECT_SPIL
 pub const INFECT_DRAIN: f32 = 0.5;  // energy/sec at full load (fever); BASAL_COST is 0.5
 pub const INFECT_HAZARD: f32 = 0.003; // death/sec at full load
 pub const IMMUNE_UPKEEP: f32 = 0.08; // energy/sec at full immunity, every tick
+// Skin vividness (`skin_sat`) is a display: mates pick the most vivid compatible partner, infection dulls it,
+// so it honestly advertises health. Pigment upkeep is its cost, else it pegs at 1. Below IMMUNE_UPKEEP: a
+// colour is cheaper to keep than an immune system.
+pub static DISPLAY_UPKEEP: crate::tune::Knob = crate::tune::Knob::new("DISPLAY_UPKEEP", 0.05); // energy/sec at full vividness, every tick
 pub const SICK_SENSE_R: f32 = 8.0; // m: range the nearby-sickness brain input sees (smell/cough, a few bodies away)
 // rabbit starvation: carcass usable ENERGY is its FAT (carried per-carcass = prey fatness at death). LEAN
 // meat mostly PROTEIN, converting protein to usable energy/fat needs CARBS (eater's sugar). So eating lean

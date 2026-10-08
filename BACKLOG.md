@@ -106,6 +106,11 @@ live in `config.rs`; the live conversion plan is `SPHERE-PLAN.md`.
 - [ ] Infectious fresh corpses (carrion spillover exists, corpse-to-scavenger contact does not).
 - [x] Sick creatures fade toward a sallow pallor in 3 steps above the 0.1 sick line (body only; eyes/ears/wings keep
       their colour). `SOCIAL_SAFETY` is a `--set` knob for the herd-safety A/B.
+- [x] **Honest health display**: `skin_sat` (vividness) is now a mate display. Mates pick the most vivid compatible
+      partner (nearest breaks ties), infection dulls it, upkeep `DISPLAY_UPKEEP` (knob) is its cost. Neighbours'
+      sick sense and the pallor tint read infection x vividness, so plain creatures look fine while sick.
+- [ ] Herd safety (`SOCIAL_SAFETY`, knob): `kin` sits 0.92-0.96, so it halves nearly every hunt for free. Try
+      `--set=SOCIAL_SAFETY=0` when tuning predation.
 - [x] **GRAZE_CROWD_K deleted** (tools/ab.sh, seeds 1/2/5/9, 20 gens): pop 5171 -> 4392 mean, inside the
       3495..6612 per-seed spread; cover 0.123 -> 0.084 kg/m^2 on every seed, i.e. the real sward now does the
       limiting the penalty used to fake. Also drops a per-tick crowd-grid tally.
