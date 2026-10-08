@@ -57,9 +57,12 @@ live in `config.rs`; the live conversion plan is `SPHERE-PLAN.md`.
       with lava underglow, sized by VEI. God key **V** erupts a VEI 6; `--cap-erupt` frames one in a capture.
 - [x] **Nests as woven bowls** (procedural lathe mesh, straw streaks), dams as earth mounds with side ponds.
 - [x] **Capture tool**: sun re-anchored on the live tick (`--cap-when` was wrong on loaded saves), `--cap-lon`.
-- [ ] Creature close-up capture often frames no creature (target wanders during warm-up); track a living one.
+- [x] `--cap-creature` frames the nearest living LAND creature from its face (`--cap-yaw` swings round it), falling
+      back to any living creature in an all-aquatic world.
 - [ ] Aurora curtains read as green spikes on the limb from orbit; fine at night, odd on a day-side limb.
-- [ ] Tools are not drawn in creatures' grip yet.
+- [x] Carried stone tools show as a flint flake at the jaw, sized by `Brain.tool` quality, hidden below 0.05.
+- [ ] Generation reset rewrites the genome in place but keeps the old body mesh, eyes, ears and flake anchor
+      (`add_creature_visuals` only runs on entities without `Mesh3d`); only colour follows the new genome.
 
 ### Open from this session
 - [~] **Soil carbon starts far from equilibrium**: organic C drained 8 -> ~1.1 kg/m^2 because plant COUNT sits on
@@ -114,7 +117,7 @@ live in `config.rs`; the live conversion plan is `SPHERE-PLAN.md`.
 - [x] **GRAZE_CROWD_K deleted** (tools/ab.sh, seeds 1/2/5/9, 20 gens): pop 5171 -> 4392 mean, inside the
       3495..6612 per-seed spread; cover 0.123 -> 0.084 kg/m^2 on every seed, i.e. the real sward now does the
       limiting the penalty used to fake. Also drops a per-tick crowd-grid tally.
-- [ ] Render tools in creatures' grip (viz) and a nest/dam capture from an evolved builder world.
+- [ ] Nest/dam capture from an evolved builder world.
 - [ ] Weather is ~1.1 ms/tick on 24.6k cells (cloud fbm per cell, already parallel); subsample if it binds.
 - [x] **Planet 2x radius, 4x surface** (a67d657) as a magnified copy; sim at ~4400 creatures: live 23 -> 8 ms,
       predation 9.2 -> 1.2, plant 11.1 -> 4.3, biogeochem 2.0 -> 0.2 (b3a3890), all bit-identical except the

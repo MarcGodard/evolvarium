@@ -19,7 +19,7 @@ pub enum CapWhen {
 pub struct CaptureCfg {
     pub prefix: String,
     pub when: CapWhen,
-    pub yaw: f32,     // --cap-yaw: walk heading (look dir around surface)
+    pub yaw: f32,     // --cap-yaw: walk heading (look dir around surface); with --cap-creature, radians round from its face
     pub off: i64,     // --cap-off: raw sun-tick offset, overrides `when` when nonzero, dials sun angle
     pub pitch: f32,   // --cap-pitch: cam pitch. negative = look down
     pub orbit: bool,  // --cap-orbit: capture from orbit (space) not walk (surface)
@@ -105,7 +105,7 @@ fn force_cam(
     cfg: Res<CaptureCfg>,
     clim: Option<Res<crate::climate::PlanetClimate>>,
     mut q: Query<&mut Transform, (With<Camera3d>, With<crate::camera::OrbitCam>)>,
-    creatures: Query<&Transform, (With<crate::components::Creature>, Without<Camera3d>)>,
+    creatures: Query<(&Transform, &crate::components::Alive), (With<crate::components::Creature>, Without<Camera3d>)>,
 ) {
     if cfg.orrery || cfg.director {
         return; // OrreryCam set in setup_capture_view; the director frames its own shots
@@ -123,23 +123,29 @@ fn force_cam(
             return;
         }
     }
-    // --cap-creature: lock onto the creature nearest homeland, frame it from cap-back units away (slightly up
-    // + along the cap-yaw tangent). Repeated each frame so it tracks the chosen creature through warmup.
+    // --cap-creature: lock onto the LIVING LAND creature nearest homeland (sea picks put the lens underwater), frame
+    // its FACE from cap-back units away, cap-yaw (radians) swinging round it (pi = from behind). Re-picked each
+    // frame so it tracks through warmup.
     if cfg.focus_creature {
         let home = crate::sim::homeland_center();
-        let target = creatures
-            .iter()
-            .map(|t| t.translation)
-            .min_by(|a, b| {
-                let da = (a.normalize_or_zero() - home).length_squared();
-                let db = (b.normalize_or_zero() - home).length_squared();
-                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
-            });
-        if let (Some(target), Ok(mut t)) = (target, q.single_mut()) {
+        let nearest = |land: bool| {
+            creatures
+                .iter()
+                .filter(|(t, a)| a.0 && (!land || !crate::sphere::is_ocean(t.translation.normalize_or_zero())))
+                .min_by(|(a, _), (b, _)| {
+                    let da = (a.translation.normalize_or_zero() - home).length_squared();
+                    let db = (b.translation.normalize_or_zero() - home).length_squared();
+                    da.total_cmp(&db)
+                })
+        };
+        let target = nearest(true).or_else(|| nearest(false)); // all-aquatic world: shoot underwater over nothing
+        if let (Some((ct, _)), Ok(mut t)) = (target, q.single_mut()) {
+            let target = ct.translation;
             let up = target.normalize_or_zero(); // planet-up at the creature
-            let tangent = crate::sphere::heading_tangent(up, cfg.yaw);
+            let face = (ct.rotation * Vec3::Z).reject_from_normalized(up).normalize_or(crate::sphere::heading_tangent(up, 0.0));
+            let dir = Quat::from_axis_angle(up, cfg.yaw) * face;
             let dist = cfg.back.max(2.0);
-            let eye = target + tangent * dist + up * (0.7 * dist); // back + well above to clear grass (3/4 down view)
+            let eye = target + dir * dist + up * (0.45 * dist); // in front + above the grass (low 3/4 view)
             *t = Transform::from_translation(eye).looking_at(target, up);
         }
         return;

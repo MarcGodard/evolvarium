@@ -1871,6 +1871,7 @@ pub fn spawn_world_render(
         eye: meshes.add(Sphere::new(0.5).mesh().ico(1).unwrap()),
         wing: meshes.add(crate::viz::wing_mesh()),
         ear: meshes.add(crate::viz::ear_mesh()),
+        stone: meshes.add(Sphere::new(0.5).mesh().ico(0).unwrap()), // 20 facets: reads as a knapped flake
     });
     // per-form plant mesh library: one silhouette per plant::form (viz::add_plant_visuals picks by genome).
     // Round forms = icospheres; tall/leafy = procedural frond clumps; lily pad = flat disc.
@@ -4984,6 +4985,8 @@ pub fn generation_step(
         brain.attack = 0.0; // clear stale combat intent/reward so a reused entity starts fresh
         brain.defend = 0.0;
         brain.fight_reward = 0.0;
+        brain.tool = 0.0; // the stone is per-life (build.rs): a reused entity does not inherit the last owner's
+        brain.memory.fill(0.0);
         diet.reserves = [RESERVE_REQ; NUTRIENTS]; // fresh life starts with stocked reserves
         diet.g = 0.0;
         diet.age = if desync { (rng.f32() * 600.0) as u32 } else { 0 };

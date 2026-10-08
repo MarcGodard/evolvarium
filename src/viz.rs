@@ -176,8 +176,7 @@ impl Plugin for VizPlugin {
             .add_systems(
                 Update,
                 (
-                    restyle_creatures,
-                    add_creature_visuals,
+                    (restyle_creatures, add_creature_visuals, show_tools),
                     toggle_sensors,
                     draw_sensors,
                     (add_plant_visuals, size_plants, add_grass_visuals, add_seaweed_visuals, size_creatures, flap_wings),
@@ -670,6 +669,7 @@ pub struct CreatureParts {
     pub eye: Handle<Mesh>,
     pub wing: Handle<Mesh>, // shared flapping-wing mesh (fliers only)
     pub ear: Handle<Mesh>,  // shared pointed-ear cone (all creatures, sized by `hearing` gene)
+    pub stone: Handle<Mesh>, // carried stone tool, held at the mouth (HeldTool)
 }
 
 // Skin color + body-plan scale from genome (M4). Shared by add_creature_visuals + restyle_creatures ->
@@ -745,6 +745,7 @@ fn add_creature_visuals(
         commands.entity(e).insert((Mesh3d(body_mesh), MeshMaterial3d(mat_cache.get(&mut materials, color, matv::PLAIN)), SickShade(0)));
         spawn_eyes(&mut commands, &mut mat_cache, e, g, &parts.eye, &mut materials);
         spawn_ears(&mut commands, &mut mat_cache, e, g, &parts.ear, &mut materials); // all creatures, sized by hearing gene
+        spawn_tool(&mut commands, &mut mat_cache, e, g, &parts.stone, &mut materials); // hidden until it knaps one
         spawn_wings(&mut commands, &mut mat_cache, e, g, &parts.wing, &mut materials); // fliers only (gene + wing loading)
     }
 }
@@ -825,6 +826,57 @@ fn spawn_ears(commands: &mut Commands, cache: &mut MatCache, parent: Entity, g: 
             ))
             .id();
         commands.entity(parent).add_child(ear);
+    }
+}
+
+// Carried stone tool (Brain.tool, build.rs): one hidden flake per creature, gripped in the jaw below the eyes.
+// Spawned for all so knapping mid-life needs no archetype move (see SickShade); show_tools toggles + sizes it.
+#[derive(Component)]
+struct HeldTool(f32); // full-quality scale, from head size
+
+// Quality below this is a worn-out chip: not drawn.
+const TOOL_SHOWN: f32 = 0.05;
+
+fn spawn_tool(commands: &mut Commands, cache: &mut MatCache, parent: Entity, g: &Genome, stone: &Handle<Mesh>, materials: &mut Assets<StandardMaterial>) {
+    let pheno = crate::morph::develop(&g.body);
+    let m = crate::morph::Morphometrics::from_phenotype(&pheno);
+    let center_y = (m.bbox_min.y + m.bbox_max.y) * 0.5; // body mesh shifts verts down by this
+    let a = crate::morph::eye_anchor(&pheno);
+    let flint = cache.get(materials, Color::srgb(0.50, 0.47, 0.43), matv::PLAIN);
+    let size = a.radius * 0.9;
+    let tool = commands
+        .spawn((
+            Mesh3d(stone.clone()),
+            MeshMaterial3d(flint),
+            Transform {
+                translation: Vec3::new(0.0, (a.center.y - center_y) - a.radius * 0.55, a.center.z + a.radius * 0.95),
+                rotation: Quat::from_rotation_y(0.6) * Quat::from_rotation_z(0.25), // held across the jaw, tilted
+                scale: Vec3::ZERO,
+            },
+            Visibility::Hidden,
+            HeldTool(size),
+            DETAIL_RANGE,
+            bevy::light::NotShadowCaster,
+        ))
+        .id();
+    commands.entity(parent).add_child(tool);
+}
+
+// Flake grows with quality (0.5..1.1 of HeldTool), so a fresh knap reads bigger than a worn chip.
+fn show_tools(brains: Query<&crate::components::Brain>, mut q: Query<(&HeldTool, &ChildOf, &mut Visibility, &mut Transform)>) {
+    for (held, parent, mut vis, mut tf) in &mut q {
+        let quality = brains.get(parent.parent()).map_or(0.0, |b| b.tool);
+        let want = if quality >= TOOL_SHOWN { Visibility::Inherited } else { Visibility::Hidden };
+        if *vis != want {
+            *vis = want;
+        }
+        if want == Visibility::Inherited {
+            let s = held.0 * (0.5 + 0.6 * quality);
+            let scale = Vec3::new(s, s * 0.45, s * 0.75); // flat flake, longer than wide
+            if tf.scale.distance_squared(scale) > 1e-6 {
+                tf.scale = scale;
+            }
+        }
     }
 }
 

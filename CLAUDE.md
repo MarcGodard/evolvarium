@@ -10,11 +10,10 @@ Replacing the phenomenological model with conserved chemistry + real physical la
 
 Until this note is removed:
 
-- **Balance runs are back ON.** A change that moves the equilibrium needs a headless run showing it REACHES one and holds. It need not match old numbers, which this phase deliberately invalidates.
+- **Balance runs are OFF while tuning.** Everything will still move, so verify with tests, the `--gens=1` smoke and captures. Expose new balance numbers as `--set` knobs (`src/tune.rs`) instead of tuning them by long runs. Multi-seed A/B (`tools/ab.sh`) only when asked.
 - **Conservation is the phase gate.** Any change touching matter carries a unit test asserting world element totals hold across ticks. A path that creates or destroys matter is a bug, not a tuning knob.
 - **Prefer deleting a constant over adding one.** Replace invented constants with law (Kleiber, Liebig, Archimedes, Stefan-Boltzmann). A new magic number needs a reason it is not derivable.
 - Baseline for comparison: `--gens=5` on seeds 1/5/9, captured before the retrofit began.
-- Render-only work no longer skips balance verification.
 
 ## Commits
 

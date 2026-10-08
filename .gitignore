@@ -8,3 +8,5 @@ creature-seed.json
 evolved-legged.json
 evolved-diversity-coevo.json
 evolved-hunters.json
+# O-key world saves (100MB+ once the planet fills): local only, over the GitHub file limit
+savestate.json
