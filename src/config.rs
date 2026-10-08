@@ -269,12 +269,6 @@ pub const GRASS_FORAGE_IDX: usize = 0;   // grass nutrient axis (land grazers tu
 pub const SEAWEED_FORAGE_IDX: usize = 1; // kelp nutrient axis (sea grazers tune uptake[1])
 pub const GRAZE_NUTRIENT: f32 = 0.30;    // reserve refill/sec per unit uptake while grazing (> NUTRIENT_USE so tuned gut stays fed)
 pub const GRAZE_FULL: f32 = 38.0;        // grazing tops energy to here (ABOVE REPRO_THRESHOLD 30) so tuned grazer builds breeding surplus, not just clings at threshold
-// Density-dependent grazing: grass+seaweed income drops where creatures pack into a cell. K = extra creatures/
-// cell (above the lone grazer) at which trickle income halves; lower = stronger penalty. Counted on grid::crowd().
-// NOTE: this alone does NOT cap population at a natural carrying capacity (headless: pop still climbs to
-// CREATURE_CAP because plant biomass is non-depletable, flat ~4220 at any pop). It's mild local-density realism.
-// A real food-limited equilibrium needs depletable plant biomass (lower regrowth/cap) -- separate task.
-pub const GRAZE_CROWD_K: f32 = 2.0;
 
 // --- rocky land: scattered boulders (render-only dressing). Spawned once on rocky highland so rocky
 // terrain reads as field of stone with grass between rocks. Static -> no per-frame cost. ---

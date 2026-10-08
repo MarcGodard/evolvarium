@@ -92,8 +92,9 @@ live in `config.rs`; the live conversion plan is `SPHERE-PLAN.md`.
       cached morph, so births were charged the wrong mass; (6) a restored save sealed against its own mint
       tallies. God key K now starves rather than flipping Alive (that skipped carrion and despawn).
 - [ ] God keys B and P (seed bursts) still spawn unfunded bodies (windowed only).
-- [ ] GRAZE_CROWD_K crowding penalty is now probably redundant (a real sward depletes locally); candidate for
-      deletion after a multi-seed A/B.
+- [x] **GRAZE_CROWD_K deleted** (tools/ab.sh, seeds 1/2/5/9, 20 gens): pop 5171 -> 4392 mean, inside the
+      3495..6612 per-seed spread; cover 0.123 -> 0.084 kg/m^2 on every seed, i.e. the real sward now does the
+      limiting the penalty used to fake. Also drops a per-tick crowd-grid tally.
 - [ ] Render tools in creatures' grip (viz) and a nest/dam capture from an evolved builder world.
 - [ ] Weather is ~1.1 ms/tick on 24.6k cells (cloud fbm per cell, already parallel); subsample if it binds.
 - [x] **Planet 2x radius, 4x surface** (a67d657) as a magnified copy; sim at ~4400 creatures: live 23 -> 8 ms,

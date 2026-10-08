@@ -3312,15 +3312,6 @@ pub fn live_step(
     let (cstart, cidx) = bin_csr(&cre_snap.iter().map(|c| food_bin(c.1)).collect::<Vec<u32>>());
     let (vstart, vidx) = bin_csr(&voice_snap.iter().map(|v| food_bin(v.1)).collect::<Vec<u32>>());
     let max_body_r = cre_snap.iter().map(|c| c.4).fold(0.0f32, f32::max);
-    // per-cell creature crowding -> density-dependent grazing income (grass+seaweed graze drop where creatures
-    // pack in). Makes carrying capacity EMERGENT (food self-limits pop below CREATURE_CAP) instead of riding the
-    // hard cap. Binned on the COARSE crowd grid (grid::CROWD_N, the scale GRAZE_CROWD_K was tuned at); own
-    // cell counts self (subtract 1 in the factor).
-    let crowd_grid = crate::grid::crowd();
-    let mut crowd = vec![0.0f32; crowd_grid.len()];
-    for (_, pos, _, _, _) in &cre_snap {
-        crowd[crowd_grid.cell(*pos)] += 1.0;
-    }
     // per-niche live counts: continuous repro tapers on the breeder's OWN niche fill (NICHE_CAP), not global
     // pop -> each habitat self-limits independently so no niche grabs the shared cap (was winner-take-all).
     let mut niche_pop = [0usize; crate::niche::NICHE_COUNT];
@@ -4144,15 +4135,13 @@ pub fn live_step(
             // Kleiber on the STAPLE: a bigger mouth and gut crop more forage per second (M^0.75), the same
             // law already applied to eating food items. Without it, size cost metabolism and bought nothing.
             let graze_scale = crate::thermo::intake_scale(body_kg) as f32;
-            // crowding penalty: shared trickle thins where grazers pack in (density-dependent carrying cap).
-            let crowd_factor = 1.0 / (1.0 + (crowd[crowd_grid.cell(np)] - 1.0).max(0.0) / GRAZE_CROWD_K);
             // the carpet is a REAL standing crop (chem SoilCell.cover): what is here to crop sets the intake, and
             // the cropped kg leave the sward in apply. Snapshot read: several grazers in one cell this tick may
             // be granted energy for slightly more than remains; graze_cover clamps the matter, which is exact.
             let gcell = grid_cell(np);
             let cover = crate::chem::graze_response(bio_r.cover01(gcell));
             if !crate::sphere::is_ocean(gdir) && cover > 0.0 {
-                let intake = CARPET_GRAZE * graze_scale * cover * dt * crowd_factor;
+                let intake = CARPET_GRAZE * graze_scale * cover * dt;
                 bat.cover_grazes.push((idx, gcell, (intake * herbivory / COVER_ENERGY_PER_KG) as f64)); // a carnivore's mouth crops little
                 let gain = intake * herbivory * genome.uptake[GRASS_FORAGE_IDX]; // grass: grazer staple where it's grassy
                 let hab = cover; // nutrient refill below scales with the crop actually there
@@ -4182,7 +4171,7 @@ pub fn live_step(
                 // exponential light attenuation without inventing a photic-depth constant.
                 let _ = depth; // photic falloff now shapes kelp GROWTH (chem::cover_habitat), so the crop carries it
                 let band = crate::chem::graze_response(bio_r.cover01(gcell));
-                let intake = CARPET_GRAZE * graze_scale * band * dt * crowd_factor;
+                let intake = CARPET_GRAZE * graze_scale * band * dt;
                 bat.cover_grazes.push((idx, gcell, (intake * herbivory / COVER_ENERGY_PER_KG) as f64));
                 let gain = intake * herbivory * genome.uptake[SEAWEED_FORAGE_IDX];
                 energy.add_sugar(gain, SUGAR_CAP, fat_max);
